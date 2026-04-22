@@ -101,13 +101,6 @@ func (s *Scheduler) tick(ctx context.Context) {
 	normalCutoff := time.Now().Add(-s.policy.NormalInterval)
 	s.requeueStalePages(ctx, normalCutoff, storage.PriorityRecrawl, 100)
 
-	// Reset jobs that have been stuck in in_progress for too long.
-	if n, err := s.store.ResetStalledJobs(ctx, 10*time.Minute); err != nil {
-		s.logger.Error("failed to reset stalled jobs", "error", err)
-	} else if n > 0 {
-		s.logger.Info("reset stalled jobs", "count", n)
-	}
-
 	s.logger.Debug("scheduler tick complete")
 }
 
@@ -128,7 +121,7 @@ func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, 
 		urls = append(urls, p.URL)
 	}
 
-	if err := s.frontier.AddBatch(ctx, urls, 0, priority); err != nil {
+	if err := s.frontier.AddBatchDirect(ctx, urls, 0, priority); err != nil {
 		s.logger.Error("failed to re-enqueue stale pages",
 			"error", err,
 			"count", len(urls),

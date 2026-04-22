@@ -193,7 +193,7 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 		priority = storage.PriorityNormal
 	}
 
-	if err := h.frontier.AddBatch(r.Context(), req.URLs, 0, priority); err != nil {
+	if err := h.frontier.AddBatchDirect(r.Context(), req.URLs, 0, priority); err != nil {
 		h.logger.Error("failed to enqueue URLs", "error", err, "count", len(req.URLs))
 		writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
 		return
@@ -209,13 +209,7 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 
 // GetQueue returns the current crawl queue status.
 func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.store.GetQueueStats(r.Context())
-	if err != nil {
-		h.logger.Error("failed to get queue stats", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to get queue stats")
-		return
-	}
-
+	stats := h.frontier.Stats()
 	writeSuccess(w, stats)
 }
 

@@ -1,6 +1,6 @@
 // Package frontier implements a priority-based URL queue with deduplication
-// and domain-level fairness. It serves as the bridge between the storage
-// layer (persistent queue in SQLite) and the crawler workers.
+// and domain-level fairness. It wraps the in-memory queue and handles
+// URL normalization and deduplication against already-crawled pages.
 package frontier
 
 import (
@@ -9,22 +9,24 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
-	"sync"
 
+	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
 // Frontier manages the URL crawl queue, providing deduplication and
 // priority-based dispatching of URLs to crawler workers.
 type Frontier struct {
+	queue  *queue.Queue
 	store  storage.Storage
 	logger *slog.Logger
-	mu     sync.Mutex
 }
 
-// New creates a new Frontier backed by the given storage.
-func New(store storage.Storage, logger *slog.Logger) *Frontier {
+// New creates a new Frontier backed by the given in-memory queue
+// and storage (used only for checking already-crawled pages).
+func New(q *queue.Queue, store storage.Storage, logger *slog.Logger) *Frontier {
 	return &Frontier{
+		queue:  q,
 		store:  store,
 		logger: logger.With("component", "frontier"),
 	}
@@ -45,37 +47,44 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 		return fmt.Errorf("checking existing page: %w", err)
 	}
 	if existing != nil {
-		return nil // Already crawled, skip.
+		// Already crawled — mark as seen so the queue skips it too.
+		f.queue.MarkSeen(normalized)
+		return nil
 	}
 
-	job := &storage.CrawlJob{
+	f.queue.Enqueue(&queue.Job{
 		URL:      normalized,
 		Domain:   domain,
 		Depth:    depth,
 		Priority: priority,
-	}
+	})
 
-	return f.store.EnqueueURL(ctx, job)
+	return nil
 }
 
-// AddBatch enqueues multiple URLs for crawling in a single transaction.
-// Invalid or already-known URLs are silently skipped.
+// AddBatch enqueues multiple URLs for crawling, skipping URLs that have
+// already been crawled (exist in the pages table). Use this for discovered
+// links during crawling to avoid re-fetching known pages.
 func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priority int) error {
 	if len(rawURLs) == 0 {
 		return nil
 	}
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	var jobs []*storage.CrawlJob
+	var jobs []*queue.Job
 	for _, rawURL := range rawURLs {
 		normalized, domain, err := normalizeURL(rawURL)
 		if err != nil {
 			continue
 		}
 
-		jobs = append(jobs, &storage.CrawlJob{
+		// Skip URLs already crawled in a previous session.
+		existing, _ := f.store.GetPageByURL(ctx, normalized)
+		if existing != nil {
+			f.queue.MarkSeen(normalized)
+			continue
+		}
+
+		jobs = append(jobs, &queue.Job{
 			URL:      normalized,
 			Domain:   domain,
 			Depth:    depth,
@@ -87,47 +96,67 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 		return nil
 	}
 
-	if err := f.store.EnqueueURLs(ctx, jobs); err != nil {
-		return fmt.Errorf("batch enqueue of %d URLs: %w", len(jobs), err)
+	added := f.queue.EnqueueBatch(jobs)
+	if added > 0 {
+		f.logger.Debug("batch enqueued URLs",
+			"submitted", len(jobs),
+			"added", added,
+			"depth", depth,
+			"priority", priority,
+		)
 	}
-
-	f.logger.Debug("batch enqueued URLs",
-		"count", len(jobs),
-		"depth", depth,
-		"priority", priority,
-	)
 	return nil
 }
 
-// Next retrieves the next batch of URLs to crawl, ordered by priority.
-func (f *Frontier) Next(ctx context.Context, limit int) ([]*storage.CrawlJob, error) {
-	jobs, err := f.store.DequeueURLs(ctx, limit)
-	if err != nil {
-		return nil, fmt.Errorf("dequeuing URLs: %w", err)
+// AddBatchDirect enqueues URLs without checking the pages table.
+// Use this for seed injection (startup), scheduler re-crawls, and
+// API-requested crawls — cases where we explicitly want to (re)crawl.
+func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, priority int) error {
+	if len(rawURLs) == 0 {
+		return nil
 	}
-	return jobs, nil
-}
 
-// NextExcluding retrieves the next batch of URLs to crawl, skipping any
-// jobs belonging to the excluded domains. This allows workers to avoid
-// domains they know are currently rate-limited.
-func (f *Frontier) NextExcluding(ctx context.Context, limit int, excludedDomains []string) ([]*storage.CrawlJob, error) {
-	jobs, err := f.store.DequeueURLsExcluding(ctx, limit, excludedDomains)
-	if err != nil {
-		return nil, fmt.Errorf("dequeuing URLs (excluding %d domains): %w", len(excludedDomains), err)
+	var jobs []*queue.Job
+	for _, rawURL := range rawURLs {
+		normalized, domain, err := normalizeURL(rawURL)
+		if err != nil {
+			continue
+		}
+
+		jobs = append(jobs, &queue.Job{
+			URL:      normalized,
+			Domain:   domain,
+			Depth:    depth,
+			Priority: priority,
+		})
 	}
-	return jobs, nil
+
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	added := f.queue.EnqueueBatch(jobs)
+	if added > 0 {
+		f.logger.Debug("batch enqueued URLs (direct)",
+			"submitted", len(jobs),
+			"added", added,
+			"depth", depth,
+			"priority", priority,
+		)
+	}
+	return nil
 }
 
-// Complete marks a crawl job as done or failed.
-func (f *Frontier) Complete(ctx context.Context, jobID int64, crawlErr error) error {
-	return f.store.CompleteJob(ctx, jobID, crawlErr)
+// Dequeue finds the next job whose domain is ready according to readyFn.
+// The entire operation happens in memory — no database calls.
+// Returns nil if no ready job exists.
+func (f *Frontier) Dequeue(readyFn queue.DomainReadyFunc) *queue.Job {
+	return f.queue.Dequeue(readyFn)
 }
 
-// Return puts a claimed job back into the pending state so it can be
-// picked up by another worker or retried later.
-func (f *Frontier) Return(ctx context.Context, jobID int64) error {
-	return f.store.ReturnJob(ctx, jobID)
+// Stats returns the current queue statistics.
+func (f *Frontier) Stats() queue.Stats {
+	return f.queue.Stats()
 }
 
 // normalizeURL parses and normalizes a URL for consistent deduplication.

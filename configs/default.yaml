@@ -5,7 +5,7 @@ crawler:
   # Number of concurrent crawl workers
   workers: 100
   # Maximum link depth to follow from seed pages
-  max_depth: 1
+  max_depth: 3
   # HTTP request timeout per page
   request_timeout: 10s
   # Minimum delay between requests to the same domain
@@ -59,6 +59,7 @@ seeds:
     start_urls:
       - https://www.reddit.com/
       - https://www.reddit.com/r/popular/
+      - https://www.reddit.com/r/uruguay/
 
   - domain: twitter.com
     priority: 100
@@ -105,12 +106,17 @@ seeds:
     start_urls:
       - https://www.eldorado.com.uy/
 
-  # --- Noticias ---
-  
-  - domain: infobae.com
+  - domain: eldorado.com.uy
     priority: 100
     start_urls:
-      - https://www.infobae.com/
+      - https://www.eldorado.com.uy/
+
+  # --- Noticias ---
+  
+  - domain: www.montevideo.com.uy
+    priority: 100
+    start_urls:
+      - https://www.montevideo.com.uy/
 
   - domain: vandal.elespanol.com
     priority: 100
@@ -137,6 +143,16 @@ seeds:
     start_urls:
       - https://hytale.com
 
+  - domain: hytalecharts.com
+    priority: 100
+    start_urls:
+      - https://hytalecharts.com/
+
+  - domain: marvelrivals.gg
+    priority: 100
+    start_urls:
+      - https://marvelrivals.gg/
+
   - domain: warframe.com
     priority: 100
     start_urls:
@@ -146,7 +162,7 @@ seeds:
   - domain: fandom.com
     priority: 100
     start_urls:
-      - https://warframe.fandom.com/es/wiki
+      - https://warframe.fandom.com/es
       - https://warframe.fandom.com/wiki
 
   - domain: overframe.gg
@@ -157,6 +173,31 @@ seeds:
   # --- Entertainment ---
   - domain: twitch.tv
     priority: 100
+
+  - domain: steampowered.com
+    priority: 100
+    start_urls:
+      - https://store.steampowered.com/
+
+  - domain: epicgames.com
+    priority: 100
+    start_urls:
+      - https://www.epicgames.com
+
+  - domain: crunchyroll.com
+    priority: 100
+    start_urls:
+      - https://www.crunchyroll.com
+
+  - domain: somoskudasai.com
+    priority: 100
+    start_urls:
+      - https://somoskudasai.com/
+
+  - domain: jkanime.net
+    priority: 100
+    start_urls:
+      - https://jkanime.net/
 
   - domain: youtube.com
     priority: 100

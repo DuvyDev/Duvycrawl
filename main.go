@@ -17,6 +17,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/crawler"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
+	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
 	"github.com/DuvyDev/Duvycrawl/internal/scheduler"
 	"github.com/DuvyDev/Duvycrawl/internal/seeds"
@@ -60,7 +61,8 @@ func run() error {
 	defer store.Close()
 
 	// --- Initialize Components ---
-	front := frontier.New(store, logger)
+	crawlQueue := queue.New()
+	front := frontier.New(crawlQueue, store, logger)
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay)
 	defer limiter.Close()
 
@@ -164,6 +166,10 @@ func initLogger(cfg config.LoggingConfig) *slog.Logger {
 // seedDefaultDomains registers seed domains and enqueues their start URLs.
 // Seeds are read from the YAML config. If none are defined, the built-in
 // defaults from internal/seeds are used as a fallback.
+//
+// Domain registration (in SQLite) only happens once, but seed URLs are
+// always enqueued into the in-memory queue on every startup so crawling
+// resumes immediately.
 func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
 	// Build the seed list: prefer config, fall back to hardcoded defaults.
 	var seedList []config.SeedConfig
@@ -183,7 +189,8 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 		logger.Info("no seeds in config, using built-in defaults", "count", len(seedList))
 	}
 
-	seeded := 0
+	registered := 0
+	enqueued := 0
 	for _, seed := range seedList {
 		// Apply default priority if not set.
 		priority := seed.Priority
@@ -191,32 +198,33 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 			priority = 100
 		}
 
-		// Check if this domain is already registered as a seed.
+		// Register the domain as a seed (only if not already registered).
 		existing, err := store.GetDomain(ctx, seed.Domain)
 		if err != nil {
 			return fmt.Errorf("checking seed domain %q: %w", seed.Domain, err)
 		}
 
-		if existing != nil && existing.IsSeed {
-			continue // Already seeded.
+		if existing == nil || !existing.IsSeed {
+			domain := &storage.Domain{
+				Domain: seed.Domain,
+				IsSeed: true,
+			}
+			if err := store.UpsertDomain(ctx, domain); err != nil {
+				return fmt.Errorf("upserting seed domain %q: %w", seed.Domain, err)
+			}
+			registered++
 		}
 
-		// Register the domain as a seed.
-		domain := &storage.Domain{
-			Domain: seed.Domain,
-			IsSeed: true,
-		}
-		if err := store.UpsertDomain(ctx, domain); err != nil {
-			return fmt.Errorf("upserting seed domain %q: %w", seed.Domain, err)
-		}
-
-		// Enqueue start URLs.
+		// Always enqueue start URLs into the in-memory queue.
+		// The queue's deduplication set prevents double-processing within
+		// the same session, and already-crawled pages will be re-crawled
+		// only if their content has changed (via content hash).
 		startURLs := seed.StartURLs
 		if len(startURLs) == 0 {
 			startURLs = []string{"https://" + seed.Domain + "/"}
 		}
 
-		if err := front.AddBatch(ctx, startURLs, 0, priority); err != nil {
+		if err := front.AddBatchDirect(ctx, startURLs, 0, priority); err != nil {
 			logger.Warn("failed to enqueue seed URLs",
 				"domain", seed.Domain,
 				"error", err,
@@ -224,12 +232,13 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 			continue
 		}
 
-		seeded++
+		enqueued++
 	}
 
-	if seeded > 0 {
-		logger.Info("seeded domains", "count", seeded)
-	}
+	logger.Info("seeded domains",
+		"new_domains", registered,
+		"enqueued", enqueued,
+	)
 
 	return nil
 }

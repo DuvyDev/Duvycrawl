@@ -11,6 +11,7 @@ import (
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
+	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
@@ -96,13 +97,6 @@ func (e *Engine) Start(ctx context.Context) {
 		}
 	}
 
-	// Reset stalled jobs from previous runs.
-	if n, err := e.store.ResetStalledJobs(ctx, 5*time.Minute); err != nil {
-		e.logger.Error("failed to reset stalled jobs", "error", err)
-	} else if n > 0 {
-		e.logger.Info("reset stalled jobs", "count", n)
-	}
-
 	// Launch workers.
 	for i := range e.cfg.Workers {
 		e.wg.Add(1)
@@ -145,23 +139,19 @@ func (e *Engine) Stats() (crawled, errored int64) {
 	return e.pagesCrawled.Load(), e.pagesErrored.Load()
 }
 
-// workerBatchSize is the number of jobs a worker dequeues at once.
-// The worker picks the first rate-limit-ready job from the batch and
-// returns the rest, avoiding repeated DB round-trips for domain skipping.
-const workerBatchSize = 10
-
 // worker is the main loop for a single crawler worker goroutine.
-// It uses batch dequeue + in-memory domain selection to maximize
-// parallelism while minimizing SQLite contention. Each cycle:
-//  1. Dequeue a batch of jobs (1 SQL transaction)
-//  2. Scan the batch in memory for a job whose domain is ready (TryWait)
-//  3. Return the unused jobs (1 SQL transaction)
-//  4. Process the selected job
+// The entire domain-selection logic happens in memory via the queue's
+// Dequeue method — no database round-trips in the scheduling hot path.
 func (e *Engine) worker(ctx context.Context, id int) {
 	defer e.wg.Done()
 
 	logger := e.logger.With("worker", id)
 	logger.Debug("worker started")
+
+	// readyFn is passed to the queue to check rate limits in-memory.
+	readyFn := func(domain string) bool {
+		return e.limiter.TryWait(domain)
+	}
 
 	for {
 		select {
@@ -171,48 +161,11 @@ func (e *Engine) worker(ctx context.Context, id int) {
 		default:
 		}
 
-		// 1. Dequeue a batch — one DB transaction for multiple jobs.
-		jobs, err := e.frontier.Next(ctx, workerBatchSize)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			logger.Error("failed to dequeue jobs", "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		if len(jobs) == 0 {
-			// No work available — wait before checking again.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-				continue
-			}
-		}
-
-		// 2. Scan the batch in memory for a job whose domain is ready.
-		var selected *storage.CrawlJob
-		var returnJobs []*storage.CrawlJob
-
-		for _, job := range jobs {
-			if selected == nil && e.limiter.TryWait(job.Domain) {
-				selected = job
-			} else {
-				returnJobs = append(returnJobs, job)
-			}
-		}
-
-		// 3. Return unused jobs to the queue.
-		for _, job := range returnJobs {
-			if err := e.frontier.Return(ctx, job.ID); err != nil {
-				logger.Warn("failed to return unused job", "error", err, "job_id", job.ID)
-			}
-		}
-
-		// 4. If no domain was ready, sleep briefly and retry.
-		if selected == nil {
+		// Ask the queue for a job from any ready domain.
+		// This is entirely in-memory — O(domains), zero DB calls.
+		job := e.frontier.Dequeue(readyFn)
+		if job == nil {
+			// No ready work — wait before checking again.
 			select {
 			case <-ctx.Done():
 				return
@@ -225,13 +178,12 @@ func (e *Engine) worker(ctx context.Context, id int) {
 			return
 		}
 
-		// 5. Process the selected job.
-		e.processJob(ctx, logger, selected)
+		e.processJob(ctx, logger, job)
 	}
 }
 
 // processJob handles the complete lifecycle of crawling a single URL.
-func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *storage.CrawlJob) {
+func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue.Job) {
 	logger = logger.With(
 		"url", job.URL,
 		"domain", job.Domain,
@@ -241,11 +193,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *stora
 	// Check robots.txt if enabled.
 	if e.cfg.RespectRobots && !e.robots.IsAllowed(ctx, job.URL, job.Domain) {
 		logger.Debug("blocked by robots.txt")
-		e.frontier.Complete(ctx, job.ID, nil) // Mark as done, not an error.
 		return
 	}
-
-	// Rate limit already checked via TryWait in the worker loop.
 
 	// Fetch the page.
 	logger.Debug("fetching page")
@@ -253,21 +202,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *stora
 	if err != nil {
 		e.pagesErrored.Add(1)
 		logger.Warn("fetch failed", "error", err)
-
-		// Retry logic: re-enqueue if under max retries.
-		if job.Retries < e.cfg.MaxRetries {
-			e.frontier.Complete(ctx, job.ID, err)
-		} else {
-			logger.Warn("max retries reached, dropping URL", "retries", job.Retries)
-			e.frontier.Complete(ctx, job.ID, err)
-		}
 		return
 	}
 
 	// Skip non-2xx responses.
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		logger.Debug("non-2xx status", "status", result.StatusCode)
-		e.frontier.Complete(ctx, job.ID, fmt.Errorf("HTTP %d", result.StatusCode))
 		return
 	}
 
@@ -276,7 +216,6 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *stora
 	if err != nil {
 		e.pagesErrored.Add(1)
 		logger.Warn("parse failed", "error", err)
-		e.frontier.Complete(ctx, job.ID, err)
 		return
 	}
 
@@ -298,7 +237,6 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *stora
 	if err := e.store.UpsertPage(ctx, page); err != nil {
 		e.pagesErrored.Add(1)
 		logger.Error("failed to store page", "error", err)
-		e.frontier.Complete(ctx, job.ID, err)
 		return
 	}
 
@@ -316,9 +254,6 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *stora
 
 	// Update domain stats.
 	e.updateDomainStats(ctx, job.Domain, result.Duration)
-
-	// Mark the job as complete.
-	e.frontier.Complete(ctx, job.ID, nil)
 }
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.

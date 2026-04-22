@@ -37,9 +37,11 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	// SQLite works best with limited concurrency. One writer, multiple readers.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// WAL mode supports concurrent reads + 1 writer. With the crawl queue
+	// moved to an in-memory structure, SQLite only handles page storage and
+	// FTS search, so higher concurrency is safe and beneficial.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0) // Connections never expire.
 
 	// Verify the connection works.
