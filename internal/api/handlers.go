@@ -93,7 +93,9 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 
 	offset := (page - 1) * limit
 
-	results, total, err := h.store.SearchPages(r.Context(), query, limit, offset)
+	lang := r.URL.Query().Get("lang")
+
+	results, total, err := h.store.SearchPages(r.Context(), query, limit, offset, lang)
 	if err != nil {
 		h.logger.Error("search failed", "query", query, "error", err)
 		writeError(w, http.StatusInternalServerError, "search failed")
@@ -211,6 +213,56 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
 	stats := h.frontier.Stats()
 	writeSuccess(w, stats)
+}
+
+// --- Image Search ---
+
+type imageSearchResponse struct {
+	Query   string                      `json:"query"`
+	Total   int                         `json:"total"`
+	Page    int                         `json:"page"`
+	Limit   int                         `json:"limit"`
+	Results []storage.ImageSearchResult `json:"results"`
+}
+
+// SearchImages performs a full-text search over image metadata.
+func (h *Handlers) SearchImages(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "missing required query parameter 'q'")
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	offset := (page - 1) * limit
+
+	results, total, err := h.store.SearchImages(r.Context(), query, limit, offset)
+	if err != nil {
+		h.logger.Error("image search failed", "query", query, "error", err)
+		writeError(w, http.StatusInternalServerError, "image search failed")
+		return
+	}
+
+	if results == nil {
+		results = []storage.ImageSearchResult{}
+	}
+
+	writeJSON(w, http.StatusOK, imageSearchResponse{
+		Query:   query,
+		Total:   total,
+		Page:    page,
+		Limit:   limit,
+		Results: results,
+	})
 }
 
 // --- Seeds ---

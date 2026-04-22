@@ -22,7 +22,16 @@ type Storage interface {
 
 	// SearchPages performs a full-text search and returns paginated results.
 	// Returns the matching results and the total count of matches.
-	SearchPages(ctx context.Context, query string, limit, offset int) ([]SearchResult, int, error)
+	// If lang is non-empty, results in that language are boosted in ranking.
+	SearchPages(ctx context.Context, query string, limit, offset int, lang string) ([]SearchResult, int, error)
+
+	// --- Image Operations ---
+
+	// UpsertImages inserts or updates image records in bulk.
+	UpsertImages(ctx context.Context, images []ImageRecord) error
+
+	// SearchImages performs a full-text search over image metadata.
+	SearchImages(ctx context.Context, query string, limit, offset int) ([]ImageSearchResult, int, error)
 
 	// GetStalePages returns pages that were crawled before the given timestamp,
 	// suitable for re-crawling.

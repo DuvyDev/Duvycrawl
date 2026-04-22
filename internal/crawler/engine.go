@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -221,14 +222,28 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Compute content hash for change detection.
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(parsed.Content)))
+	pageURL := result.FinalURL
+	if parsed.Canonical != "" {
+		if canonicalURL, canonicalDomain, err := frontier.CanonicalizeURL(parsed.Canonical); err == nil && canonicalDomain == job.Domain {
+			pageURL = canonicalURL
+		}
+	}
+	if normalizedURL, _, err := frontier.CanonicalizeURL(pageURL); err == nil {
+		pageURL = normalizedURL
+	}
+
+	// Infer region from TLD if not already known.
+	region := inferRegion(job.Domain)
 
 	// Store the page.
 	page := &storage.Page{
-		URL:         result.FinalURL,
+		URL:         pageURL,
 		Domain:      job.Domain,
 		Title:       truncateString(parsed.Title, 500),
 		Description: truncateString(parsed.Description, 1000),
 		Content:     parsed.Content,
+		Language:    parsed.Language,
+		Region:      region,
 		StatusCode:  result.StatusCode,
 		ContentHash: contentHash,
 		CrawledAt:   time.Now().UTC(),
@@ -243,9 +258,34 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	e.pagesCrawled.Add(1)
 	logger.Info("page crawled successfully",
 		"title", page.Title,
+		"lang", page.Language,
+		"region", region,
 		"links_found", len(parsed.Links),
+		"images_found", len(parsed.Images),
 		"duration", result.Duration,
 	)
+
+	// Store extracted images.
+	if len(parsed.Images) > 0 {
+		now := time.Now().UTC()
+		var imageRecords []storage.ImageRecord
+		for _, img := range parsed.Images {
+			imageRecords = append(imageRecords, storage.ImageRecord{
+				URL:       img.URL,
+				PageURL:   pageURL,
+				Domain:    job.Domain,
+				AltText:   truncateString(img.Alt, 500),
+				Title:     truncateString(img.Title, 500),
+				Context:   truncateString(img.Context, 500),
+				Width:     img.Width,
+				Height:    img.Height,
+				CrawledAt: now,
+			})
+		}
+		if err := e.store.UpsertImages(ctx, imageRecords); err != nil {
+			logger.Warn("failed to store images", "error", err, "count", len(imageRecords))
+		}
+	}
 
 	// Enqueue discovered links if we haven't exceeded max depth.
 	if job.Depth < e.cfg.MaxDepth && len(parsed.Links) > 0 {
@@ -355,4 +395,19 @@ func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
 		return nil
 	}
 	return e.loadSeedDomains(ctx)
+}
+
+// inferRegion extracts a country/region code from a domain's TLD.
+// For example: "elpais.com.uy" → "uy", "vandal.elespanol.com" → "".
+func inferRegion(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	tld := parts[len(parts)-1]
+	// Check if TLD is a known country code (2 letters).
+	if len(tld) == 2 && tld != "io" && tld != "tv" && tld != "co" && tld != "me" {
+		return strings.ToLower(tld)
+	}
+	return ""
 }

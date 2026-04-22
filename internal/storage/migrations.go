@@ -81,4 +81,56 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_queue_domain ON crawl_queue(domain)`,
 	`CREATE INDEX IF NOT EXISTS idx_domains_seed ON domains(is_seed)`,
 	`CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain)`,
+
+	// --- Migration: add language/region columns to pages ---
+	`ALTER TABLE pages ADD COLUMN language TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN region TEXT NOT NULL DEFAULT ''`,
+
+	// --- Images table ---
+	`CREATE TABLE IF NOT EXISTS images (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		url        TEXT    NOT NULL UNIQUE,
+		page_url   TEXT    NOT NULL DEFAULT '',
+		page_id    INTEGER NOT NULL DEFAULT 0,
+		domain     TEXT    NOT NULL DEFAULT '',
+		alt_text   TEXT    NOT NULL DEFAULT '',
+		title      TEXT    NOT NULL DEFAULT '',
+		context    TEXT    NOT NULL DEFAULT '',
+		width      INTEGER NOT NULL DEFAULT 0,
+		height     INTEGER NOT NULL DEFAULT 0,
+		crawled_at DATETIME
+	)`,
+
+	// --- Images FTS5 index ---
+	`CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
+		alt_text,
+		title,
+		context,
+		content='images',
+		content_rowid='id',
+		tokenize='porter unicode61'
+	)`,
+
+	// Images FTS5 sync triggers.
+	`CREATE TRIGGER IF NOT EXISTS images_fts_insert AFTER INSERT ON images BEGIN
+		INSERT INTO images_fts(rowid, alt_text, title, context)
+		VALUES (new.id, new.alt_text, new.title, new.context);
+	END`,
+
+	`CREATE TRIGGER IF NOT EXISTS images_fts_delete AFTER DELETE ON images BEGIN
+		INSERT INTO images_fts(images_fts, rowid, alt_text, title, context)
+		VALUES ('delete', old.id, old.alt_text, old.title, old.context);
+	END`,
+
+	`CREATE TRIGGER IF NOT EXISTS images_fts_update AFTER UPDATE ON images BEGIN
+		INSERT INTO images_fts(images_fts, rowid, alt_text, title, context)
+		VALUES ('delete', old.id, old.alt_text, old.title, old.context);
+		INSERT INTO images_fts(rowid, alt_text, title, context)
+		VALUES (new.id, new.alt_text, new.title, new.context);
+	END`,
+
+	// --- Performance indexes for new tables ---
+	`CREATE INDEX IF NOT EXISTS idx_pages_language ON pages(language)`,
+	`CREATE INDEX IF NOT EXISTS idx_images_domain ON images(domain)`,
+	`CREATE INDEX IF NOT EXISTS idx_images_page_id ON images(page_id)`,
 }

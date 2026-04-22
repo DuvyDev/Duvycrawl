@@ -1,4 +1,4 @@
-package storage
+﻿package storage
 
 import (
 	"context"
@@ -15,10 +15,18 @@ import (
 
 // SQLiteStorage implements the Storage interface using SQLite with FTS5
 // for full-text search capabilities.
+//
+// It uses two connection pools:
+//   - readDB:  multiple connections for concurrent reads (searches, lookups)
+//   - writeDB: single connection for serialized writes (upserts, deletes)
+//
+// This eliminates SQLITE_BUSY errors under high concurrency while
+// maximizing read throughput in WAL mode.
 type SQLiteStorage struct {
-	db     *sql.DB
-	logger *slog.Logger
-	dbPath string
+	readDB  *sql.DB
+	writeDB *sql.DB
+	logger  *slog.Logger
+	dbPath  string
 }
 
 // NewSQLiteStorage creates a new SQLite-backed storage.
@@ -31,48 +39,79 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		return nil, fmt.Errorf("creating database directory %q: %w", dir, err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON", dbPath)
-	db, err := sql.Open("sqlite", dsn)
+	// --- Write pool: single connection, serialized writes ---
+	// High busy_timeout (30s) ensures writes wait instead of failing.
+	writeDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON", dbPath)
+	writeDB, err := sql.Open("sqlite", writeDSN)
 	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
+		return nil, fmt.Errorf("opening write database: %w", err)
+	}
+	// Single writer â€” this is the key: only one write can happen at a time,
+	// preventing SQLITE_BUSY errors entirely.
+	writeDB.SetMaxOpenConns(1)
+	writeDB.SetMaxIdleConns(1)
+	writeDB.SetConnMaxLifetime(0)
+	if err := configureWriteDB(ctx, writeDB); err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("configuring write database: %w", err)
 	}
 
-	// WAL mode supports concurrent reads + 1 writer. With the crawl queue
-	// moved to an in-memory structure, SQLite only handles page storage and
-	// FTS search, so higher concurrency is safe and beneficial.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxLifetime(0) // Connections never expire.
-
-	// Verify the connection works.
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("pinging database: %w", err)
+	// Verify write connection works.
+	if err := writeDB.PingContext(ctx); err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("pinging write database: %w", err)
 	}
 
 	s := &SQLiteStorage{
-		db:     db,
-		logger: logger.With("component", "storage"),
-		dbPath: dbPath,
+		writeDB: writeDB,
+		logger:  logger.With("component", "storage"),
+		dbPath:  dbPath,
 	}
 
-	// Run schema migrations.
+	// Run schema migrations (using write connection).
 	if err := s.migrate(ctx); err != nil {
-		db.Close()
+		writeDB.Close()
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
+
+	// --- Read pool: multiple connections for concurrent reads ---
+	// Open after migrations so mode=ro works on first startup.
+	readDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro", dbPath)
+	readDB, err := sql.Open("sqlite", readDSN)
+	if err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("opening read database: %w", err)
+	}
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(4)
+	readDB.SetConnMaxLifetime(0)
+	if err := configureReadDB(ctx, readDB); err != nil {
+		readDB.Close()
+		writeDB.Close()
+		return nil, fmt.Errorf("configuring read database: %w", err)
+	}
+
+	if err := readDB.PingContext(ctx); err != nil {
+		readDB.Close()
+		writeDB.Close()
+		return nil, fmt.Errorf("pinging read database: %w", err)
+	}
+	s.readDB = readDB
 
 	logger.Info("SQLite storage initialized",
 		"path", dbPath,
 		"journal_mode", "WAL",
+		"read_conns", 4,
+		"write_conns", 1,
 	)
 
 	return s, nil
 }
 
 // migrate executes all schema migrations in a single transaction.
+// ALTER TABLE ADD COLUMN errors are silently ignored (column may already exist).
 func (s *SQLiteStorage) migrate(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning migration transaction: %w", err)
 	}
@@ -80,6 +119,10 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 
 	for i, m := range migrations {
 		if _, err := tx.ExecContext(ctx, m); err != nil {
+			// Tolerate "duplicate column name" errors from ALTER TABLE.
+			if strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
 			return fmt.Errorf("executing migration %d: %w", i, err)
 		}
 	}
@@ -94,22 +137,25 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 // UpsertPage inserts a new page or updates an existing one matched by URL.
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, description, content, status_code, content_hash, crawled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO pages (url, domain, title, description, content, language, region, status_code, content_hash, crawled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(url) DO UPDATE SET
 			domain       = excluded.domain,
 			title        = excluded.title,
 			description  = excluded.description,
 			content      = excluded.content,
+			language     = excluded.language,
+			region       = excluded.region,
 			status_code  = excluded.status_code,
 			content_hash = excluded.content_hash,
 			crawled_at   = excluded.crawled_at,
 			updated_at   = CURRENT_TIMESTAMP
 	`
 
-	_, err := s.db.ExecContext(ctx, query,
+	_, err := s.writeDB.ExecContext(ctx, query,
 		page.URL, page.Domain, page.Title, page.Description,
-		page.Content, page.StatusCode, page.ContentHash, page.CrawledAt,
+		page.Content, page.Language, page.Region,
+		page.StatusCode, page.ContentHash, page.CrawledAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
@@ -131,7 +177,7 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 	var p Page
 	var crawledAt, createdAt, updatedAt sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, query, arg).Scan(
+	err := s.readDB.QueryRowContext(ctx, query, arg).Scan(
 		&p.ID, &p.URL, &p.Domain, &p.Title, &p.Description,
 		&p.Content, &p.StatusCode, &p.ContentHash,
 		&crawledAt, &createdAt, &updatedAt,
@@ -157,7 +203,8 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 
 // SearchPages performs a full-text search using FTS5.
 // Returns matching results and the total count.
-func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, offset int) ([]SearchResult, int, error) {
+// If lang is non-empty, results in that language get a ranking boost.
+func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, offset int, lang string) ([]SearchResult, int, error) {
 	if query == "" {
 		return nil, 0, nil
 	}
@@ -165,7 +212,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	// Count total matches.
 	var total int
 	countQuery := `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`
-	if err := s.db.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting search results for %q: %w", query, err)
 	}
 
@@ -174,24 +221,55 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	// Fetch paginated results with snippets and relevance ranking.
-	searchQuery := `
-		SELECT
-			p.id,
-			p.url,
-			p.title,
-			p.description,
-			snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
-			p.domain,
-			p.crawled_at,
-			rank
-		FROM pages_fts
-		JOIN pages p ON p.id = pages_fts.rowid
-		WHERE pages_fts MATCH ?
-		ORDER BY rank
-		LIMIT ? OFFSET ?
-	`
+	// When a language is specified, boost matching results by multiplying
+	// rank by 1.5 (FTS5 rank is negative, so more negative = better;
+	// multiplying by 1.5 makes matching-lang results "more negative").
+	var searchQuery string
+	var args []any
 
-	rows, err := s.db.QueryContext(ctx, searchQuery, query, limit, offset)
+	if lang != "" {
+		searchQuery = `
+			SELECT
+				p.id,
+				p.url,
+				p.title,
+				p.description,
+				snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
+				p.domain,
+				p.language,
+				p.region,
+				p.crawled_at,
+				CASE WHEN p.language = ? THEN rank * 1.5 ELSE rank END AS boosted_rank
+			FROM pages_fts
+			JOIN pages p ON p.id = pages_fts.rowid
+			WHERE pages_fts MATCH ?
+			ORDER BY boosted_rank
+			LIMIT ? OFFSET ?
+		`
+		args = []any{lang, query, limit, offset}
+	} else {
+		searchQuery = `
+			SELECT
+				p.id,
+				p.url,
+				p.title,
+				p.description,
+				snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
+				p.domain,
+				p.language,
+				p.region,
+				p.crawled_at,
+				rank
+			FROM pages_fts
+			JOIN pages p ON p.id = pages_fts.rowid
+			WHERE pages_fts MATCH ?
+			ORDER BY rank
+			LIMIT ? OFFSET ?
+		`
+		args = []any{query, limit, offset}
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, searchQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("searching pages for %q: %w", query, err)
 	}
@@ -201,7 +279,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	for rows.Next() {
 		var r SearchResult
 		var crawledAt sql.NullTime
-		if err := rows.Scan(&r.ID, &r.URL, &r.Title, &r.Description, &r.Snippet, &r.Domain, &crawledAt, &r.Rank); err != nil {
+		if err := rows.Scan(&r.ID, &r.URL, &r.Title, &r.Description, &r.Snippet, &r.Domain, &r.Language, &r.Region, &crawledAt, &r.Rank); err != nil {
 			return nil, 0, fmt.Errorf("scanning search result: %w", err)
 		}
 		if crawledAt.Valid {
@@ -227,7 +305,7 @@ func (s *SQLiteStorage) GetStalePages(ctx context.Context, olderThan time.Time, 
 		LIMIT ?
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, olderThan, limit)
+	rows, err := s.readDB.QueryContext(ctx, query, olderThan, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying stale pages: %w", err)
 	}
@@ -265,7 +343,7 @@ func (s *SQLiteStorage) EnqueueURL(ctx context.Context, job *CrawlJob) error {
 		INSERT OR IGNORE INTO crawl_queue (url, domain, depth, priority, status)
 		VALUES (?, ?, ?, ?, ?)
 	`
-	_, err := s.db.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending)
+	_, err := s.writeDB.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("enqueuing URL %q: %w", job.URL, err)
 	}
@@ -278,7 +356,7 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning enqueue transaction: %w", err)
 	}
@@ -303,7 +381,7 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 // Jobs are ordered by priority (descending), then by FIFO (added_at ascending).
 // Claimed jobs are marked as in_progress.
 func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning dequeue transaction: %w", err)
 	}
@@ -358,16 +436,16 @@ func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob
 // If crawlErr is not nil, the job is marked as failed with the error message.
 func (s *SQLiteStorage) CompleteJob(ctx context.Context, jobID int64, crawlErr error) error {
 	if crawlErr == nil {
-		// Success — remove from queue.
-		_, err := s.db.ExecContext(ctx, `DELETE FROM crawl_queue WHERE id = ?`, jobID)
+		// Success â€” remove from queue.
+		_, err := s.writeDB.ExecContext(ctx, `DELETE FROM crawl_queue WHERE id = ?`, jobID)
 		if err != nil {
 			return fmt.Errorf("deleting completed job %d: %w", jobID, err)
 		}
 		return nil
 	}
 
-	// Failure — mark as failed with error message, increment retries.
-	_, err := s.db.ExecContext(ctx, `
+	// Failure â€” mark as failed with error message, increment retries.
+	_, err := s.writeDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, error_msg = ?, retries = retries + 1
 		WHERE id = ?
@@ -386,7 +464,7 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 		return s.DequeueURLs(ctx, limit)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning dequeue transaction: %w", err)
 	}
@@ -451,7 +529,7 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 // This is used when a worker cannot process a job due to rate limiting
 // and wants to release it for another worker or a later attempt.
 func (s *SQLiteStorage) ReturnJob(ctx context.Context, jobID int64) error {
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.writeDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, locked_at = NULL
 		WHERE id = ? AND status = ?
@@ -474,7 +552,7 @@ func (s *SQLiteStorage) GetQueueStats(ctx context.Context) (*QueueStats, error) 
 			COUNT(*)
 		FROM crawl_queue
 	`
-	err := s.db.QueryRowContext(ctx, query).Scan(
+	err := s.readDB.QueryRowContext(ctx, query).Scan(
 		&stats.Pending, &stats.InProgress, &stats.Done, &stats.Failed, &stats.Total,
 	)
 	if err != nil {
@@ -509,7 +587,7 @@ func (s *SQLiteStorage) UpsertDomain(ctx context.Context, domain *Domain) error 
 		lastCrawled = &domain.LastCrawled
 	}
 
-	_, err := s.db.ExecContext(ctx, query,
+	_, err := s.writeDB.ExecContext(ctx, query,
 		domain.Domain, domain.IsSeed, domain.RobotsTxt,
 		robotsFetched, lastCrawled,
 		domain.PagesCount, domain.AvgResponseMs,
@@ -525,7 +603,7 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 	var d Domain
 	var robotsFetched, lastCrawled, createdAt sql.NullTime
 
-	err := s.db.QueryRowContext(ctx, `
+	err := s.readDB.QueryRowContext(ctx, `
 		SELECT id, domain, is_seed, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
 		FROM domains WHERE domain = ?
 	`, domainName).Scan(
@@ -554,7 +632,7 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 
 // GetSeedDomains returns all domains marked as seeds.
 func (s *SQLiteStorage) GetSeedDomains(ctx context.Context) ([]Domain, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.readDB.QueryContext(ctx, `
 		SELECT id, domain, is_seed, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
 		FROM domains WHERE is_seed = TRUE
 		ORDER BY domain ASC
@@ -587,7 +665,7 @@ func (s *SQLiteStorage) GetSeedDomains(ctx context.Context) ([]Domain, error) {
 
 // DeleteDomain removes a domain from the seed list (sets is_seed = false).
 func (s *SQLiteStorage) DeleteDomain(ctx context.Context, domainName string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE domains SET is_seed = FALSE WHERE domain = ?`, domainName)
+	result, err := s.writeDB.ExecContext(ctx, `UPDATE domains SET is_seed = FALSE WHERE domain = ?`, domainName)
 	if err != nil {
 		return fmt.Errorf("deleting domain %q: %w", domainName, err)
 	}
@@ -607,13 +685,13 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 	var stats CrawlerStats
 
 	// Page & domain counts.
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages`).Scan(&stats.TotalPages); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages`).Scan(&stats.TotalPages); err != nil {
 		return nil, fmt.Errorf("counting pages: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains`).Scan(&stats.TotalDomains); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains`).Scan(&stats.TotalDomains); err != nil {
 		return nil, fmt.Errorf("counting domains: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE is_seed = TRUE`).Scan(&stats.SeedDomains); err != nil {
+	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE is_seed = TRUE`).Scan(&stats.SeedDomains); err != nil {
 		return nil, fmt.Errorf("counting seed domains: %w", err)
 	}
 
@@ -639,7 +717,7 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 
 // PurgeOldPages deletes pages crawled before the given timestamp.
 func (s *SQLiteStorage) PurgeOldPages(ctx context.Context, olderThan time.Time) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM pages WHERE crawled_at < ?`, olderThan)
+	result, err := s.writeDB.ExecContext(ctx, `DELETE FROM pages WHERE crawled_at < ?`, olderThan)
 	if err != nil {
 		return 0, fmt.Errorf("purging old pages: %w", err)
 	}
@@ -649,7 +727,7 @@ func (s *SQLiteStorage) PurgeOldPages(ctx context.Context, olderThan time.Time) 
 // ResetStalledJobs resets jobs stuck in in_progress back to pending.
 func (s *SQLiteStorage) ResetStalledJobs(ctx context.Context, stalledAfter time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-stalledAfter)
-	result, err := s.db.ExecContext(ctx, `
+	result, err := s.writeDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, locked_at = NULL
 		WHERE status = ? AND locked_at < ?
@@ -662,7 +740,7 @@ func (s *SQLiteStorage) ResetStalledJobs(ctx context.Context, stalledAfter time.
 
 // Vacuum reclaims unused disk space in the database.
 func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, "VACUUM")
+	_, err := s.writeDB.ExecContext(ctx, "VACUUM")
 	if err != nil {
 		return fmt.Errorf("vacuuming database: %w", err)
 	}
@@ -670,8 +748,163 @@ func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the database connection.
+// Close closes both SQLite connection pools.
 func (s *SQLiteStorage) Close() error {
 	s.logger.Info("closing SQLite storage")
-	return s.db.Close()
+
+	var writeErr, readErr error
+	if s.writeDB != nil {
+		writeErr = s.writeDB.Close()
+	}
+	if s.readDB != nil {
+		readErr = s.readDB.Close()
+	}
+
+	if writeErr != nil && readErr != nil {
+		return fmt.Errorf("closing write database: %v; closing read database: %w", writeErr, readErr)
+	}
+	if writeErr != nil {
+		return fmt.Errorf("closing write database: %w", writeErr)
+	}
+	if readErr != nil {
+		return fmt.Errorf("closing read database: %w", readErr)
+	}
+
+	return nil
+}
+
+func configureWriteDB(ctx context.Context, db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA busy_timeout = 30000",
+		"PRAGMA cache_size = -20000",
+	}
+
+	for _, pragma := range pragmas {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("executing %q: %w", pragma, err)
+		}
+	}
+
+	return nil
+}
+
+func configureReadDB(ctx context.Context, db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA cache_size = -20000",
+		"PRAGMA query_only = ON",
+	}
+
+	for _, pragma := range pragmas {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("executing %q: %w", pragma, err)
+		}
+	}
+
+	return nil
+}
+
+// --------------------------------------------------------------------------
+// Image Operations
+// --------------------------------------------------------------------------
+
+// UpsertImages inserts or updates image records in bulk.
+func (s *SQLiteStorage) UpsertImages(ctx context.Context, images []ImageRecord) error {
+	if len(images) == 0 {
+		return nil
+	}
+
+	stmt, err := s.writeDB.PrepareContext(ctx, `
+		INSERT INTO images (url, page_url, page_id, domain, alt_text, title, context, width, height, crawled_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			page_url   = excluded.page_url,
+			page_id    = excluded.page_id,
+			domain     = excluded.domain,
+			alt_text   = excluded.alt_text,
+			title      = excluded.title,
+			context    = excluded.context,
+			width      = excluded.width,
+			height     = excluded.height,
+			crawled_at = excluded.crawled_at
+	`)
+	if err != nil {
+		return fmt.Errorf("preparing image upsert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, img := range images {
+		_, err := stmt.ExecContext(ctx,
+			img.URL, img.PageURL, img.PageID, img.Domain,
+			img.AltText, img.Title, img.Context,
+			img.Width, img.Height, img.CrawledAt,
+		)
+		if err != nil {
+			s.logger.Warn("failed to upsert image", "url", img.URL, "error", err)
+			continue
+		}
+	}
+
+	return nil
+}
+
+// SearchImages performs a full-text search over image metadata.
+func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, offset int) ([]ImageSearchResult, int, error) {
+	if query == "" {
+		return nil, 0, nil
+	}
+
+	// Count total matches.
+	var total int
+	countQuery := `SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH ?`
+	if err := s.readDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting image results for %q: %w", query, err)
+	}
+
+	if total == 0 {
+		return nil, 0, nil
+	}
+
+	searchQuery := `
+		SELECT
+			i.id,
+			i.url,
+			i.page_url,
+			i.domain,
+			i.alt_text,
+			i.title,
+			i.context,
+			i.width,
+			i.height,
+			rank
+		FROM images_fts
+		JOIN images i ON i.id = images_fts.rowid
+		WHERE images_fts MATCH ?
+		ORDER BY rank
+		LIMIT ? OFFSET ?
+	`
+
+	rows, err := s.readDB.QueryContext(ctx, searchQuery, query, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("searching images for %q: %w", query, err)
+	}
+	defer rows.Close()
+
+	var results []ImageSearchResult
+	for rows.Next() {
+		var r ImageSearchResult
+		if err := rows.Scan(&r.ID, &r.URL, &r.PageURL, &r.Domain, &r.AltText, &r.Title, &r.Context, &r.Width, &r.Height, &r.Rank); err != nil {
+			return nil, 0, fmt.Errorf("scanning image result: %w", err)
+		}
+		results = append(results, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating image results: %w", err)
+	}
+
+	return results, total, nil
 }

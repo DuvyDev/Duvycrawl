@@ -61,7 +61,7 @@ seeds:
       - https://www.reddit.com/r/popular/
       - https://www.reddit.com/r/uruguay/
 
-  - domain: twitter.com
+  - domain: x.com
     priority: 100
     start_urls:
       - https://x.com/
@@ -101,29 +101,50 @@ seeds:
     start_urls:
       - https://www.disco.com.uy/
 
-  - domain: eldorado.com.uy
+  - domain: www.eldorado.com.uy
     priority: 100
     start_urls:
       - https://www.eldorado.com.uy/
 
-  - domain: eldorado.com.uy
-    priority: 100
-    start_urls:
-      - https://www.eldorado.com.uy/
-
-  # --- Noticias ---
-  
   - domain: www.montevideo.com.uy
     priority: 100
     start_urls:
       - https://www.montevideo.com.uy/
+  
+  - domain: www.brou.com.uy
+    priority: 100
+    start_urls:
+      - https://www.brou.com.uy/
+  
+  - domain: www.prexcard.com
+    priority: 100
+    start_urls:
+      - https://www.prexcard.com/
+  
+  - domain: oca.com.uy
+    priority: 100
+    start_urls:
+      - https://oca.com.uy/
+
+  - domain: www.gub.uy
+    priority: 100
+    start_urls:
+      - https://www.gub.uy
+      - https://www.inumet.gub.uy/
+
+  # --- Noticias ---
+      
+  - domain: cnnespanol.cnn.com
+    priority: 100
+    start_urls:
+      - https://cnnespanol.cnn.com/
 
   - domain: vandal.elespanol.com
     priority: 100
     start_urls:
       - https://vandal.elespanol.com/
 
-  - domain: 3djuegos.com
+  - domain: www.3djuegos.com
     priority: 100
     start_urls:
       - https://www.3djuegos.com/
@@ -141,7 +162,7 @@ seeds:
   - domain: hytale.com
     priority: 100
     start_urls:
-      - https://hytale.com
+      - https://hytale.com/
 
   - domain: hytalecharts.com
     priority: 100
@@ -156,19 +177,75 @@ seeds:
   - domain: warframe.com
     priority: 100
     start_urls:
+      - https://wwww.warframe.com/
+
+  - domain: forums.warframe.com
+    priority: 100
+    start_urls:
+      - https://forums.warframe.com/
+
+  - domain: wiki.warframe.com
+    priority: 100
+    start_urls:
       - https://wiki.warframe.com/
-      - https://www.warframe.com/
-      
-  - domain: fandom.com
+
+  - domain: warframe.fandom.com
     priority: 100
     start_urls:
       - https://warframe.fandom.com/es
       - https://warframe.fandom.com/wiki
+      - https://warframe.fandom.com/wiki/WARFRAME_Wiki
+
+  - domain: fandom.com
+    priority: 100
+    start_urls:
+      - https://fandom.com/
 
   - domain: overframe.gg
     priority: 100
     start_urls:
       - https://overframe.gg/
+
+  - domain: firefox.com
+    priority: 100
+    start_urls:
+      - https://www.firefox.com/
+
+  - domain: mozilla.org
+    priority: 100
+    start_urls:
+      - https://www.mozilla.org/
+
+  - domain: www.vellum.ai
+    priority: 100
+    start_urls:
+      - https://www.vellum.ai
+
+  - domain: artificialanalysis.ai
+    priority: 100
+    start_urls:
+      - https://artificialanalysis.ai/
+
+  - domain: kworb.net
+    priority: 100
+    start_urls:
+      - https://kworb.net/
+      - https://kworb.net/youtube/
+
+  - domain: www.imdb.com
+    priority: 100
+    start_urls:
+      - https://www.imdb.com/
+
+  - domain: www.metacritic.com
+    priority: 100
+    start_urls:
+      - https://www.metacritic.com/
+
+  - domain: www.rottentomatoes.com
+    priority: 100
+    start_urls:
+      - https://www.rottentomatoes.com/
 
   # --- Entertainment ---
   - domain: twitch.tv

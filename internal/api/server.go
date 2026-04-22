@@ -42,6 +42,7 @@ func NewServer(
 
 	// Search
 	mux.HandleFunc("GET /api/v1/search", handlers.Search)
+	mux.HandleFunc("GET /api/v1/images/search", handlers.SearchImages)
 
 	// Pages
 	mux.HandleFunc("GET /api/v1/pages/{id}", handlers.GetPage)

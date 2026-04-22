@@ -13,6 +13,8 @@ type Page struct {
 	Title       string    `json:"title"`
 	Description string    `json:"description"`
 	Content     string    `json:"content,omitempty"` // Clean text, no HTML
+	Language    string    `json:"language"`           // ISO 639-1 code (es, en, pt...)
+	Region      string    `json:"region"`             // Country code from TLD (uy, es, ar...)
 	StatusCode  int       `json:"status_code"`
 	ContentHash string    `json:"content_hash"` // SHA-256 of content for change detection
 	CrawledAt   time.Time `json:"crawled_at"`
@@ -71,8 +73,39 @@ type SearchResult struct {
 	Description string    `json:"description"`
 	Snippet     string    `json:"snippet"` // FTS5 highlighted snippet
 	Domain      string    `json:"domain"`
+	Language    string    `json:"language"`
+	Region      string    `json:"region"`
 	CrawledAt   time.Time `json:"crawled_at"`
 	Rank        float64   `json:"rank"` // FTS5 relevance score
+}
+
+// ImageRecord represents an image discovered during crawling.
+type ImageRecord struct {
+	ID        int64     `json:"id"`
+	URL       string    `json:"url"`
+	PageURL   string    `json:"page_url"`
+	PageID    int64     `json:"page_id"`
+	Domain    string    `json:"domain"`
+	AltText   string    `json:"alt_text"`
+	Title     string    `json:"title"`
+	Context   string    `json:"context"`
+	Width     int       `json:"width"`
+	Height    int       `json:"height"`
+	CrawledAt time.Time `json:"crawled_at"`
+}
+
+// ImageSearchResult represents a single image search result.
+type ImageSearchResult struct {
+	ID        int64   `json:"id"`
+	URL       string  `json:"url"`
+	PageURL   string  `json:"page_url"`
+	Domain    string  `json:"domain"`
+	AltText   string  `json:"alt_text"`
+	Title     string  `json:"title"`
+	Context   string  `json:"context"`
+	Width     int     `json:"width"`
+	Height    int     `json:"height"`
+	Rank      float64 `json:"rank"`
 }
 
 // QueueStats provides a snapshot of the crawl queue state.

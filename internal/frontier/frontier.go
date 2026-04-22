@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
@@ -36,7 +37,7 @@ func New(q *queue.Queue, store storage.Storage, logger *slog.Logger) *Frontier {
 // The URL is normalized and deduplicated (ignored if already in the queue or
 // already crawled).
 func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) error {
-	normalized, domain, err := normalizeURL(rawURL)
+	normalized, domain, err := CanonicalizeURL(rawURL)
 	if err != nil {
 		return nil // Silently ignore unparseable URLs.
 	}
@@ -72,7 +73,7 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 
 	var jobs []*queue.Job
 	for _, rawURL := range rawURLs {
-		normalized, domain, err := normalizeURL(rawURL)
+		normalized, domain, err := CanonicalizeURL(rawURL)
 		if err != nil {
 			continue
 		}
@@ -118,7 +119,7 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 
 	var jobs []*queue.Job
 	for _, rawURL := range rawURLs {
-		normalized, domain, err := normalizeURL(rawURL)
+		normalized, domain, err := CanonicalizeURL(rawURL)
 		if err != nil {
 			continue
 		}
@@ -159,9 +160,9 @@ func (f *Frontier) Stats() queue.Stats {
 	return f.queue.Stats()
 }
 
-// normalizeURL parses and normalizes a URL for consistent deduplication.
-// Returns the normalized URL string and the domain name.
-func normalizeURL(rawURL string) (string, string, error) {
+// CanonicalizeURL parses and normalizes a URL for consistent deduplication.
+// Returns the canonical URL string and the normalized domain name.
+func CanonicalizeURL(rawURL string) (string, string, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return "", "", fmt.Errorf("empty URL")
@@ -180,11 +181,41 @@ func normalizeURL(rawURL string) (string, string, error) {
 
 	// Normalize.
 	parsed.Scheme = scheme
-	parsed.Host = strings.ToLower(parsed.Host)
+	hostname := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = hostname + ":" + port
+	} else {
+		parsed.Host = hostname
+	}
 	parsed.Fragment = ""                          // Remove fragments.
 	parsed.Path = strings.TrimRight(parsed.Path, "/") // Remove trailing slashes.
 	if parsed.Path == "" {
 		parsed.Path = "/"
+	}
+
+	// Remove tracking/auth query parameters and sort the rest.
+	query := parsed.Query()
+	if len(query) > 0 {
+		cleaned := make(url.Values, len(query))
+		for k, values := range query {
+			if shouldDropQueryParam(k) {
+				continue
+			}
+			cleaned[k] = values
+		}
+
+		if len(cleaned) == 0 {
+			parsed.RawQuery = ""
+		} else {
+			for k := range cleaned {
+				sort.Strings(cleaned[k])
+			}
+			parsed.RawQuery = cleaned.Encode()
+		}
 	}
 
 	domain := parsed.Hostname()
@@ -192,6 +223,39 @@ func normalizeURL(rawURL string) (string, string, error) {
 	domain = strings.TrimPrefix(domain, "www.")
 
 	return parsed.String(), domain, nil
+}
+
+func shouldDropQueryParam(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	if k == "" {
+		return true
+	}
+
+	if strings.HasPrefix(k, "utm_") {
+		return true
+	}
+
+	if strings.HasPrefix(k, "_hs") || strings.HasPrefix(k, "mkt_") {
+		return true
+	}
+
+	if strings.Contains(k, "token") || strings.Contains(k, "session") || strings.Contains(k, "signature") {
+		return true
+	}
+
+	if strings.HasPrefix(k, "x-amz-") {
+		return true
+	}
+
+	switch k {
+	case "fbclid", "gclid", "dclid", "msclkid", "yclid", "igshid",
+		"mc_cid", "mc_eid", "zanpid", "_gl",
+		"auth", "sid", "phpsessid", "jsessionid",
+		"expires", "expiry", "exp":
+		return true
+	}
+
+	return false
 }
 
 // ExtractDomain extracts and normalizes the domain from a URL.

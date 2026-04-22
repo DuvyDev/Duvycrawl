@@ -4,19 +4,32 @@ import (
 	"bytes"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/html/charset"
 )
 
+// ImageMeta holds metadata about an image found on a page.
+type ImageMeta struct {
+	URL     string // Absolute URL of the image
+	Alt     string // Alt text
+	Title   string // Title attribute
+	Context string // Surrounding text for search context
+	Width   int    // Width in pixels (0 if unknown)
+	Height  int    // Height in pixels (0 if unknown)
+}
+
 // ParseResult contains the structured data extracted from an HTML page.
 type ParseResult struct {
 	Title       string
 	Description string
-	Content     string   // Visible text content, stripped of HTML
-	Links       []string // Absolute URLs found in <a> tags
-	Canonical   string   // Canonical URL if specified
+	Content     string       // Visible text content, stripped of HTML
+	Links       []string     // Absolute URLs found in <a> tags
+	Canonical   string       // Canonical URL if specified
+	Language    string       // Detected language code (e.g. "es", "en")
+	Images      []ImageMeta  // Images found on the page
 }
 
 // Parser extracts structured data from HTML documents.
@@ -53,6 +66,26 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	result := &ParseResult{}
 
+	// --- Language detection ---
+	// Priority: <html lang="..."> > <meta http-equiv="Content-Language"> > <meta name="language">
+	if lang, exists := doc.Find("html").Attr("lang"); exists {
+		result.Language = normalizeLanguage(lang)
+	}
+	if result.Language == "" {
+		doc.Find(`meta[http-equiv="Content-Language"]`).Each(func(_ int, s *goquery.Selection) {
+			if content, exists := s.Attr("content"); exists {
+				result.Language = normalizeLanguage(content)
+			}
+		})
+	}
+	if result.Language == "" {
+		doc.Find(`meta[name="language"]`).Each(func(_ int, s *goquery.Selection) {
+			if content, exists := s.Attr("content"); exists {
+				result.Language = normalizeLanguage(content)
+			}
+		})
+	}
+
 	// Extract <title>.
 	result.Title = strings.TrimSpace(doc.Find("title").First().Text())
 
@@ -75,9 +108,15 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// Extract canonical URL.
 	doc.Find(`link[rel="canonical"]`).Each(func(_ int, s *goquery.Selection) {
 		if href, exists := s.Attr("href"); exists {
-			result.Canonical = strings.TrimSpace(href)
+			canonical := resolveURL(base, strings.TrimSpace(href))
+			if canonical != "" {
+				result.Canonical = canonical
+			}
 		}
 	})
+
+	// --- Extract images (before removing elements) ---
+	result.Images = extractImages(doc, base)
 
 	// Extract visible text content.
 	// Remove script, style, noscript, nav, footer, header elements first.
@@ -226,6 +265,127 @@ func isBinaryExtension(rawURL string) bool {
 		".css", ".js", ".json", ".xml", ".rss", ".atom",
 		".woff", ".woff2", ".ttf", ".eot", ".otf",
 		".iso", ".bin", ".img":
+		return true
+	}
+	return false
+}
+
+// normalizeLanguage extracts a clean 2-letter ISO 639-1 language code
+// from various formats like "es", "es-UY", "en-US", "pt-BR".
+func normalizeLanguage(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return ""
+	}
+	// Take only the primary language tag (before - or _).
+	if i := strings.IndexAny(raw, "-_"); i > 0 {
+		raw = raw[:i]
+	}
+	// Validate it looks like a 2-3 letter language code.
+	if len(raw) < 2 || len(raw) > 3 {
+		return ""
+	}
+	return raw
+}
+
+// extractImages finds all <img> and og:image tags in the document and
+// returns their metadata. It filters out tracking pixels, icons, and
+// data URIs.
+func extractImages(doc *goquery.Document, base *url.URL) []ImageMeta {
+	var images []ImageMeta
+	seen := make(map[string]bool)
+
+	// Extract og:image (article thumbnails — high value).
+	doc.Find(`meta[property="og:image"]`).Each(func(_ int, s *goquery.Selection) {
+		if content, exists := s.Attr("content"); exists {
+			imgURL := resolveURL(base, strings.TrimSpace(content))
+			if imgURL != "" && !seen[imgURL] {
+				seen[imgURL] = true
+				// Use page title as context for og:image.
+				title := strings.TrimSpace(doc.Find("title").First().Text())
+				images = append(images, ImageMeta{
+					URL:     imgURL,
+					Alt:     title,
+					Context: title,
+				})
+			}
+		}
+	})
+
+	// Extract <img> tags.
+	doc.Find("img[src]").Each(func(_ int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if !exists {
+			return
+		}
+
+		src = strings.TrimSpace(src)
+		// Skip data URIs and empty srcs.
+		if src == "" || strings.HasPrefix(src, "data:") {
+			return
+		}
+
+		imgURL := resolveURL(base, src)
+		if imgURL == "" || seen[imgURL] {
+			return
+		}
+
+		// Only keep actual image files.
+		if !isImageExtension(imgURL) {
+			return
+		}
+
+		// Parse dimensions — filter out tiny images (tracking pixels, icons).
+		width, _ := strconv.Atoi(s.AttrOr("width", "0"))
+		height, _ := strconv.Atoi(s.AttrOr("height", "0"))
+		if (width > 0 && width < 50) || (height > 0 && height < 50) {
+			return
+		}
+
+		alt := strings.TrimSpace(s.AttrOr("alt", ""))
+		title := strings.TrimSpace(s.AttrOr("title", ""))
+
+		// Extract surrounding text as context (parent's text, truncated).
+		context := ""
+		parent := s.Parent()
+		if parent.Length() > 0 {
+			context = normalizeWhitespace(parent.Text())
+			if len(context) > 200 {
+				context = context[:200]
+			}
+		}
+
+		seen[imgURL] = true
+		images = append(images, ImageMeta{
+			URL:     imgURL,
+			Alt:     alt,
+			Title:   title,
+			Context: context,
+			Width:   width,
+			Height:  height,
+		})
+	})
+
+	// Cap at 50 images per page.
+	if len(images) > 50 {
+		images = images[:50]
+	}
+
+	return images
+}
+
+// isImageExtension returns true if the URL looks like an image file.
+func isImageExtension(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif":
+		return true
+	case "":
+		// URLs without extension might still be images (CDN URLs).
 		return true
 	}
 	return false
