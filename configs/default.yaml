@@ -1,0 +1,175 @@
+# Duvycrawl Configuration
+# ========================
+
+crawler:
+  # Number of concurrent crawl workers
+  workers: 100
+  # Maximum link depth to follow from seed pages
+  max_depth: 1
+  # HTTP request timeout per page
+  request_timeout: 10s
+  # Minimum delay between requests to the same domain
+  politeness_delay: 1s
+  # Maximum retry attempts for failed requests
+  max_retries: 3
+  # User-Agent string sent with every request
+  #user_agent: "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)"
+  user_agent: "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+  # Maximum page size to download (in KB)
+  max_page_size_kb: 1024
+  # Whether to respect robots.txt directives
+  respect_robots: false
+  # If true, ONLY crawl pages within seed domains.
+  # If false, follow links freely across the entire web.
+  seed_domains_only: false
+
+storage:
+  # Path to the SQLite database file
+  db_path: "./data/duvycrawl.db"
+
+api:
+  # Host to bind the API server
+  host: "0.0.0.0"
+  # Port for the API server
+  port: 8080
+
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+  # Log format: text (human-readable) or json (machine-readable)
+  format: "text"
+
+# ========================
+# Seed Domains
+# ========================
+# Priority domains that get crawled first and re-crawled more frequently.
+# You can add, remove, or reorder seeds freely.
+#
+# Fields:
+#   domain:     The domain name (required)
+#   priority:   Crawl priority, higher = sooner (default: 100)
+#   start_urls: Initial pages to crawl (default: ["https://<domain>/"])
+#
+# If this section is omitted entirely, a built-in default list is used.
+
+seeds:
+  # --- Social & Community ---
+  - domain: reddit.com
+    priority: 100
+    start_urls:
+      - https://www.reddit.com/
+      - https://www.reddit.com/r/popular/
+
+  - domain: twitter.com
+    priority: 100
+    start_urls:
+      - https://x.com/
+
+  # --- Development ---
+  - domain: github.com
+    priority: 100
+    start_urls:
+      - https://github.com/
+      - https://github.com/trending
+      - https://github.com/explore
+
+  # --- Uruguay ---
+  - domain: elpais.com.uy
+    priority: 100
+    start_urls:
+      - https://www.elpais.com.uy/
+
+  - domain: elobservador.com.uy
+    priority: 100
+    start_urls:
+      - https://www.elobservador.com.uy/
+
+  - domain: mercadolibre.com.uy
+    priority: 100
+    start_urls:
+      - https://www.mercadolibre.com.uy/
+      - https://www.mercadolibre.com.uy/categorias
+
+  - domain: tiendainglesa.com.uy/
+    priority: 100
+    start_urls:
+      - https://www.tiendainglesa.com.uy/supermercado
+
+  - domain: disco.com.uy
+    priority: 100
+    start_urls:
+      - https://www.disco.com.uy/
+
+  - domain: eldorado.com.uy
+    priority: 100
+    start_urls:
+      - https://www.eldorado.com.uy/
+
+  # --- Noticias ---
+  
+  - domain: infobae.com
+    priority: 100
+    start_urls:
+      - https://www.infobae.com/
+
+  - domain: vandal.elespanol.com
+    priority: 100
+    start_urls:
+      - https://vandal.elespanol.com/
+
+  - domain: 3djuegos.com
+    priority: 100
+    start_urls:
+      - https://www.3djuegos.com/
+
+  - domain: latam.ign.com
+    priority: 100
+    start_urls:
+      - https://latam.ign.com/
+
+  - domain: hyzen.net
+    priority: 100
+    start_urls:
+      - https://hyzen.net/
+
+  - domain: hytale.com
+    priority: 100
+    start_urls:
+      - https://hytale.com
+
+  - domain: warframe.com
+    priority: 100
+    start_urls:
+      - https://wiki.warframe.com/
+      - https://www.warframe.com/
+      
+  - domain: fandom.com
+    priority: 100
+    start_urls:
+      - https://warframe.fandom.com/es/wiki
+      - https://warframe.fandom.com/wiki
+
+  - domain: overframe.gg
+    priority: 100
+    start_urls:
+      - https://overframe.gg/
+
+  # --- Entertainment ---
+  - domain: twitch.tv
+    priority: 100
+
+  - domain: youtube.com
+    priority: 100
+
+  # --- Knowledge ---
+  - domain: en.wikipedia.org
+    priority: 100
+    start_urls:
+      - https://en.wikipedia.org/wiki/Main_Page
+      - https://en.wikipedia.org/wiki/Portal:Current_events
+
+  - domain: es.wikipedia.org
+    priority: 100
+    start_urls:
+      - https://es.wikipedia.org/wiki/Wikipedia:Portada
+
