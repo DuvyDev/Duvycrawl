@@ -63,7 +63,7 @@ func run() error {
 	// --- Initialize Components ---
 	crawlQueue := queue.New()
 	front := frontier.New(crawlQueue, store, logger)
-	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay)
+	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
 	engine := crawler.NewEngine(&cfg.Crawler, store, front, limiter, logger)

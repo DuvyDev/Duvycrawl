@@ -12,10 +12,15 @@ crawler:
   max_depth: 3
   request_timeout: 15s
   politeness_delay: 1s
+  random_delay: 500ms
+  parallelism_per_domain: 2
   max_retries: 3
   user_agent: "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)"
   max_page_size_kb: 5120
   respect_robots: true
+  disable_cookies: false
+  max_idle_conns_per_host: 100
+  proxy_url: ""
 
 storage:
   db_path: "./data/duvycrawl.db"
@@ -41,10 +46,15 @@ logging:
 | `max_depth` | int | `3` | Profundidad máxima de links a seguir desde las páginas seed. `0` = solo las páginas seed, `1` = seeds + links directos, etc. |
 | `request_timeout` | duration | `15s` | Timeout máximo para una request HTTP individual. Incluye conexión, TLS y descarga del body. |
 | `politeness_delay` | duration | `1s` | Delay mínimo entre requests al **mismo dominio**. Evita saturar servidores. Mínimo permitido: `100ms`. |
+| `random_delay` | duration | `500ms` | Jitter aleatorio añadido al delay entre requests. Hace el crawling menos predecible. |
+| `parallelism_per_domain` | int | `2` | Número de requests concurrentes permitidas al mismo dominio. Valores altos = más rápido pero más agresivo. |
 | `max_retries` | int | `3` | Intentos máximos para una URL que falla. Después del último intento, la URL se marca como failed. |
 | `user_agent` | string | (ver arriba) | User-Agent enviado en cada request. Algunos sitios bloquean crawlers sin User-Agent válido. |
 | `max_page_size_kb` | int | `5120` | Tamaño máximo de página a descargar (en KB). Páginas más grandes se ignoran. Default: 5 MB. |
 | `respect_robots` | bool | `true` | Si es `true`, respeta las directivas de `robots.txt`. **Recomendado dejarlo en `true`**. |
+| `disable_cookies` | bool | `false` | Si es `true`, desactiva el cookie jar. Útil para sitios que no requieren sesión. |
+| `max_idle_conns_per_host` | int | `100` | Conexiones idle máximas por host. Aumentar mejora reutilización de conexiones HTTP keep-alive. |
+| `proxy_url` | string | `""` | URL de proxy HTTP/SOCKS5. Formato: `http://proxy:8080` o `socks5://proxy:1080`. Vacío = sin proxy. |
 
 ### `storage` — Persistencia
 

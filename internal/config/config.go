@@ -29,6 +29,9 @@ type CrawlerConfig struct {
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	// PolitenessDelay is the minimum wait between requests to the same domain.
 	PolitenessDelay time.Duration `yaml:"politeness_delay"`
+	// RandomDelay is the extra randomized duration added to PolitenessDelay.
+	// This helps avoid predictable crawl patterns. Set to 0 to disable.
+	RandomDelay time.Duration `yaml:"random_delay"`
 	// MaxRetries is the maximum number of retry attempts for a failed request.
 	MaxRetries int `yaml:"max_retries"`
 	// UserAgent is the User-Agent header sent with every request.
@@ -41,6 +44,21 @@ type CrawlerConfig struct {
 	// Discovered links pointing to non-seed domains are discarded.
 	// When false, the crawler follows links freely across the web.
 	SeedDomainsOnly bool `yaml:"seed_domains_only"`
+	// ParallelismPerDomain is the maximum number of concurrent requests
+	// to the same domain. Higher values increase throughput for a single
+	// domain but be careful not to overwhelm servers. Default: 2.
+	ParallelismPerDomain int `yaml:"parallelism_per_domain"`
+	// DisableCookies turns off cookie handling. Cookies are enabled by
+	// default and are essential for crawling sites with session-based
+	// protections (CSRF, login walls, etc.).
+	DisableCookies bool `yaml:"disable_cookies"`
+	// MaxIdleConnsPerHost controls the maximum number of idle (keep-alive)
+	// connections to keep per host. Higher values improve throughput when
+	// crawling the same domains repeatedly.
+	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
+	// ProxyURL is an optional HTTP/SOCKS5 proxy URL for all requests.
+	// Example: "http://proxy.example.com:8080"
+	ProxyURL string `yaml:"proxy_url"`
 }
 
 // SeedConfig represents a seed domain defined in the configuration file.
@@ -84,15 +102,20 @@ func (a APIConfig) Addr() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Crawler: CrawlerConfig{
-			Workers:         10,
-			MaxDepth:        3,
-			RequestTimeout:  15 * time.Second,
-			PolitenessDelay: 1 * time.Second,
-			MaxRetries:      3,
-			UserAgent:       "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)",
-			MaxPageSizeKB:   5120,
-			RespectRobots:   true,
-			SeedDomainsOnly: false,
+			Workers:              10,
+			MaxDepth:             3,
+			RequestTimeout:       15 * time.Second,
+			PolitenessDelay:      1 * time.Second,
+			RandomDelay:          0,
+			MaxRetries:           3,
+			UserAgent:            "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)",
+			MaxPageSizeKB:        5120,
+			RespectRobots:        true,
+			SeedDomainsOnly:      false,
+			ParallelismPerDomain: 2,
+			DisableCookies:       false,
+			MaxIdleConnsPerHost:  100,
+			ProxyURL:             "",
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",
@@ -139,7 +162,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("crawler.workers must be >= 1, got %d", c.Crawler.Workers)
 	}
 	if c.Crawler.Workers > 10000 {
-		return fmt.Errorf("crawler.workers must be <= 100, got %d", c.Crawler.Workers)
+		return fmt.Errorf("crawler.workers must be <= 10000, got %d", c.Crawler.Workers)
 	}
 	if c.Crawler.MaxDepth < 0 {
 		return fmt.Errorf("crawler.max_depth must be >= 0, got %d", c.Crawler.MaxDepth)
@@ -158,6 +181,12 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.MaxPageSizeKB < 1 {
 		return fmt.Errorf("crawler.max_page_size_kb must be >= 1, got %d", c.Crawler.MaxPageSizeKB)
+	}
+	if c.Crawler.ParallelismPerDomain < 1 {
+		return fmt.Errorf("crawler.parallelism_per_domain must be >= 1, got %d", c.Crawler.ParallelismPerDomain)
+	}
+	if c.Crawler.MaxIdleConnsPerHost < 1 {
+		return fmt.Errorf("crawler.max_idle_conns_per_host must be >= 1, got %d", c.Crawler.MaxIdleConnsPerHost)
 	}
 	if c.Storage.DBPath == "" {
 		return fmt.Errorf("storage.db_path must not be empty")

@@ -155,6 +155,12 @@ func (f *Frontier) Dequeue(readyFn queue.DomainReadyFunc) *queue.Job {
 	return f.queue.Dequeue(readyFn)
 }
 
+// DequeueWithWait blocks until a ready job is available or the context is
+// cancelled. It is much more efficient than polling Dequeue in a loop.
+func (f *Frontier) DequeueWithWait(ctx context.Context, readyFn queue.DomainReadyFunc) *queue.Job {
+	return f.queue.DequeueWithWait(ctx, readyFn)
+}
+
 // Stats returns the current queue statistics.
 func (f *Frontier) Stats() queue.Stats {
 	return f.queue.Stats()

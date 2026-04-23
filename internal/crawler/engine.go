@@ -62,7 +62,7 @@ func NewEngine(
 		cfg:      cfg,
 		store:    store,
 		frontier: front,
-		fetcher:  NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, logger),
+		fetcher:  NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, cfg.ProxyURL, logger),
 		parser:   NewParser(),
 		robots:   NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:  limiter,
@@ -88,6 +88,10 @@ func (e *Engine) Start(ctx context.Context) {
 		"workers", e.cfg.Workers,
 		"max_depth", e.cfg.MaxDepth,
 		"politeness_delay", e.cfg.PolitenessDelay,
+		"random_delay", e.cfg.RandomDelay,
+		"parallelism_per_domain", e.cfg.ParallelismPerDomain,
+		"max_retries", e.cfg.MaxRetries,
+		"disable_cookies", e.cfg.DisableCookies,
 		"seed_domains_only", e.cfg.SeedDomainsOnly,
 	)
 
@@ -164,15 +168,12 @@ func (e *Engine) worker(ctx context.Context, id int) {
 
 		// Ask the queue for a job from any ready domain.
 		// This is entirely in-memory — O(domains), zero DB calls.
-		job := e.frontier.Dequeue(readyFn)
+		// DequeueWithWait blocks efficiently until work is available
+		// (woken by enqueue operations) instead of polling with Sleep.
+		job := e.frontier.DequeueWithWait(ctx, readyFn)
 		if job == nil {
-			// No ready work — wait before checking again.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(500 * time.Millisecond):
-				continue
-			}
+			// Context cancelled or no work available after wait.
+			return
 		}
 
 		if ctx.Err() != nil {

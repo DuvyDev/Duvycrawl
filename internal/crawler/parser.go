@@ -6,9 +6,12 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/saintfish/chardet"
 	"golang.org/x/net/html/charset"
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 // ImageMeta holds metadata about an image found on a page.
@@ -45,16 +48,13 @@ func NewParser() *Parser {
 // It automatically detects and converts non-UTF-8 encodings (e.g. ISO-8859-1,
 // Windows-1252) to UTF-8 before parsing.
 func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*ParseResult, error) {
-	// Create a charset-aware reader that converts to UTF-8.
-	// This inspects both the Content-Type header and the HTML <meta> tags
-	// to determine the source encoding.
-	utf8Reader, err := charset.NewReader(bytes.NewReader(htmlBody), contentType)
-	if err != nil {
-		// Fallback: try parsing as-is (assume UTF-8).
-		utf8Reader = bytes.NewReader(htmlBody)
-	}
+	// Convert the raw body to UTF-8 using a robust 3-tier strategy.
+	// 1. DetermineEncoding (Content-Type header + HTML meta tags)
+	// 2. chardet heuristic fallback
+	// 3. Return as-is if everything fails
+	htmlBody = toUTF8(htmlBody, contentType)
 
-	doc, err := goquery.NewDocumentFromReader(utf8Reader)
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(htmlBody))
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +182,64 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	})
 
 	return result, nil
+}
+
+// toUTF8 converts raw HTML bytes to UTF-8 using a robust multi-tier strategy.
+//
+// The single most important rule: if the body is already valid UTF-8, we NEVER
+// touch it. This prevents over-eager detectors from “converting" UTF-8 into
+// garbage (a common problem when a page declares one encoding in the header
+// but actually serves UTF-8).
+//
+// Tiers:
+//  1. Fast path — utf8.Valid check.
+//  2. charset.DetermineEncoding — inspects HTTP Content-Type + HTML meta tags.
+//  3. chardet heuristic — byte-distribution analysis when meta tags lie.
+//  4. Brute force — try common legacy encodings (windows-1252, iso-8859-1, …).
+//  5. Return raw bytes and hope for the best.
+//
+// Every conversion is verified with utf8.Valid before being accepted.
+func toUTF8(body []byte, contentType string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	// Tier 1 — Fast path. Most of the modern web is already UTF-8.
+	if utf8.Valid(body) {
+		return body
+	}
+
+	// The body is NOT valid UTF-8. We MUST convert it.
+	// Tier 2 — golang's detector (headers + HTML meta tags).
+	e, name, _ := charset.DetermineEncoding(body, contentType)
+	if e != nil && strings.ToLower(name) != "utf-8" {
+		if decoded, err := e.NewDecoder().Bytes(body); err == nil && utf8.Valid(decoded) {
+			return decoded
+		}
+	}
+
+	// Tier 3 — chardet heuristic fallback.
+	detector := chardet.NewTextDetector()
+	if result, err := detector.DetectBest(body); err == nil && result != nil {
+		enc, err := htmlindex.Get(result.Charset)
+		if err == nil && enc != nil {
+			if decoded, err := enc.NewDecoder().Bytes(body); err == nil && utf8.Valid(decoded) {
+				return decoded
+			}
+		}
+	}
+
+	// Tier 4 — brute-force common legacy encodings.
+	for _, encName := range []string{"windows-1252", "iso-8859-1", "iso-8859-15", "gbk", "euc-jp", "shift_jis"} {
+		if enc, err := htmlindex.Get(encName); err == nil && enc != nil {
+			if decoded, err := enc.NewDecoder().Bytes(body); err == nil && utf8.Valid(decoded) {
+				return decoded
+			}
+		}
+	}
+
+	// Tier 5 — nothing worked; return raw bytes and hope goquery can cope.
+	return body
 }
 
 // extractText recursively extracts visible text from a goquery selection,

@@ -10,6 +10,9 @@ crawler:
   request_timeout: 10s
   # Minimum delay between requests to the same domain
   politeness_delay: 1s
+  # Extra randomized duration added to politeness_delay (e.g. 500ms)
+  # This makes crawl patterns less predictable and helps avoid blocks.
+  random_delay: 0s
   # Maximum retry attempts for failed requests
   max_retries: 3
   # User-Agent string sent with every request
@@ -22,6 +25,15 @@ crawler:
   # If true, ONLY crawl pages within seed domains.
   # If false, follow links freely across the entire web.
   seed_domains_only: false
+  # Max concurrent requests to the SAME domain (like Colly's Parallelism).
+  # Higher = faster for a single domain, but be polite. Default: 2.
+  parallelism_per_domain: 2
+  # Disable cookie handling. Leave false unless you specifically want
+  # to avoid session cookies (most sites require cookies to work).
+  disable_cookies: false
+  # Max idle keep-alive connections per host. Increase for high throughput
+  # when crawling the same domains repeatedly.
+  max_idle_conns_per_host: 100
 
 storage:
   # Path to the SQLite database file

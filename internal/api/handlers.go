@@ -141,6 +141,29 @@ func (h *Handlers) GetPage(w http.ResponseWriter, r *http.Request) {
 	writeSuccess(w, page)
 }
 
+// LookupPage looks up a page by its exact URL.
+func (h *Handlers) LookupPage(w http.ResponseWriter, r *http.Request) {
+	url := r.URL.Query().Get("url")
+	if url == "" {
+		writeError(w, http.StatusBadRequest, "missing required query parameter 'url'")
+		return
+	}
+
+	page, err := h.store.GetPageByURL(r.Context(), url)
+	if err != nil {
+		h.logger.Error("failed to lookup page", "url", url, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to lookup page")
+		return
+	}
+
+	if page == nil {
+		writeError(w, http.StatusNotFound, "page not found")
+		return
+	}
+
+	writeSuccess(w, page)
+}
+
 // --- Stats ---
 
 // GetStats returns overall crawler statistics.

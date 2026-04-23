@@ -51,6 +51,41 @@ Visión técnica de cómo Duvycrawl está diseñado internamente.
 
 ## Componentes Clave
 
+### Fetcher (HTTP Client)
+
+- **Cookie jar** (`net/http/cookiejar`) habilitado por defecto: esencial para
+  sitios con protecciones por sesión, CSRF, o login walls.
+- **Transport optimizado**:
+  - `ForceAttemptHTTP2: true` para HTTP/2.
+  - `MaxIdleConnsPerHost: 100` (antes 10) para aprovechar keep-alive.
+  - `MaxConnsPerHost` igualado a idle conns.
+  - Gzip automático habilitado.
+- **Retry con backoff**: reintentos automáticos con espera creciente;
+  no reintenta errores 4xx (excepto 429 Too Many Requests).
+- **Proxy HTTP/SOCKS5** soportado vía configuración YAML.
+- **Headers realistas**: `Accept-Encoding`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`,
+  simulando un navegador real.
+
+### Queue (Frontier)
+
+- **Bloom filter** integrado para deduplicación eficiente de URLs:
+  - Filtra URLs duplicadas con bajo uso de memoria (~1MB para 1M URLs).
+  - Tasa de falsos positivos configurable (~1% por defecto).
+  - Persistido en disco (`data/bloom.bf`) para sobrevivir reinicios.
+  - Consultado antes de encolar cada URL nueva.
+- **Wake channel**: los workers se bloquean eficientemente cuando no hay trabajo
+  y se despiertan inmediatamente al llegar nuevas URLs.
+
+### Parser (HTML → datos)
+
+- **Detección de charset en 3 capas** (como Colly):
+  1. `Content-Type` HTTP header (`charset=...`).
+  2. Meta tags HTML (`<meta charset="...">`).
+  3. **Heurística de contenido** vía `github.com/saintfish/chardet` cuando las
+     dos anteriores fallan. Detecta encodings como ISO-8859-1, Windows-1252,
+     GB2312, EUC-JP, etc. desde el contenido binario crudo.
+- Conversión automática a UTF-8 antes de parsear con GoQuery.
+
 ### Storage (SQLite + FTS5)
 
 - **WAL mode**: Permite lecturas concurrentes durante escrituras
@@ -60,16 +95,22 @@ Visión técnica de cómo Duvycrawl está diseñado internamente.
 
 ### Worker Pool
 
-- N goroutines (default: 10) ejecutan un loop infinito
-- Cada worker opera independientemente: dequeue → fetch → parse → store
-- `context.WithCancel` permite shutdown graceful
-- `sync.WaitGroup` asegura que todos los workers terminen
+- N goroutines (default: 100) ejecutan un loop eficiente.
+- Cada worker opera independientemente: dequeue → fetch → parse → store.
+- **Wake channel** en la queue: los workers duermen eficientemente cuando no
+  hay trabajo y se despiertan inmediatamente al llegar nuevas URLs.
+  Elimina el polling con `time.Sleep(500ms)` anterior.
+- `context.WithCancel` permite shutdown graceful.
+- `sync.WaitGroup` asegura que todos los workers terminen.
 
-### Rate Limiter
+### Rate Limiter (inspirado en Colly)
 
-- Map de `domain → último timestamp de request`
-- `sync.Mutex` para thread-safety
-- Cleanup automático cada 5 minutos (evita memory leaks)
+- **Semáforos por dominio** (`chan struct{}` bufferizado) permiten configurar
+  paralelismo concurrente por dominio (no solo 1 como antes).
+- **Delay fijo + RandomDelay**: añade jitter aleatorio para evitar patrones
+  predecibles de crawling.
+- `sync.Mutex` para thread-safety.
+- Cleanup automático cada 5 minutos.
 
 ### Robots.txt Cache
 

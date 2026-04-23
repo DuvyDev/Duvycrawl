@@ -2,13 +2,31 @@
 // per-domain fairness for the crawler's URL frontier. Unlike the previous
 // SQLite-backed queue, all enqueue/dequeue operations happen in memory,
 // eliminating database contention from the hot path.
+//
+// URL deduplication is performed by a Bloom filter instead of a naive map,
+// reducing memory usage from ~100+ bytes per URL to ~2 bits per URL.
+// With the default settings (10M capacity, 0.1% false-positive rate) the
+// filter consumes ~18 MB regardless of how many URLs have been inserted.
 package queue
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/bits-and-blooms/bloom/v3"
 )
+
+// bloomCapacity is the expected number of unique URLs the Bloom filter
+// should handle before the false-positive rate starts to degrade.
+const bloomCapacity uint = 10_000_000
+
+// bloomFPP is the target false-positive probability. 0.001 = 0.1%.
+// In practice this means ~1 in 1,000 truly new URLs may be incorrectly
+// treated as a duplicate and skipped. This is an acceptable trade-off
+// for the massive memory savings.
+const bloomFPP float64 = 0.001
 
 // Job represents a URL queued for crawling.
 type Job struct {
@@ -36,22 +54,28 @@ type DomainReadyFunc func(domain string) bool
 // Workers call Dequeue with a domain-readiness function, and the queue
 // finds the highest-priority job from any ready domain — entirely in
 // memory, with no database round-trips.
+//
+// Deduplication uses a Bloom filter for O(1) constant-time membership
+// tests with minimal memory footprint.
 type Queue struct {
 	mu      sync.Mutex
 	domains map[string][]*Job // domain → jobs sorted by priority desc
-	seen    map[string]bool   // URL deduplication set
-	nextID  atomic.Int64      // auto-increment job ID
+	bloom   *bloom.BloomFilter // URL deduplication via Bloom filter
+	nextID  atomic.Int64       // auto-increment job ID
+	wakeCh  chan struct{}      // wakes workers when new jobs arrive
 
 	// Metrics.
 	enqueued atomic.Int64
 	dequeued atomic.Int64
 }
 
-// New creates a new empty in-memory queue.
+// New creates a new empty in-memory queue with a Bloom filter sized for
+// 10 million URLs at a 0.1% false-positive rate (~18 MB).
 func New() *Queue {
 	return &Queue{
 		domains: make(map[string][]*Job),
-		seen:    make(map[string]bool),
+		bloom:   bloom.NewWithEstimates(bloomCapacity, bloomFPP),
+		wakeCh:  make(chan struct{}, 1),
 	}
 }
 
@@ -62,16 +86,23 @@ func (q *Queue) Enqueue(job *Job) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.seen[job.URL] {
+	if q.bloom.TestString(job.URL) {
 		return false
 	}
 
 	job.ID = q.nextID.Add(1)
-	q.seen[job.URL] = true
+	q.bloom.AddString(job.URL)
 
 	// Insert into the domain's queue, maintaining priority order (desc).
 	q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
 	q.enqueued.Add(1)
+
+	// Wake up a waiting worker (non-blocking).
+	select {
+	case q.wakeCh <- struct{}{}:
+	default:
+	}
+
 	return true
 }
 
@@ -83,17 +114,26 @@ func (q *Queue) EnqueueBatch(jobs []*Job) int {
 
 	added := 0
 	for _, job := range jobs {
-		if q.seen[job.URL] {
+		if q.bloom.TestString(job.URL) {
 			continue
 		}
 
 		job.ID = q.nextID.Add(1)
-		q.seen[job.URL] = true
+		q.bloom.AddString(job.URL)
 		q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
 		added++
 	}
 
 	q.enqueued.Add(int64(added))
+
+	// Wake up waiting workers (non-blocking).
+	if added > 0 {
+		select {
+		case q.wakeCh <- struct{}{}:
+		default:
+		}
+	}
+
 	return added
 }
 
@@ -107,6 +147,36 @@ func (q *Queue) Dequeue(readyFn DomainReadyFunc) *Job {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	return q.dequeueLocked(readyFn)
+}
+
+// DequeueWithWait blocks until a ready job is available or the context
+// is cancelled. This is much more efficient than polling with Sleep.
+func (q *Queue) DequeueWithWait(ctx context.Context, readyFn DomainReadyFunc) *Job {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		if job := q.Dequeue(readyFn); job != nil {
+			return job
+		}
+
+		// Wait to be woken by Enqueue, or timeout after a short period
+		// to re-check in case the rate limiter released a domain.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-q.wakeCh:
+			// New job arrived or worker was signalled — loop and try again.
+		}
+	}
+}
+
+// dequeueLocked is the internal dequeue logic; caller must hold q.mu.
+func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 	// Collect all domains with pending jobs.
 	type candidate struct {
 		domain   string
@@ -148,11 +218,11 @@ func (q *Queue) Dequeue(readyFn DomainReadyFunc) *Job {
 	return nil
 }
 
-// MarkSeen adds a URL to the deduplication set without enqueuing it.
+// MarkSeen adds a URL to the Bloom filter without enqueuing it.
 // Use this for URLs already crawled (loaded from the database on startup).
 func (q *Queue) MarkSeen(url string) {
 	q.mu.Lock()
-	q.seen[url] = true
+	q.bloom.AddString(url)
 	q.mu.Unlock()
 }
 

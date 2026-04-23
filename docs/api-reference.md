@@ -14,6 +14,7 @@ Todos los endpoints devuelven JSON con `Content-Type: application/json`.
 | `GET` | `/api/v1/pages/{id}` | Detalle de una página |
 | `GET` | `/api/v1/stats` | Estadísticas generales |
 | `POST` | `/api/v1/crawl` | Encolar URLs para crawlear |
+| `GET` | `/api/v1/pages/lookup` | Buscar página por URL exacta |
 | `GET` | `/api/v1/queue` | Estado de la cola |
 | `GET` | `/api/v1/seeds` | Listar dominios seed |
 | `POST` | `/api/v1/seeds` | Agregar dominio seed |
@@ -85,6 +86,51 @@ Búsqueda full-text sobre las páginas indexadas usando SQLite FTS5.
 ```json
 {
   "error": "missing required query parameter 'q'"
+}
+```
+
+---
+
+### `GET /api/v1/pages/lookup`
+
+Busca una página por su URL exacta. Útil para verificar si una URL ya fue crawleada.
+
+**Query Parameters**
+
+| Param | Tipo | Descripción |
+|-------|------|-------------|
+| `url` | string | URL exacta a buscar (requerido) |
+
+**Response** `200 OK`
+```json
+{
+  "data": {
+    "id": 43,
+    "url": "https://learn.microsoft.com/en-us/dotnet/csharp/",
+    "domain": "learn.microsoft.com",
+    "title": "C# Guide - .NET managed language",
+    "description": "The C# guide has everything you need...",
+    "content": "Get started Tour of C# Concept Fundamentals...",
+    "status_code": 200,
+    "content_hash": "a1b2c3d4...",
+    "crawled_at": "2026-04-21T23:36:14Z",
+    "created_at": "2026-04-21T23:36:14Z",
+    "updated_at": "2026-04-21T23:36:14Z"
+  }
+}
+```
+
+**Error** `404 Not Found` — Si la URL no existe en la base de datos.
+```json
+{
+  "error": "page not found"
+}
+```
+
+**Error** `400 Bad Request` — Si falta el parámetro `url`.
+```json
+{
+  "error": "missing required query parameter 'url'"
 }
 ```
 
