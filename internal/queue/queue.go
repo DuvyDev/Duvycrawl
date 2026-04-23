@@ -36,6 +36,7 @@ type Job struct {
 	Depth       int
 	Priority    int    // Higher = more urgent.
 	Fingerprint string // Structural fingerprint for deduplication.
+	Retries     int    // Number of times this job has been retried.
 }
 
 // Stats provides a snapshot of the queue state.
@@ -146,6 +147,26 @@ func (q *Queue) EnqueueBatch(jobs []*Job) int {
 	}
 
 	return added
+}
+
+// EnqueueRetry adds a job back to the queue without checking the Bloom filter.
+// Use this when re-queuing a job that previously failed, so retries are not
+// deduplicated away.
+func (q *Queue) EnqueueRetry(job *Job) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	job.ID = q.nextID.Add(1)
+	q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
+	q.enqueued.Add(1)
+
+	// Wake up a waiting worker (non-blocking).
+	select {
+	case q.wakeCh <- struct{}{}:
+	default:
+	}
+
+	return true
 }
 
 // Dequeue finds the highest-priority job from any domain where

@@ -72,6 +72,11 @@ func run() error {
 
 	apiServer := api.NewServer(&cfg.API, store, engine, front, logger)
 
+	// --- Seed Bloom filter from existing DB pages ---
+	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {
+		logger.Warn("failed to seed bloom filter", "error", err)
+	}
+
 	// --- Seed Default Domains ---
 	if err := seedDefaultDomains(ctx, cfg, store, front, logger); err != nil {
 		return fmt.Errorf("seeding default domains: %w", err)
@@ -161,6 +166,28 @@ func initLogger(cfg config.LoggingConfig) *slog.Logger {
 	}
 
 	return slog.New(handler)
+}
+
+// seedBloomFilter loads all already-crawled URLs from the database and marks
+// them in the in-memory Bloom filter so they are not re-enqueued as new.
+func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue, logger *slog.Logger) error {
+	urls, fingerprints, err := store.GetAllPageURLs(ctx)
+	if err != nil {
+		return err
+	}
+
+	marked := 0
+	for i := range urls {
+		q.MarkSeen(fingerprints[i])
+		q.MarkSeen(urls[i])
+		marked += 2
+	}
+
+	logger.Info("bloom filter seeded from database",
+		"urls", len(urls),
+		"marked", marked,
+	)
+	return nil
 }
 
 // seedDefaultDomains registers seed domains and enqueues their start URLs.

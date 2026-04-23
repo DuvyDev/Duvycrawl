@@ -5,6 +5,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -115,7 +117,7 @@ func DefaultConfig() *Config {
 			PolitenessDelay:      1 * time.Second,
 			RandomDelay:          0,
 			MaxRetries:           3,
-			UserAgent:            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+			UserAgent:            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
 			MaxPageSizeKB:        5120,
 			RespectRobots:        true,
 			SeedDomainsOnly:      false,
@@ -144,8 +146,10 @@ func DefaultConfig() *Config {
 }
 
 // Load reads a YAML configuration file and returns a Config.
-// Missing fields are filled with defaults. The resulting config
-// is validated before being returned.
+// Missing fields are filled with defaults. After loading the main file,
+// any YAML files in a "seeds" subdirectory next to the config are also
+// loaded and their seeds are merged into the final config.
+// The resulting config is validated before being returned.
 func Load(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -156,6 +160,33 @@ func Load(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
+	}
+
+	// Merge seeds from any YAML files in the <config-dir>/seeds/ folder.
+	seedsDir := filepath.Join(filepath.Dir(path), "seeds")
+	entries, err := os.ReadDir(seedsDir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+				continue
+			}
+			seedPath := filepath.Join(seedsDir, entry.Name())
+			seedData, err := os.ReadFile(seedPath)
+			if err != nil {
+				continue // skip unreadable seed files
+			}
+			var partial struct {
+				Seeds []SeedConfig `yaml:"seeds"`
+			}
+			if err := yaml.Unmarshal(seedData, &partial); err != nil {
+				continue // skip malformed seed files
+			}
+			cfg.Seeds = append(cfg.Seeds, partial.Seeds...)
+		}
 	}
 
 	if err := cfg.validate(); err != nil {

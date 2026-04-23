@@ -204,6 +204,26 @@ func (e *Engine) worker(ctx context.Context, id int) {
 	}
 }
 
+// retryOrFail re-enqueues a failed job if retries remain, otherwise counts it as errored.
+func (e *Engine) retryOrFail(job *queue.Job, logger *slog.Logger, reason string, err error) {
+	if job.Retries < e.cfg.MaxRetries {
+		job.Retries++
+		e.frontier.Retry(job)
+		logger.Info("re-queuing job for retry",
+			"reason", reason,
+			"retries", job.Retries,
+			"url", job.URL,
+		)
+		return
+	}
+	e.pagesErrored.Add(1)
+	if err != nil {
+		logger.Warn(reason, "error", err)
+	} else {
+		logger.Warn(reason)
+	}
+}
+
 // processJob handles the complete lifecycle of crawling a single URL.
 func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue.Job) {
 	logger = logger.With(
@@ -229,8 +249,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	logger.Debug("fetching page")
 	result, err := e.fetcher.FetchWithUserAgent(ctx, job.URL, userAgent)
 	if err != nil {
-		e.pagesErrored.Add(1)
-		logger.Warn("fetch failed", "error", err)
+		e.retryOrFail(job, logger, "fetch failed", err)
 		return
 	}
 
@@ -259,7 +278,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 			e.fallbackStates.Store(job.Domain, fallbackFailed)
 			// Continue with original result so we don't lose the 2xx/3xx data.
 			if result.StatusCode < 200 || result.StatusCode >= 300 {
-				logger.Debug("non-2xx status", "status", result.StatusCode)
+				e.retryOrFail(job, logger, "non-2xx status after fallback", nil)
 				return
 			}
 		}
@@ -267,15 +286,14 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Skip non-2xx responses.
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		logger.Debug("non-2xx status", "status", result.StatusCode)
+		e.retryOrFail(job, logger, "non-2xx status", nil)
 		return
 	}
 
 	// Parse the HTML.
 	parsed, err := e.parser.Parse(result.Body, result.ContentType, result.FinalURL)
 	if err != nil {
-		e.pagesErrored.Add(1)
-		logger.Warn("parse failed", "error", err)
+		e.retryOrFail(job, logger, "parse failed", err)
 		return
 	}
 
@@ -316,8 +334,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	}
 
 	if err := e.store.UpsertPage(ctx, page); err != nil {
-		e.pagesErrored.Add(1)
-		logger.Error("failed to store page", "error", err)
+		e.retryOrFail(job, logger, "failed to store page", err)
 		return
 	}
 

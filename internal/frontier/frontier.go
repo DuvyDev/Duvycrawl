@@ -153,13 +153,6 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 			Priority:    priority,
 			Fingerprint: fingerprint,
 		})
-
-		jobs = append(jobs, &queue.Job{
-			URL:      normalized,
-			Domain:   domain,
-			Depth:    depth,
-			Priority: priority,
-		})
 	}
 
 	if len(jobs) == 0 {
@@ -189,6 +182,12 @@ func (f *Frontier) Dequeue(readyFn queue.DomainReadyFunc) *queue.Job {
 // cancelled. It is much more efficient than polling Dequeue in a loop.
 func (f *Frontier) DequeueWithWait(ctx context.Context, readyFn queue.DomainReadyFunc) *queue.Job {
 	return f.queue.DequeueWithWait(ctx, readyFn)
+}
+
+// Retry re-enqueues a failed job for another attempt, bypassing the
+// Bloom filter so the retry is not deduplicated away.
+func (f *Frontier) Retry(job *queue.Job) {
+	f.queue.EnqueueRetry(job)
 }
 
 // Stats returns the current queue statistics.

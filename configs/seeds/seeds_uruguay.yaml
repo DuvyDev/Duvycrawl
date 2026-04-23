@@ -1,0 +1,78 @@
+seeds:
+  - domain: blog.portal.gub.uy
+    priority: 90
+  - domain: catalogodatos.gub.uy
+    priority: 90
+  - domain: gub.uy
+    priority: 90
+  - domain: inumet.gub.uy
+    priority: 90
+  - domain: mi.iduruguay.gub.uy
+    priority: 90
+  - domain: montevideo.gub.uy
+    priority: 90
+  - domain: parlamento.gub.uy
+    priority: 90
+  - domain: servicios.dgi.gub.uy
+    priority: 90
+  - domain: sucive.gub.uy
+    priority: 90
+  - domain: uruguayconcursa.gub.uy
+    priority: 90
+  - domain: antel.com.uy
+    priority: 85
+  - domain: brou.com.uy
+    priority: 85
+  - domain: impo.com.uy
+    priority: 85
+  - domain: ose.com.uy
+    priority: 85
+  - domain: uruguay.uy
+    priority: 85
+  - domain: ute.com.uy
+    priority: 85
+  - domain: auf.org.uy
+    priority: 80
+  - domain: oca.com.uy
+    priority: 80
+  - domain: prexcard.com
+    priority: 75
+  - domain: midinero.com.uy
+    priority: 75
+  - domain: meteored.com.uy
+    priority: 65
+  - domain: mercadolibre.com.uy
+    priority: 70
+    start_urls:
+      - https://mercadolibre.com.uy/
+      - https://mercadolibre.com.uy/categorias
+  - domain: disco.com.uy
+    priority: 65
+  - domain: eldorado.com.uy
+    priority: 65
+  - domain: loi.com.uy
+    priority: 65
+  - domain: tiendainglesa.com.uy
+    priority: 65
+    start_urls:
+      - https://tiendainglesa.com.uy/supermercado
+  - domain: uruguaynatural.com
+    priority: 65
+  - domain: subrayado.com.uy
+    priority: 65
+  - domain: vientos.uy
+    priority: 65
+  - domain: elpais.com.uy
+    priority: 60
+  - domain: ladiaria.com.uy
+    priority: 55
+  - domain: montevideo.com.uy
+    priority: 55
+  - domain: gallito.com.uy
+    priority: 45
+  - domain: correo.com.uy
+    priority: 45
+  - domain: dac.com.uy
+    priority: 45
+  - domain: tiendamia.com
+    priority: 45

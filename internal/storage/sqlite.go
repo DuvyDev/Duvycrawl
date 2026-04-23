@@ -273,6 +273,29 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 	return &p, nil
 }
 
+// GetAllPageURLs returns every crawled URL and its structural fingerprint.
+func (s *SQLiteStorage) GetAllPageURLs(ctx context.Context) (urls []string, fingerprints []string, err error) {
+	rows, err := s.readDB.QueryContext(ctx, "SELECT url, url_fingerprint FROM pages")
+	if err != nil {
+		return nil, nil, fmt.Errorf("querying all page URLs: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var u, f string
+		if err := rows.Scan(&u, &f); err != nil {
+			return nil, nil, fmt.Errorf("scanning page URL: %w", err)
+		}
+		urls = append(urls, u)
+		fingerprints = append(fingerprints, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterating page URLs: %w", err)
+	}
+	return urls, fingerprints, nil
+}
+
 // SearchPages performs hybrid search optimized for navigational queries and
 // typo tolerance. It tries increasingly permissive retrieval modes and then
 // re-ranks candidates in Go using title/domain phrase quality, domain-root

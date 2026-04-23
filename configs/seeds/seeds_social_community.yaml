@@ -1,0 +1,42 @@
+seeds:
+  - domain: reddit.com
+    priority: 80
+    start_urls:
+      - https://reddit.com/
+      - https://reddit.com/r/popular/
+      - https://reddit.com/r/uruguay/
+  - domain: x.com
+    priority: 75
+  - domain: blog.twitch.tv
+    priority: 65
+  - domain: twitch.tv
+    priority: 65
+  - domain: steamcommunity.com
+    priority: 60
+  - domain: pinterest.com
+    priority: 60
+  - domain: yahoo.com
+    priority: 60
+  - domain: fandom.com
+    priority: 55
+  - domain: warframe.fandom.com
+    priority: 55
+    start_urls:
+      - https://warframe.fandom.com/es
+      - https://warframe.fandom.com/wiki
+      - https://warframe.fandom.com/wiki/WARFRAME_Wiki
+  - domain: 9gag.com
+    priority: 40
+  - domain: 4chan.org
+    priority: 40
+  - domain: trends24.in
+    priority: 40
+  - domain: getdaytrends.com
+    priority: 40
+    start_urls:
+      - https://getdaytrends.com/
+      - https://getdaytrends.com/es/
+  - domain: ninjaone.com
+    priority: 40
+    start_urls:
+      - https://ninjaone.com/blog/

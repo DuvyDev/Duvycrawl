@@ -1,0 +1,140 @@
+seeds:
+  - domain: github.com
+    priority: 90
+    start_urls:
+      - https://github.com/
+      - https://github.com/trending
+      - https://github.com/explore
+  - domain: stackoverflow.com
+    priority: 90
+    start_urls:
+      - https://stackoverflow.com/questions
+  - domain: accounts.google.com
+    priority: 88
+  - domain: docs.google.com
+    priority: 88
+  - domain: drive.google.com
+    priority: 88
+  - domain: google.com
+    priority: 88
+  - domain: mail.google.com
+    priority: 88
+  - domain: play.google.com
+    priority: 88
+  - domain: workspace.google.com
+    priority: 88
+  - domain: anthropic.com
+    priority: 85
+  - domain: apps.microsoft.com
+    priority: 85
+  - domain: learn.microsoft.com
+    priority: 85
+  - domain: microsoft.com
+    priority: 85
+  - domain: openai.com
+    priority: 85
+  - domain: build.nvidia.com
+    priority: 80
+  - domain: firefox.com
+    priority: 80
+  - domain: mozilla.org
+    priority: 80
+  - domain: nvidia.com
+    priority: 80
+  - domain: antigravity.google
+    priority: 75
+  - domain: gemini.google
+    priority: 75
+  - domain: ollama.com
+    priority: 75
+  - domain: openrouter.ai
+    priority: 75
+  - domain: archlinux.org
+    priority: 70
+  - domain: artificialanalysis.ai
+    priority: 70
+  - domain: livebench.ai
+    priority: 70
+  - domain: aur.archlinux.org
+    priority: 70
+  - domain: debian.org
+    priority: 70
+  - domain: ubuntu.com
+    priority: 70
+  - domain: hub.docker.com
+    priority: 70
+  - domain: curlie.org
+    priority: 65
+    start_urls:
+      - https://curlie.org/en
+      - https://curlie.org/es
+      - https://curlie.org/it
+      - https://curlie.org/fr
+      - https://curlie.org/de
+      - https://curlie.org/ja
+      - https://curlie.org/tr
+      - https://curlie.org/ru
+      - https://curlie.org/pl
+      - https://curlie.org/nl
+  - domain: privacyguides.org
+    priority: 65
+  - domain: privacytools.io
+    priority: 65
+  - domain: f-droid.org
+    priority: 65
+    start_urls:
+      - https://f-droid.org/es/
+      - https://f-droid.org/en/
+  - domain: thehackernews.com
+    priority: 65
+  - domain: vellum.ai
+    priority: 65
+  - domain: guru3d.com
+    priority: 60
+  - domain: techradar.com
+    priority: 60
+  - domain: sourceforge.net
+    priority: 60
+  - domain: techpowerup.com
+    priority: 60
+    start_urls:
+      - https://techpowerup.com/
+      - https://techpowerup.com/download/
+  - domain: techspot.com
+    priority: 60
+  - domain: deals.majorgeeks.com
+    priority: 55
+  - domain: forums.majorgeeks.com
+    priority: 55
+  - domain: geekcade.majorgeeks.com
+    priority: 55
+  - domain: majorgeeks.com
+    priority: 55
+  - domain: proton.me
+    priority: 55
+  - domain: purelymail.com
+    priority: 55
+  - domain: similarweb.com
+    priority: 55
+  - domain: tools.majorgeeks.com
+    priority: 55
+  - domain: cybernews.com
+    priority: 55
+  - domain: cnet.com
+    priority: 55
+  - domain: adslzone.net
+    priority: 50
+  - domain: lineageos.org
+    priority: 50
+  - domain: wiki.lineageos.org
+    priority: 50
+  - domain: distrowatch.com
+    priority: 50
+  - domain: av-test.org
+    priority: 30
+  - domain: tuta.com
+    priority: 30
+  - domain: accuweather.com
+    priority: 25
+  - domain: deepl.com
+    priority: 25

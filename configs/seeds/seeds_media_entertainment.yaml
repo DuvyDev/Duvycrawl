@@ -1,0 +1,170 @@
+seeds:
+  - domain: en.wikipedia.org
+    priority: 90
+    start_urls:
+      - https://en.wikipedia.org/wiki/Main_Page
+      - https://en.wikipedia.org/wiki/Portal:Current_events
+  - domain: es.wikipedia.org
+    priority: 90
+    start_urls:
+      - https://es.wikipedia.org/wiki/Wikipedia:Portada
+      - https://es.wikipedia.org/wiki/Portal:Actualidad
+  - domain: archive.org
+    priority: 85
+  - domain: web.archive.org
+    priority: 85
+  - domain: wiki.archiveteam.org
+    priority: 85
+  - domain: cnn.com
+    priority: 80
+  - domain: cnnespanol.cnn.com
+    priority: 80
+  - domain: edition.cnn.com
+    priority: 80
+  - domain: infobae.com
+    priority: 75
+    start_urls:
+      - https://infobae.com/ultimas-noticias/
+      - https://infobae.com/politica/
+      - https://infobae.com/america/
+      - https://infobae.com/economia/
+  - domain: bbc.com
+    priority: 75
+  - domain: techcrunch.com
+    priority: 75
+  - domain: curseforge.com
+    priority: 75
+  - domain: nexusmods.com
+    priority: 75
+  - domain: elespanol.com
+    priority: 70
+  - domain: marca.com
+    priority: 70
+  - domain: msn.com
+    priority: 70
+  - domain: vandal.elespanol.com
+    priority: 70
+  - domain: xataka.com
+    priority: 65
+  - domain: imdb.com
+    priority: 60
+  - domain: 3djuegos.com
+    priority: 55
+  - domain: ign.com
+    priority: 55
+  - domain: ixbt.games
+    priority: 55
+  - domain: latam.ign.com
+    priority: 55
+  - domain: metacritic.com
+    priority: 55
+  - domain: rottentomatoes.com
+    priority: 55
+  - domain: topesdegama.com
+    priority: 55
+  - domain: animenewsnetwork.com
+    priority: 50
+  - domain: disneyplus.com
+    priority: 50
+  - domain: hbomax.com
+    priority: 50
+  - domain: netflix.com
+    priority: 50
+  - domain: open.spotify.com
+    priority: 50
+  - domain: primevideo.com
+    priority: 50
+  - domain: spotify.com
+    priority: 50
+  - domain: blizzard.com
+    priority: 45
+  - domain: crunchyroll.com
+    priority: 45
+    start_urls:
+      - https://crunchyroll.com/
+      - https://crunchyroll.com/es/news/
+      - https://crunchyroll.com/news/
+  - domain: epicgames.com
+    priority: 45
+  - domain: forums.warframe.com
+    priority: 45
+  - domain: help.steampowered.com
+    priority: 45
+  - domain: protondb.com
+    priority: 45
+  - domain: crackrelease.com
+    priority: 45
+  - domain: somoskudasai.com
+    priority: 45
+  - domain: steamdb.info
+    priority: 45
+  - domain: steampowered.com
+    priority: 45
+  - domain: store.epicgames.com
+    priority: 45
+  - domain: store.steampowered.com
+    priority: 45
+  - domain: warframe.com
+    priority: 45
+  - domain: wiki.warframe.com
+    priority: 45
+  - domain: gog.com
+    priority: 40
+  - domain: hytale.com
+    priority: 40
+  - domain: overframe.gg
+    priority: 40
+  - domain: hytalecharts.com
+    priority: 35
+  - domain: marvelrivals.gg
+    priority: 35
+  - domain: allkeyshop.com
+    priority: 30
+    start_urls:
+      - https://allkeyshop.com/blog/
+  - domain: jkanime.net
+    priority: 30
+  - domain: g2a.com
+    priority: 25
+  - domain: tvymanga3.com
+    priority: 25
+  - domain: animeflv.net
+    priority: 20
+  - domain: ivanime.com
+    priority: 20
+  - domain: www4.animeflv.net
+    priority: 20
+  - domain: elamigosgamez.net
+    priority: 15
+  - domain: mega-mkv.com
+    priority: 15
+  - domain: hyzen.net
+    priority: 15
+  - domain: mapgenie.io
+    priority: 15
+  - domain: metaforge.app
+    priority: 15
+  - domain: tebex.io
+    priority: 15
+  - domain: builtbybit.com
+    priority: 15
+  - domain: yts.bz
+    priority: 15
+  - domain: cphermanosarregui.es
+    priority: 10
+  - domain: cuevanav.net
+    priority: 10
+  - domain: hentaila.com
+    priority: 10
+  - domain: hentaila.tv
+    priority: 10
+  - domain: es.pornhub.com
+    priority: 5
+  - domain: pornhub.com
+    priority: 5
+  - domain: theporndude.com
+    priority: 5
+  - domain: xvideos.com
+    priority: 5
+  - domain: youporn.com
+    priority: 5

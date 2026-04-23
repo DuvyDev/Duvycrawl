@@ -23,6 +23,10 @@ type Storage interface {
 	// GetPageByID retrieves a single page by its database ID.
 	GetPageByID(ctx context.Context, id int64) (*Page, error)
 
+	// GetAllPageURLs returns every crawled URL and its structural fingerprint.
+	// Used to seed the in-memory Bloom filter on startup.
+	GetAllPageURLs(ctx context.Context) (urls []string, fingerprints []string, err error)
+
 	// SearchPages performs a full-text search and returns paginated results.
 	// Returns the matching results and the total count of matches.
 	// If lang is non-empty, results in that language are boosted in ranking.
