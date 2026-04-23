@@ -133,4 +133,26 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_language ON pages(language)`,
 	`CREATE INDEX IF NOT EXISTS idx_images_domain ON images(domain)`,
 	`CREATE INDEX IF NOT EXISTS idx_images_page_id ON images(page_id)`,
+
+	// --- URL fingerprint for structural deduplication ---
+	`ALTER TABLE pages ADD COLUMN url_fingerprint TEXT NOT NULL DEFAULT ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_fingerprint ON pages(url_fingerprint)`,
+
+	// --- Published date for freshness scoring ---
+	`ALTER TABLE pages ADD COLUMN published_at DATETIME`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_published_at ON pages(published_at)`,
+
+	// --- Links table (for backlink analysis) ---
+	`CREATE TABLE IF NOT EXISTS links (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		source_id INTEGER NOT NULL,
+		source_url TEXT NOT NULL,
+		target_url TEXT NOT NULL,
+		anchor_text TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (source_id) REFERENCES pages(id) ON DELETE CASCADE
+	)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_source_target ON links(source_id, target_url)`,
+	`CREATE INDEX IF NOT EXISTS idx_links_target_url ON links(target_url)`,
+	`CREATE INDEX IF NOT EXISTS idx_links_source_id ON links(source_id)`,
 }

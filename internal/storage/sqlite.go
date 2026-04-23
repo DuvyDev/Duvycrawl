@@ -64,6 +64,7 @@ type searchCandidate struct {
 	isSeed     bool
 	contentLen int
 	mode       searchMode
+	publishedAt sql.NullTime
 }
 
 type searchDomainInfo struct {
@@ -186,25 +187,33 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 // UpsertPage inserts a new page or updates an existing one matched by URL.
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, description, content, language, region, status_code, content_hash, crawled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO pages (url, domain, title, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(url) DO UPDATE SET
-			domain       = excluded.domain,
-			title        = excluded.title,
-			description  = excluded.description,
-			content      = excluded.content,
-			language     = excluded.language,
-			region       = excluded.region,
-			status_code  = excluded.status_code,
-			content_hash = excluded.content_hash,
-			crawled_at   = excluded.crawled_at,
-			updated_at   = CURRENT_TIMESTAMP
+			domain           = excluded.domain,
+			title            = excluded.title,
+			description      = excluded.description,
+			content          = excluded.content,
+			language         = excluded.language,
+			region           = excluded.region,
+			status_code      = excluded.status_code,
+			content_hash     = excluded.content_hash,
+			url_fingerprint  = excluded.url_fingerprint,
+			published_at     = COALESCE(excluded.published_at, pages.published_at),
+			crawled_at       = excluded.crawled_at,
+			updated_at       = CURRENT_TIMESTAMP
 	`
+
+	var publishedAt any
+	if !page.PublishedAt.IsZero() {
+		publishedAt = page.PublishedAt
+	}
 
 	_, err := s.writeDB.ExecContext(ctx, query,
 		page.URL, page.Domain, page.Title, page.Description,
 		page.Content, page.Language, page.Region,
-		page.StatusCode, page.ContentHash, page.CrawledAt,
+		page.StatusCode, page.ContentHash, page.URLFingerprint,
+		publishedAt, page.CrawledAt,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
@@ -214,22 +223,28 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 
 // GetPageByURL retrieves a single page by its URL.
 func (s *SQLiteStorage) GetPageByURL(ctx context.Context, url string) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, crawled_at, created_at, updated_at FROM pages WHERE url = ?", url)
+	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url = ?", url)
+}
+
+// GetPageByFingerprint retrieves a single page by its structural fingerprint.
+func (s *SQLiteStorage) GetPageByFingerprint(ctx context.Context, fingerprint string) (*Page, error) {
+	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url_fingerprint = ? LIMIT 1", fingerprint)
 }
 
 // GetPageByID retrieves a single page by its database ID.
 func (s *SQLiteStorage) GetPageByID(ctx context.Context, id int64) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, crawled_at, created_at, updated_at FROM pages WHERE id = ?", id)
+	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE id = ?", id)
 }
 
 func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Page, error) {
 	var p Page
 	var crawledAt, createdAt, updatedAt sql.NullTime
+	var publishedAt sql.NullTime
 
 	err := s.readDB.QueryRowContext(ctx, query, arg).Scan(
 		&p.ID, &p.URL, &p.Domain, &p.Title, &p.Description,
-		&p.Content, &p.StatusCode, &p.ContentHash,
-		&crawledAt, &createdAt, &updatedAt,
+		&p.Content, &p.StatusCode, &p.ContentHash, &p.URLFingerprint,
+		&publishedAt, &crawledAt, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -238,6 +253,9 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 		return nil, fmt.Errorf("querying page: %w", err)
 	}
 
+	if publishedAt.Valid {
+		p.PublishedAt = publishedAt.Time
+	}
 	if crawledAt.Valid {
 		p.CrawledAt = crawledAt.Time
 	}
@@ -466,6 +484,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.language,
 			p.region,
 			p.crawled_at,
+			p.published_at,
 			(%s) AS sql_score,
 			COALESCE(d.is_seed, 0) AS is_seed,
 			LENGTH(p.content) AS content_len
@@ -502,6 +521,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
+			&candidate.publishedAt,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
@@ -590,6 +610,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.language,
 			p.region,
 			p.crawled_at,
+			p.published_at,
 			(%s
 				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 50.0 ELSE 0 END
 				+ CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 20.0 ELSE 0 END
@@ -636,6 +657,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
+			&candidate.publishedAt,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
@@ -699,6 +721,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.language,
 			p.region,
 			p.crawled_at,
+			p.published_at,
 			(
 				CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 900.0 ELSE 0 END
 				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 650.0 ELSE 0 END
@@ -764,6 +787,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
+			&candidate.publishedAt,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
@@ -828,7 +852,12 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	descNorm := normalizeSearchText(candidate.Description)
 	urlNorm := normalizeSearchText(candidate.URL)
 	domainNorm := normalizeSearchText(candidate.Domain)
-	domainInfo := classifySearchDomain(candidate.Domain)
+	urlDomain := candidate.Domain
+	if parsedURL, err := url.Parse(candidate.URL); err == nil && parsedURL.Hostname() != "" {
+		urlDomain = parsedURL.Hostname()
+	}
+	urlDomain = strings.TrimPrefix(urlDomain, "www.")
+	domainInfo := classifySearchDomain(urlDomain)
 	effectiveDomainNorm := normalizeSearchText(domainInfo.effectiveDomain)
 	rootLabelNorm := normalizeSearchText(domainInfo.rootLabel)
 
@@ -894,11 +923,14 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	if candidate.isSeed {
 		score += 35.0
 	}
-	score += searchFreshnessScore(candidate.CrawledAt)
+	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAt)
 	score += searchContentLengthScore(candidate.contentLen)
 
 	if query.navigational && domainInfo.isRootDomain && isHomepage && domainPhrase >= 0.95 {
-		score += 600.0
+		score += 1200.0
+	}
+	if query.navigational && !domainInfo.isRootDomain {
+		score -= 300.0
 	}
 
 	if candidate.mode == searchModeFuzzy {
@@ -927,11 +959,15 @@ func searchModeBonus(mode searchMode) float64 {
 	}
 }
 
-func searchFreshnessScore(crawledAt time.Time) float64 {
-	if crawledAt.IsZero() {
+func searchFreshnessScore(crawledAt time.Time, publishedAt sql.NullTime) float64 {
+	bestTime := crawledAt
+	if publishedAt.Valid && !publishedAt.Time.IsZero() {
+		bestTime = publishedAt.Time
+	}
+	if bestTime.IsZero() {
 		return 0
 	}
-	days := time.Since(crawledAt).Hours() / 24
+	days := time.Since(bestTime).Hours() / 24
 	return max(0.0, 35.0-days*0.25)
 }
 
@@ -1907,22 +1943,14 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	}
 
 	searchQuery := `
-		SELECT
-			i.id,
-			i.url,
-			i.page_url,
-			i.domain,
-			i.alt_text,
-			i.title,
-			i.context,
-			i.width,
-			i.height,
-			rank
-		FROM images_fts
-		JOIN images i ON i.id = images_fts.rowid
-		WHERE images_fts MATCH ?
-		ORDER BY rank
-		LIMIT ? OFFSET ?
+	SELECT
+		i.id, i.url, i.page_url, i.domain, i.alt_text, i.title, i.context,
+		i.width, i.height, rank
+	FROM images_fts
+	JOIN images i ON i.id = images_fts.rowid
+	WHERE images_fts MATCH ?
+	ORDER BY rank
+	LIMIT ? OFFSET ?
 	`
 
 	rows, err := s.readDB.QueryContext(ctx, searchQuery, query, limit, offset)
@@ -1945,4 +1973,142 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	}
 
 	return results, total, nil
+}
+
+// --------------------------------------------------------------------------
+// Link / Backlink Operations
+// --------------------------------------------------------------------------
+
+func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceURL string, links []OutgoingLink) error {
+	if len(links) == 0 {
+		return nil
+	}
+
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning store-links transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM links WHERE source_id = ?`, sourceID)
+	if err != nil {
+		return fmt.Errorf("deleting old links for page %d: %w", sourceID, err)
+	}
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO links (source_id, source_url, target_url, anchor_text)
+		VALUES (?, ?, ?, ?)
+	`)
+	if err != nil {
+		return fmt.Errorf("preparing link insert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, link := range links {
+		if _, err := stmt.ExecContext(ctx, sourceID, sourceURL, link.TargetURL, link.AnchorText); err != nil {
+			s.logger.Warn("failed to insert link", "source", sourceURL, "target", link.TargetURL, "error", err)
+			continue
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limit, offset int) ([]BacklinkResult, int, error) {
+	var total int
+	if err := s.readDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
+	}
+
+	if total == 0 {
+		return nil, 0, nil
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, `
+		SELECT l.source_id, l.source_url, COALESCE(p.title, ''), l.anchor_text, l.created_at
+		FROM links l
+		LEFT JOIN pages p ON p.id = l.source_id
+		WHERE l.target_url = ?
+		ORDER BY l.created_at DESC
+		LIMIT ? OFFSET ?
+	`, targetURL, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying backlinks for %q: %w", targetURL, err)
+	}
+	defer rows.Close()
+
+	var results []BacklinkResult
+	for rows.Next() {
+		var r BacklinkResult
+		var createdAt sql.NullTime
+		if err := rows.Scan(&r.SourceID, &r.SourceURL, &r.SourceTitle, &r.AnchorText, &createdAt); err != nil {
+			return nil, 0, fmt.Errorf("scanning backlink: %w", err)
+		}
+		if createdAt.Valid {
+			r.CreatedAt = createdAt.Time
+		}
+		results = append(results, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating backlinks: %w", err)
+	}
+
+	return results, total, nil
+}
+
+func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, offset int) ([]OutlinkResult, int, error) {
+	var total int
+	if err := s.readDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM links WHERE source_id = ?`, pageID,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("counting outlinks for page %d: %w", pageID, err)
+	}
+
+	if total == 0 {
+		return nil, 0, nil
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, `
+		SELECT target_url, anchor_text, created_at
+		FROM links
+		WHERE source_id = ?
+		ORDER BY created_at DESC
+		LIMIT ? OFFSET ?
+	`, pageID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("querying outlinks for page %d: %w", pageID, err)
+	}
+	defer rows.Close()
+
+	var results []OutlinkResult
+	for rows.Next() {
+		var r OutlinkResult
+		var createdAt sql.NullTime
+		if err := rows.Scan(&r.TargetURL, &r.AnchorText, &createdAt); err != nil {
+			return nil, 0, fmt.Errorf("scanning outlink: %w", err)
+		}
+		if createdAt.Valid {
+			r.CreatedAt = createdAt.Time
+		}
+		results = append(results, r)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterating outlinks: %w", err)
+	}
+
+	return results, total, nil
+}
+
+func (s *SQLiteStorage) GetBacklinkCount(ctx context.Context, targetURL string) (int, error) {
+	var count int
+	if err := s.readDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
+	}
+	return count, nil
 }

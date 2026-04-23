@@ -17,6 +17,9 @@ type Storage interface {
 	// GetPageByURL retrieves a single page by its URL.
 	GetPageByURL(ctx context.Context, url string) (*Page, error)
 
+	// GetPageByFingerprint retrieves a single page by its structural fingerprint.
+	GetPageByFingerprint(ctx context.Context, fingerprint string) (*Page, error)
+
 	// GetPageByID retrieves a single page by its database ID.
 	GetPageByID(ctx context.Context, id int64) (*Page, error)
 
@@ -32,6 +35,21 @@ type Storage interface {
 
 	// SearchImages performs a full-text search over image metadata.
 	SearchImages(ctx context.Context, query string, limit, offset int) ([]ImageSearchResult, int, error)
+
+	// --- Link / Backlink Operations ---
+
+	// StoreLinks replaces all outgoing links for a given source page.
+	// Each OutgoingLink contains the target URL and its anchor text.
+	StoreLinks(ctx context.Context, sourceID int64, sourceURL string, links []OutgoingLink) error
+
+	// GetBacklinks returns pages that link to the given target URL.
+	GetBacklinks(ctx context.Context, targetURL string, limit, offset int) ([]BacklinkResult, int, error)
+
+	// GetOutlinks returns the outgoing links from a given page ID.
+	GetOutlinks(ctx context.Context, pageID int64, limit, offset int) ([]OutlinkResult, int, error)
+
+	// GetBacklinkCount returns the number of backlinks for a given URL.
+	GetBacklinkCount(ctx context.Context, targetURL string) (int, error)
 
 	// GetStalePages returns pages that were crawled before the given timestamp,
 	// suitable for re-crawling.

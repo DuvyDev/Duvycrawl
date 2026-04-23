@@ -42,22 +42,34 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 		return nil // Silently ignore unparseable URLs.
 	}
 
-	// Check if the page was already crawled.
+	fingerprint := FingerprintURL(normalized)
+
+	// Check exact URL first (fast path).
 	existing, err := f.store.GetPageByURL(ctx, normalized)
 	if err != nil {
 		return fmt.Errorf("checking existing page: %w", err)
 	}
 	if existing != nil {
-		// Already crawled — mark as seen so the queue skips it too.
-		f.queue.MarkSeen(normalized)
+		f.queue.MarkSeen(fingerprint)
+		return nil
+	}
+
+	// Check structural fingerprint (catches URLs with different query values).
+	existingFingerprint, err := f.store.GetPageByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return fmt.Errorf("checking fingerprint: %w", err)
+	}
+	if existingFingerprint != nil {
+		f.queue.MarkSeen(fingerprint)
 		return nil
 	}
 
 	f.queue.Enqueue(&queue.Job{
-		URL:      normalized,
-		Domain:   domain,
-		Depth:    depth,
-		Priority: priority,
+		URL:         normalized,
+		Domain:      domain,
+		Depth:       depth,
+		Priority:    priority,
+		Fingerprint: fingerprint,
 	})
 
 	return nil
@@ -78,18 +90,27 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 			continue
 		}
 
-		// Skip URLs already crawled in a previous session.
+		fingerprint := FingerprintURL(normalized)
+
+		// Skip URLs already crawled (exact match or structural match).
 		existing, _ := f.store.GetPageByURL(ctx, normalized)
 		if existing != nil {
-			f.queue.MarkSeen(normalized)
+			f.queue.MarkSeen(fingerprint)
+			continue
+		}
+
+		existingFingerprint, _ := f.store.GetPageByFingerprint(ctx, fingerprint)
+		if existingFingerprint != nil {
+			f.queue.MarkSeen(fingerprint)
 			continue
 		}
 
 		jobs = append(jobs, &queue.Job{
-			URL:      normalized,
-			Domain:   domain,
-			Depth:    depth,
-			Priority: priority,
+			URL:         normalized,
+			Domain:      domain,
+			Depth:       depth,
+			Priority:    priority,
+			Fingerprint: fingerprint,
 		})
 	}
 
@@ -123,6 +144,15 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 		if err != nil {
 			continue
 		}
+
+		fingerprint := FingerprintURL(normalized)
+		jobs = append(jobs, &queue.Job{
+			URL:         normalized,
+			Domain:      domain,
+			Depth:       depth,
+			Priority:    priority,
+			Fingerprint: fingerprint,
+		})
 
 		jobs = append(jobs, &queue.Job{
 			URL:      normalized,
@@ -197,7 +227,7 @@ func CanonicalizeURL(rawURL string) (string, string, error) {
 	} else {
 		parsed.Host = hostname
 	}
-	parsed.Fragment = ""                          // Remove fragments.
+	parsed.Fragment = ""                              // Remove fragments.
 	parsed.Path = strings.TrimRight(parsed.Path, "/") // Remove trailing slashes.
 	if parsed.Path == "" {
 		parsed.Path = "/"

@@ -47,6 +47,10 @@ func NewServer(
 	// Pages
 	mux.HandleFunc("GET /api/v1/pages/{id}", handlers.GetPage)
 	mux.HandleFunc("GET /api/v1/pages/lookup", handlers.LookupPage)
+	mux.HandleFunc("GET /api/v1/pages/{id}/outlinks", handlers.GetOutlinks)
+
+	// Backlinks
+	mux.HandleFunc("GET /api/v1/backlinks", handlers.GetBacklinks)
 
 	// Stats
 	mux.HandleFunc("GET /api/v1/stats", handlers.GetStats)

@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,13 +27,69 @@ type FetchResult struct {
 
 // Fetcher handles HTTP requests for downloading web pages.
 // It is configured with timeouts, size limits, cookie handling, retry logic,
-// and an optimized connection pool for high-throughput crawling.
+// adaptive per-host backoff for throttled responses, and an optimized
+// connection pool for high-throughput crawling.
 type Fetcher struct {
 	client        *http.Client
 	userAgent     string
 	maxBodySizeKB int
 	maxRetries    int
 	logger        *slog.Logger
+
+	hostBackoffMu sync.Mutex
+	hostBackoff   map[string]*hostBackoffEntry
+}
+
+type hostBackoffEntry struct {
+	consecutive4xx int
+	nextAllowed    time.Time
+}
+
+const (
+	backoffBase   = 2 * time.Second
+	backoffMax    = 60 * time.Second
+	backoffJitter = 500 * time.Millisecond
+)
+
+func initHostBackoff() map[string]*hostBackoffEntry {
+	return make(map[string]*hostBackoffEntry)
+}
+
+func (f *Fetcher) getHostBackoff(host string) *hostBackoffEntry {
+	f.hostBackoffMu.Lock()
+	defer f.hostBackoffMu.Unlock()
+	entry, ok := f.hostBackoff[host]
+	if !ok {
+		entry = &hostBackoffEntry{}
+		f.hostBackoff[host] = entry
+	}
+	return entry
+}
+
+func (f *Fetcher) recordSuccess(host string) {
+	f.hostBackoffMu.Lock()
+	defer f.hostBackoffMu.Unlock()
+	if entry, ok := f.hostBackoff[host]; ok {
+		entry.consecutive4xx = 0
+	}
+}
+
+func (f *Fetcher) recordThrottle(host string) {
+	f.hostBackoffMu.Lock()
+	defer f.hostBackoffMu.Unlock()
+	entry, ok := f.hostBackoff[host]
+	if !ok {
+		entry = &hostBackoffEntry{}
+		f.hostBackoff[host] = entry
+	}
+	entry.consecutive4xx++
+	jitter := time.Duration(rand.Int63n(int64(2*backoffJitter))) - backoffJitter
+	delay := backoffBase * time.Duration(1<<min(entry.consecutive4xx, 5))
+	delay += jitter
+	if delay > backoffMax {
+		delay = backoffMax
+	}
+	entry.nextAllowed = time.Now().Add(delay)
 }
 
 // NewFetcher creates a new HTTP fetcher with the given configuration.
@@ -41,16 +99,20 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		TLSClientConfig:         &tls.Config{InsecureSkipVerify: false},
-		TLSHandshakeTimeout:     10 * time.Second,
-		MaxIdleConns:            1000,
-		MaxIdleConnsPerHost:     maxIdleConnsPerHost,
-		MaxConnsPerHost:         maxIdleConnsPerHost,
-		IdleConnTimeout:         180 * time.Second,
-		ResponseHeaderTimeout:   timeout,
-		ExpectContinueTimeout:   1 * time.Second,
-		DisableCompression:      false,
-		ForceAttemptHTTP2:       true,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false,
+			Renegotiation:      tls.RenegotiateOnceAsClient,
+			MinVersion:         tls.VersionTLS12,
+		},
+		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		MaxConnsPerHost:       maxIdleConnsPerHost,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    false,
+		ForceAttemptHTTP2:     true,
 	}
 
 	if proxyURL != "" {
@@ -105,17 +167,44 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		maxBodySizeKB: maxBodySizeKB,
 		maxRetries:    maxRetries,
 		logger:        logger.With("component", "fetcher"),
+		hostBackoff:   initHostBackoff(),
 	}
 }
 
-// Fetch downloads the content at the given URL with automatic retries.
-// It validates the Content-Type and enforces size limits.
-// Returns a FetchResult or an error.
+// Fetch downloads the content at the given URL with automatic retries
+// and adaptive per-host backoff for throttled responses (429, 503).
 func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, error) {
+	return f.FetchWithUserAgent(ctx, targetURL, f.userAgent)
+}
+
+// FetchWithUserAgent is like Fetch but uses the provided User-Agent instead
+// of the default one. This is used for UA fallback (e.g. Googlebot).
+func (f *Fetcher) FetchWithUserAgent(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing URL %q: %w", targetURL, err)
+	}
+	host := parsedURL.Hostname()
+
 	var lastErr error
 
 	for attempt := 0; attempt <= f.maxRetries; attempt++ {
 		if attempt > 0 {
+			backoffEntry := f.getHostBackoff(host)
+			f.hostBackoffMu.Lock()
+			waitUntil := backoffEntry.nextAllowed
+			f.hostBackoffMu.Unlock()
+			if !waitUntil.IsZero() {
+				wait := time.Until(waitUntil)
+				if wait > 0 {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(wait):
+					}
+				}
+			}
+
 			backoff := time.Duration(attempt) * time.Second
 			f.logger.Debug("retrying request",
 				"url", targetURL,
@@ -129,26 +218,35 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			}
 		}
 
-		result, err := f.fetchOnce(ctx, targetURL)
+		result, err := f.fetchOnce(ctx, targetURL, userAgent)
 		lastErr = err
 
 		if err == nil {
+			if result.StatusCode == http.StatusTooManyRequests || result.StatusCode == http.StatusServiceUnavailable {
+				f.logger.Warn("throttled response, backing off",
+					"url", targetURL,
+					"status", result.StatusCode,
+				)
+				f.recordThrottle(host)
+				continue
+			}
+			f.recordSuccess(host)
 			return result, nil
 		}
 
-		// Don't retry on client errors (4xx) except 429 Too Many Requests.
 		if result != nil && result.StatusCode >= 400 && result.StatusCode < 500 {
 			if result.StatusCode != http.StatusTooManyRequests {
 				return nil, err
 			}
+			f.recordThrottle(host)
 		}
 	}
 
 	return nil, fmt.Errorf("after %d attempts: %w", f.maxRetries+1, lastErr)
 }
 
-// fetchOnce performs a single HTTP GET request.
-func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult, error) {
+// fetchOnce performs a single HTTP GET request with the given User-Agent.
+func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -156,19 +254,15 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 		return nil, fmt.Errorf("creating request for %q: %w", targetURL, err)
 	}
 
-	req.Header.Set("User-Agent", f.userAgent)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,es;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	// NOTE: Do NOT manually set Accept-Encoding. Go's http.Transport with
 	// DisableCompression=false automatically adds "Accept-Encoding: gzip" and
 	// transparently decompresses the response body. Manually setting it disables
 	// automatic decompression, leaving us with binary gzip data that goquery
 	// cannot parse (resulting in empty titles and zero links/images).
-	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
 
 	resp, err := f.client.Do(req)
 	if err != nil {

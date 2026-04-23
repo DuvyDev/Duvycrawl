@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,10 +22,26 @@ import (
 type EngineStatus string
 
 const (
-	StatusIdle    EngineStatus = "idle"
-	StatusRunning EngineStatus = "running"
+	StatusIdle     EngineStatus = "idle"
+	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
 )
+
+// fallbackState tracks whether a domain needs the fallback User-Agent.
+type fallbackState int
+
+const (
+	fallbackUnknown fallbackState = iota
+	fallbackNeeded
+	fallbackNotNeeded
+	fallbackFailed
+)
+
+// botBlockKeywords are substrings that indicate a WAF/bot-block page.
+var botBlockKeywords = []string{
+	"blocked", "forbidden", "captcha", "cloudflare", "challenge",
+	"verify you are human", "access denied", "bot detected",
+}
 
 // Engine is the main crawler orchestrator. It manages a pool of worker
 // goroutines that fetch, parse, and store web pages.
@@ -38,12 +55,15 @@ type Engine struct {
 	limiter  *ratelimit.DomainLimiter
 	logger   *slog.Logger
 
-	status   atomic.Value // EngineStatus
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	status atomic.Value // EngineStatus
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	// seedDomains holds the set of seed domain names for SeedDomainsOnly filtering.
 	seedDomains map[string]bool
+
+	// fallbackStates tracks per-domain UA-fallback decisions.
+	fallbackStates sync.Map // string domain -> fallbackState
 
 	// Metrics
 	pagesCrawled atomic.Int64
@@ -198,13 +218,51 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		return
 	}
 
+	// Determine User-Agent based on per-domain fallback state.
+	userAgent := e.cfg.UserAgent
+	if state, ok := e.fallbackStates.Load(job.Domain); ok && state.(fallbackState) == fallbackNeeded {
+		userAgent = e.cfg.FallbackUserAgent
+		logger.Debug("using fallback user-agent", "domain", job.Domain)
+	}
+
 	// Fetch the page.
 	logger.Debug("fetching page")
-	result, err := e.fetcher.Fetch(ctx, job.URL)
+	result, err := e.fetcher.FetchWithUserAgent(ctx, job.URL, userAgent)
 	if err != nil {
 		e.pagesErrored.Add(1)
 		logger.Warn("fetch failed", "error", err)
 		return
+	}
+
+	// Detect bot-block / empty-page and retry with fallback UA if appropriate.
+	if userAgent != e.cfg.FallbackUserAgent && e.needsFallback(result) {
+		logger.Info("retrying with fallback user-agent",
+			"url", job.URL,
+			"status", result.StatusCode,
+			"reason", e.fallbackReason(result),
+		)
+		fallbackResult, fallbackErr := e.fetcher.FetchWithUserAgent(ctx, job.URL, e.cfg.FallbackUserAgent)
+		if fallbackErr == nil && fallbackResult.StatusCode >= 200 && fallbackResult.StatusCode < 300 {
+			logger.Info("fallback succeeded", "url", job.URL, "status", fallbackResult.StatusCode)
+			e.fallbackStates.Store(job.Domain, fallbackNeeded)
+			result = fallbackResult
+		} else {
+			fallbackStatus := 0
+			if fallbackResult != nil {
+				fallbackStatus = fallbackResult.StatusCode
+			}
+			logger.Warn("fallback failed",
+				"url", job.URL,
+				"error", fallbackErr,
+				"status", fallbackStatus,
+			)
+			e.fallbackStates.Store(job.Domain, fallbackFailed)
+			// Continue with original result so we don't lose the 2xx/3xx data.
+			if result.StatusCode < 200 || result.StatusCode >= 300 {
+				logger.Debug("non-2xx status", "status", result.StatusCode)
+				return
+			}
+		}
 	}
 
 	// Skip non-2xx responses.
@@ -236,18 +294,23 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	// Infer region from TLD if not already known.
 	region := inferRegion(job.Domain)
 
+	// Compute structural fingerprint for deduplication.
+	urlFingerprint := frontier.FingerprintURL(pageURL)
+
 	// Store the page.
 	page := &storage.Page{
-		URL:         pageURL,
-		Domain:      job.Domain,
-		Title:       truncateString(parsed.Title, 500),
-		Description: truncateString(parsed.Description, 1000),
-		Content:     parsed.Content,
-		Language:    parsed.Language,
-		Region:      region,
-		StatusCode:  result.StatusCode,
-		ContentHash: contentHash,
-		CrawledAt:   time.Now().UTC(),
+		URL:            pageURL,
+		Domain:         job.Domain,
+		Title:          truncateString(parsed.Title, 500),
+		Description:    truncateString(parsed.Description, 1000),
+		Content:        parsed.Content,
+		Language:       parsed.Language,
+		Region:         region,
+		StatusCode:     result.StatusCode,
+		ContentHash:    contentHash,
+		URLFingerprint: urlFingerprint,
+		PublishedAt:    parsed.PublishedAt,
+		CrawledAt:      time.Now().UTC(),
 	}
 
 	if err := e.store.UpsertPage(ctx, page); err != nil {
@@ -265,6 +328,24 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		"images_found", len(parsed.Images),
 		"duration", result.Duration,
 	)
+
+	if len(parsed.Anchors) > 0 {
+		storedPage, getErr := e.store.GetPageByURL(ctx, pageURL)
+		if getErr == nil && storedPage != nil {
+			outgoing := make([]storage.OutgoingLink, 0, len(parsed.Anchors))
+			for _, a := range parsed.Anchors {
+				outgoing = append(outgoing, storage.OutgoingLink{
+					TargetURL:  a.URL,
+					AnchorText: a.Anchor,
+				})
+			}
+			if err := e.store.StoreLinks(ctx, storedPage.ID, storedPage.URL, outgoing); err != nil {
+				logger.Warn("failed to store outgoing links", "error", err, "count", len(outgoing))
+			}
+		} else if getErr != nil {
+			logger.Warn("failed to lookup page for link storage", "error", getErr)
+		}
+	}
 
 	// Store extracted images.
 	if len(parsed.Images) > 0 {
@@ -361,6 +442,51 @@ func (e *Engine) updateDomainStats(ctx context.Context, domainName string, fetch
 			"error", err,
 		)
 	}
+}
+
+// needsFallback determines whether a fetch result indicates the site
+// rejected our primary User-Agent and we should try the fallback.
+func (e *Engine) needsFallback(result *FetchResult) bool {
+	if result == nil {
+		return false
+	}
+
+	// Empty 200 OK: very few links and almost no text content.
+	if result.StatusCode == http.StatusOK {
+		return len(result.Body) < 500
+	}
+
+	// 403 that looks like a bot-block (empty body or known keywords).
+	if result.StatusCode == http.StatusForbidden {
+		if len(result.Body) == 0 || len(result.Body) < 200 {
+			return true
+		}
+		return e.bodyContainsBotBlock(result.Body)
+	}
+
+	return false
+}
+
+// fallbackReason returns a human-readable reason for the fallback decision.
+func (e *Engine) fallbackReason(result *FetchResult) string {
+	if result.StatusCode == http.StatusOK {
+		return fmt.Sprintf("empty page (%d bytes)", len(result.Body))
+	}
+	if result.StatusCode == http.StatusForbidden {
+		return "403 with bot-block indicators"
+	}
+	return fmt.Sprintf("status %d", result.StatusCode)
+}
+
+// bodyContainsBotBlock checks if the response body contains known WAF/bot-block keywords.
+func (e *Engine) bodyContainsBotBlock(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	for _, kw := range botBlockKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // truncateString truncates a string to the given maximum length.

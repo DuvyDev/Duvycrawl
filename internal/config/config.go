@@ -59,6 +59,13 @@ type CrawlerConfig struct {
 	// ProxyURL is an optional HTTP/SOCKS5 proxy URL for all requests.
 	// Example: "http://proxy.example.com:8080"
 	ProxyURL string `yaml:"proxy_url"`
+	// FallbackUserAgent is used when the primary User-Agent results in an
+	// empty page or a bot-block response. A Googlebot-style UA is a good
+	// default because some sites serve a simplified static version to bots.
+	FallbackUserAgent string `yaml:"fallback_user_agent"`
+	// MaxFallbackRetries is the maximum number of fallback attempts per URL
+	// when the primary User-Agent is detected to have failed.
+	MaxFallbackRetries int `yaml:"max_fallback_retries"`
 }
 
 // SeedConfig represents a seed domain defined in the configuration file.
@@ -108,7 +115,7 @@ func DefaultConfig() *Config {
 			PolitenessDelay:      1 * time.Second,
 			RandomDelay:          0,
 			MaxRetries:           3,
-			UserAgent:            "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)",
+			UserAgent:            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
 			MaxPageSizeKB:        5120,
 			RespectRobots:        true,
 			SeedDomainsOnly:      false,
@@ -116,6 +123,8 @@ func DefaultConfig() *Config {
 			DisableCookies:       false,
 			MaxIdleConnsPerHost:  100,
 			ProxyURL:             "",
+			FallbackUserAgent:    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+			MaxFallbackRetries:   1,
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",

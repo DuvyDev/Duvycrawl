@@ -30,19 +30,20 @@ const bloomFPP float64 = 0.001
 
 // Job represents a URL queued for crawling.
 type Job struct {
-	ID       int64
-	URL      string
-	Domain   string
-	Depth    int
-	Priority int // Higher = more urgent.
+	ID          int64
+	URL         string
+	Domain      string
+	Depth       int
+	Priority    int    // Higher = more urgent.
+	Fingerprint string // Structural fingerprint for deduplication.
 }
 
 // Stats provides a snapshot of the queue state.
 type Stats struct {
-	Pending    int   `json:"pending"`
-	Domains    int   `json:"domains"`
-	Enqueued   int64 `json:"total_enqueued"`
-	Dequeued   int64 `json:"total_dequeued"`
+	Pending  int   `json:"pending"`
+	Domains  int   `json:"domains"`
+	Enqueued int64 `json:"total_enqueued"`
+	Dequeued int64 `json:"total_dequeued"`
 }
 
 // DomainReadyFunc is called by Dequeue to check if a domain's rate limit
@@ -59,7 +60,7 @@ type DomainReadyFunc func(domain string) bool
 // tests with minimal memory footprint.
 type Queue struct {
 	mu      sync.Mutex
-	domains map[string][]*Job // domain → jobs sorted by priority desc
+	domains map[string][]*Job  // domain → jobs sorted by priority desc
 	bloom   *bloom.BloomFilter // URL deduplication via Bloom filter
 	nextID  atomic.Int64       // auto-increment job ID
 	wakeCh  chan struct{}      // wakes workers when new jobs arrive
@@ -79,6 +80,14 @@ func New() *Queue {
 	}
 }
 
+// dedupKey returns the fingerprint if available, otherwise the raw URL.
+func dedupKey(job *Job) string {
+	if job.Fingerprint != "" {
+		return job.Fingerprint
+	}
+	return job.URL
+}
+
 // Enqueue adds a job to the queue if the URL hasn't been seen before.
 // Returns true if the job was added, false if it was a duplicate.
 // This is safe for concurrent use.
@@ -86,12 +95,13 @@ func (q *Queue) Enqueue(job *Job) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.bloom.TestString(job.URL) {
+	key := dedupKey(job)
+	if q.bloom.TestString(key) {
 		return false
 	}
 
 	job.ID = q.nextID.Add(1)
-	q.bloom.AddString(job.URL)
+	q.bloom.AddString(key)
 
 	// Insert into the domain's queue, maintaining priority order (desc).
 	q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
@@ -114,12 +124,13 @@ func (q *Queue) EnqueueBatch(jobs []*Job) int {
 
 	added := 0
 	for _, job := range jobs {
-		if q.bloom.TestString(job.URL) {
+		key := dedupKey(job)
+		if q.bloom.TestString(key) {
 			continue
 		}
 
 		job.ID = q.nextID.Add(1)
-		q.bloom.AddString(job.URL)
+		q.bloom.AddString(key)
 		q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
 		added++
 	}
@@ -218,11 +229,12 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 	return nil
 }
 
-// MarkSeen adds a URL to the Bloom filter without enqueuing it.
-// Use this for URLs already crawled (loaded from the database on startup).
-func (q *Queue) MarkSeen(url string) {
+// MarkSeen adds a URL (or its fingerprint) to the Bloom filter without
+// enqueuing it. Use this for URLs already crawled (loaded from the database
+// on startup).
+func (q *Queue) MarkSeen(key string) {
 	q.mu.Lock()
-	q.bloom.AddString(url)
+	q.bloom.AddString(key)
 	q.mu.Unlock()
 }
 

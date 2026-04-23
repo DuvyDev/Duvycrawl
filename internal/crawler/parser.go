@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/PuerkitoBio/goquery"
@@ -24,15 +26,23 @@ type ImageMeta struct {
 	Height  int    // Height in pixels (0 if unknown)
 }
 
+// LinkAnchor represents a hyperlink with its anchor text and surrounding context.
+type LinkAnchor struct {
+	URL    string // Absolute URL
+	Anchor string // Anchor text of the link
+}
+
 // ParseResult contains the structured data extracted from an HTML page.
 type ParseResult struct {
 	Title       string
 	Description string
-	Content     string       // Visible text content, stripped of HTML
-	Links       []string     // Absolute URLs found in <a> tags
-	Canonical   string       // Canonical URL if specified
-	Language    string       // Detected language code (e.g. "es", "en")
-	Images      []ImageMeta  // Images found on the page
+	Content     string        // Visible text content, stripped of HTML
+	Links       []string      // Absolute URLs found in <a> tags
+	Anchors     []LinkAnchor  // Links with anchor text for backlink indexing
+	Canonical   string        // Canonical URL if specified
+	Language    string        // Detected language code (e.g. "es", "en")
+	Images      []ImageMeta   // Images found on the page
+	PublishedAt time.Time     // Publication date extracted from meta/JSON-LD
 }
 
 // Parser extracts structured data from HTML documents.
@@ -115,6 +125,9 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		}
 	})
 
+	// --- Extract publication date ---
+	result.PublishedAt = extractPublishedAt(doc)
+
 	// --- Extract images (before removing elements) ---
 	result.Images = extractImages(doc, base)
 
@@ -177,7 +190,15 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		// Deduplicate.
 		if !seen[resolved] {
 			seen[resolved] = true
+			anchorText := strings.TrimSpace(s.Text())
+			if len(anchorText) > 500 {
+				anchorText = anchorText[:500]
+			}
 			result.Links = append(result.Links, resolved)
+			result.Anchors = append(result.Anchors, LinkAnchor{
+				URL:    resolved,
+				Anchor: anchorText,
+			})
 		}
 	})
 
@@ -447,4 +468,153 @@ func isImageExtension(rawURL string) bool {
 		return true
 	}
 	return false
+}
+
+// extractPublishedAt tries multiple strategies to find the publication date
+// of an HTML document. It checks meta tags, <time> elements, and JSON-LD
+// in order of reliability.
+func extractPublishedAt(doc *goquery.Document) time.Time {
+	// Strategy 1: Explicit publication meta tags (most reliable).
+	metaCandidates := []string{
+		`meta[property="article:published_time"]`,
+		`meta[name="article:published_time"]`,
+		`meta[property="og:article:published_time"]`,
+		`meta[name="date"]`,
+		`meta[name="pubdate"]`,
+		`meta[name="publish_date"]`,
+		`meta[name="published_date"]`,
+		`meta[name="publication_date"]`,
+		`meta[name="DC.date"]`,
+		`meta[name="dc.date"]`,
+		`meta[property="og:published_time"]`,
+	}
+	for _, sel := range metaCandidates {
+		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+			if t := parseDateAttribute(s); !t.IsZero() {
+				return
+			}
+		})
+	}
+
+	// Try extracting from meta candidates — return first valid date found.
+	for _, sel := range metaCandidates {
+		var found time.Time
+		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+			if t := parseDateAttribute(s); !t.IsZero() && found.IsZero() {
+				found = t
+			}
+		})
+		if !found.IsZero() {
+			return found
+		}
+	}
+
+	// Strategy 2: <time> element with datetime attribute or content.
+	if t := extractTimeElement(doc); !t.IsZero() {
+		return t
+	}
+
+	// Strategy 3: JSON-LD (schema.org) datePublished.
+	if t := extractJSONLDDates(doc); !t.IsZero() {
+		return t
+	}
+
+	return time.Time{}
+}
+
+func parseDateAttribute(s *goquery.Selection) time.Time {
+	content, exists := s.Attr("content")
+	if !exists {
+		return time.Time{}
+	}
+	return parseDateString(content)
+}
+
+func extractTimeElement(doc *goquery.Document) time.Time {
+	var best time.Time
+	doc.Find("time").Each(func(_ int, s *goquery.Selection) {
+		if datetime, exists := s.Attr("datetime"); exists {
+			if t := parseDateString(datetime); !t.IsZero() {
+				if best.IsZero() || t.Before(best) {
+					best = t
+				}
+			}
+		}
+	})
+	return best
+}
+
+func extractJSONLDDates(doc *goquery.Document) time.Time {
+	var best time.Time
+	doc.Find(`script[type="application/ld+json"]`).Each(func(_ int, s *goquery.Selection) {
+		text := s.Text()
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+
+		// Extract datePublished or dateCreated using simple regex.
+		for _, pattern := range []string{
+			`"datePublished"\s*:\s*"([^"]+)"`,
+			`"dateCreated"\s*:\s*"([^"]+)"`,
+		} {
+			re := regexp.MustCompile(pattern)
+			matches := re.FindStringSubmatch(text)
+			if len(matches) > 1 {
+				if t := parseDateString(matches[1]); !t.IsZero() {
+					if best.IsZero() || t.Before(best) {
+						best = t
+					}
+				}
+			}
+		}
+	})
+	return best
+}
+
+// dateFormats lists common date formats found in HTML meta tags and JSON-LD,
+// ordered from most specific/common to least.
+var dateFormats = []string{
+	time.RFC3339,
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05Z",
+	"2006-01-02T15:04:05-07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02T15:04:05-0700",
+	"2006-01-02",
+	"2006-01-02 15:04:05",
+	"January 2, 2006",
+	"Jan 2, 2006",
+	"02 January 2006",
+	"02 Jan 2006",
+	"02/01/2006",
+	"01/02/2006",
+	"2 de January de 2006",
+	"2 de Jan de 2006",
+}
+
+// parseDateString tries multiple date formats and returns the first successful parse.
+func parseDateString(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+
+	for _, format := range dateFormats {
+		if t, err := time.Parse(format, s); err == nil {
+			// Sanity check: reject dates before 1990 or far in the future.
+			if t.Year() >= 1990 && t.Year() <= time.Now().Year()+1 {
+				return t
+			}
+		}
+	}
+
+	// Try stripping timezone suffix like "+00:00" or "Z" after the fact.
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		if t.Year() >= 1990 && t.Year() <= time.Now().Year()+1 {
+			return t
+		}
+	}
+
+	return time.Time{}
 }

@@ -407,8 +407,107 @@ func (h *Handlers) CrawlerStatus(w http.ResponseWriter, r *http.Request) {
 	crawled, errored := h.engine.Stats()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":        h.engine.Status(),
-		"pages_crawled": crawled,
-		"pages_errored": errored,
+		"status":         h.engine.Status(),
+		"pages_crawled":  crawled,
+		"pages_errored":  errored,
+	})
+}
+
+// --- Backlinks ---
+
+type backlinksResponse struct {
+	TargetURL string                   `json:"target_url"`
+	Total     int                      `json:"total"`
+	Page      int                      `json:"page"`
+	Limit     int                      `json:"limit"`
+	Results   []storage.BacklinkResult `json:"results"`
+}
+
+func (h *Handlers) GetBacklinks(w http.ResponseWriter, r *http.Request) {
+	targetURL := r.URL.Query().Get("url")
+	if targetURL == "" {
+		writeError(w, http.StatusBadRequest, "missing required query parameter 'url'")
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+
+	offset := (page - 1) * limit
+
+	results, total, err := h.store.GetBacklinks(r.Context(), targetURL, limit, offset)
+	if err != nil {
+		h.logger.Error("backlink query failed", "url", targetURL, "error", err)
+		writeError(w, http.StatusInternalServerError, "backlink query failed")
+		return
+	}
+
+	if results == nil {
+		results = []storage.BacklinkResult{}
+	}
+
+	writeJSON(w, http.StatusOK, backlinksResponse{
+		TargetURL: targetURL,
+		Total:     total,
+		Page:      page,
+		Limit:     limit,
+		Results:   results,
+	})
+}
+
+// --- Outlinks ---
+
+type outlinksResponse struct {
+	PageID  int64                  `json:"page_id"`
+	Total   int                    `json:"total"`
+	Page    int                    `json:"page"`
+	Limit   int                    `json:"limit"`
+	Results []storage.OutlinkResult `json:"results"`
+}
+
+func (h *Handlers) GetOutlinks(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid page ID")
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+
+	offset := (page - 1) * limit
+
+	results, total, err := h.store.GetOutlinks(r.Context(), id, limit, offset)
+	if err != nil {
+		h.logger.Error("outlink query failed", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "outlink query failed")
+		return
+	}
+
+	if results == nil {
+		results = []storage.OutlinkResult{}
+	}
+
+	writeJSON(w, http.StatusOK, outlinksResponse{
+		PageID:  id,
+		Total:   total,
+		Page:    page,
+		Limit:   limit,
+		Results: results,
 	})
 }
