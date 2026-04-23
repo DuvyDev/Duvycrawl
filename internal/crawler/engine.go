@@ -302,6 +302,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		URL:            pageURL,
 		Domain:         job.Domain,
 		Title:          truncateString(parsed.Title, 500),
+		H1:             truncateString(parsed.H1, 1000),
+		H2:             truncateString(parsed.H2, 2000),
 		Description:    truncateString(parsed.Description, 1000),
 		Content:        parsed.Content,
 		Language:       parsed.Language,

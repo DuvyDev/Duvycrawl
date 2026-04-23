@@ -60,11 +60,14 @@ type searchQuery struct {
 
 type searchCandidate struct {
 	SearchResult
-	sqlScore   float64
-	isSeed     bool
-	contentLen int
-	mode       searchMode
-	publishedAt sql.NullTime
+	H1          string
+	H2          string
+	BodyPreview string
+	sqlScore    float64
+	isSeed      bool
+	contentLen  int
+	mode        searchMode
+	publishedAtStr string
 }
 
 type searchDomainInfo struct {
@@ -91,7 +94,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 
 	// --- Write pool: single connection, serialized writes ---
 	// High busy_timeout (30s) ensures writes wait instead of failing.
-	writeDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON", dbPath)
+	writeDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", dbPath)
 	writeDB, err := sql.Open("sqlite", writeDSN)
 	if err != nil {
 		return nil, fmt.Errorf("opening write database: %w", err)
@@ -126,7 +129,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 
 	// --- Read pool: multiple connections for concurrent reads ---
 	// Open after migrations so mode=ro works on first startup.
-	readDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro", dbPath)
+	readDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", dbPath)
 	readDB, err := sql.Open("sqlite", readDSN)
 	if err != nil {
 		writeDB.Close()
@@ -187,11 +190,13 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 // UpsertPage inserts a new page or updates an existing one matched by URL.
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
+			h1               = excluded.h1,
+			h2               = excluded.h2,
 			description      = excluded.description,
 			content          = excluded.content,
 			language         = excluded.language,
@@ -210,7 +215,7 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	}
 
 	_, err := s.writeDB.ExecContext(ctx, query,
-		page.URL, page.Domain, page.Title, page.Description,
+		page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
 		page.Content, page.Language, page.Region,
 		page.StatusCode, page.ContentHash, page.URLFingerprint,
 		publishedAt, page.CrawledAt,
@@ -223,17 +228,17 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 
 // GetPageByURL retrieves a single page by its URL.
 func (s *SQLiteStorage) GetPageByURL(ctx context.Context, url string) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url = ?", url)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url = ?", url)
 }
 
 // GetPageByFingerprint retrieves a single page by its structural fingerprint.
 func (s *SQLiteStorage) GetPageByFingerprint(ctx context.Context, fingerprint string) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url_fingerprint = ? LIMIT 1", fingerprint)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE url_fingerprint = ? LIMIT 1", fingerprint)
 }
 
 // GetPageByID retrieves a single page by its database ID.
 func (s *SQLiteStorage) GetPageByID(ctx context.Context, id int64) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE id = ?", id)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at FROM pages WHERE id = ?", id)
 }
 
 func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Page, error) {
@@ -242,7 +247,7 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 	var publishedAt sql.NullTime
 
 	err := s.readDB.QueryRowContext(ctx, query, arg).Scan(
-		&p.ID, &p.URL, &p.Domain, &p.Title, &p.Description,
+		&p.ID, &p.URL, &p.Domain, &p.Title, &p.H1, &p.H2, &p.Description,
 		&p.Content, &p.StatusCode, &p.ContentHash, &p.URLFingerprint,
 		&publishedAt, &crawledAt, &createdAt, &updatedAt,
 	)
@@ -415,6 +420,9 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	titleExact := query.lowered
 	titlePrefix := query.lowered + "%"
 	titleContains := "%" + query.lowered + "%"
+	h1Contains := "%" + query.lowered + "%"
+	h2Contains := "%" + query.lowered + "%"
+	bodyContains := "%" + query.lowered + "%"
 	domainExact := query.domainLike
 	if domainExact == "" {
 		domainExact = query.navTerm
@@ -437,6 +445,9 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		"CASE WHEN LOWER(p.title) = ? THEN 500.0 ELSE 0 END",
 		"CASE WHEN LOWER(p.title) LIKE ? THEN 300.0 ELSE 0 END",
 		"CASE WHEN LOWER(p.title) LIKE ? THEN 180.0 ELSE 0 END",
+		"CASE WHEN LOWER(p.h1) LIKE ? THEN 140.0 ELSE 0 END",
+		"CASE WHEN LOWER(p.h2) LIKE ? THEN 120.0 ELSE 0 END",
+		"CASE WHEN LOWER(p.content) LIKE ? THEN 80.0 ELSE 0 END",
 		"CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 650.0 ELSE 0 END",
 		"CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 450.0 ELSE 0 END",
 		"CASE WHEN LOWER(p.url) LIKE ? THEN 120.0 ELSE 0 END",
@@ -449,6 +460,9 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		titleExact,
 		titlePrefix,
 		titleContains,
+		h1Contains,
+		h2Contains,
+		bodyContains,
 		domainExact,
 		domainExact,
 		domainContainsTerm,
@@ -460,12 +474,15 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	for _, token := range query.tokens {
 		like := "%" + token + "%"
 		scoreParts = append(scoreParts,
-			"CASE WHEN LOWER(p.title) LIKE ? THEN 140.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.title) LIKE ? THEN 90.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h1) LIKE ? THEN 60.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h2) LIKE ? THEN 60.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.content) LIKE ? THEN 30.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.domain) LIKE ? THEN 180.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.url) LIKE ? THEN 45.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.description) LIKE ? THEN 25.0 ELSE 0 END",
 		)
-		args = append(args, like, like, like, like)
+		args = append(args, like, like, like, like, like, like, like)
 	}
 
 	if lang != "" {
@@ -478,7 +495,10 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.id,
 			p.url,
 			p.title,
+			p.h1,
+			p.h2,
 			p.description,
+			SUBSTR(p.content, 1, 4000) AS body_preview,
 			snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
 			p.domain,
 			p.language,
@@ -503,38 +523,44 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	}
 	defer rows.Close()
 
-	var candidates []searchCandidate
+var candidates []searchCandidate
 	for rows.Next() {
 		var (
-			candidate   searchCandidate
-			crawledAt   sql.NullTime
-			seedFlag    int
-			snippetText sql.NullString
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			seedFlag       int
+			snippetText    sql.NullString
 		)
 		if err := rows.Scan(
 			&candidate.ID,
 			&candidate.URL,
 			&candidate.Title,
+			&candidate.H1,
+			&candidate.H2,
 			&candidate.Description,
+			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
-			&candidate.publishedAt,
+			&publishedAtStr,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
 		); err != nil {
-			return nil, fmt.Errorf("scanning FTS candidate: %w", err)
+			return nil, fmt.Errorf("scanning navigational candidate: %w", err)
 		}
 
 		candidate.Snippet = snippetText.String
+		candidate.publishedAtStr = publishedAtStr.String
 		if candidate.Snippet == "" {
 			candidate.Snippet = candidate.Description
 		}
 		candidate.mode = mode
 		candidate.isSeed = seedFlag == 1
+		candidate.publishedAtStr = publishedAtStr.String
 		if crawledAt.Valid {
 			candidate.CrawledAt = crawledAt.Time
 		}
@@ -560,26 +586,30 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 
 	for _, fragment := range query.fragments {
 		like := "%" + fragment + "%"
-		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
-		whereArgs = append(whereArgs, like, like, like)
+		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.h1) LIKE ? OR LOWER(p.h2) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
+		whereArgs = append(whereArgs, like, like, like, like, like)
 		scoreParts = append(scoreParts,
 			"CASE WHEN LOWER(p.title) LIKE ? THEN 12.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h1) LIKE ? THEN 8.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h2) LIKE ? THEN 8.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.domain) LIKE ? THEN 16.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.url) LIKE ? THEN 6.0 ELSE 0 END",
 		)
-		scoreArgs = append(scoreArgs, like, like, like)
+		scoreArgs = append(scoreArgs, like, like, like, like, like)
 	}
 
 	if query.navTerm != "" {
 		navLike := "%" + query.navTerm + "%"
-		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
-		whereArgs = append(whereArgs, navLike, navLike, navLike)
+		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.h1) LIKE ? OR LOWER(p.h2) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
+		whereArgs = append(whereArgs, navLike, navLike, navLike, navLike, navLike)
 		scoreParts = append(scoreParts,
 			"CASE WHEN LOWER(p.title) LIKE ? THEN 20.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h1) LIKE ? THEN 16.0 ELSE 0 END",
+			"CASE WHEN LOWER(p.h2) LIKE ? THEN 16.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.domain) LIKE ? THEN 40.0 ELSE 0 END",
 			"CASE WHEN LOWER(p.url) LIKE ? THEN 12.0 ELSE 0 END",
 		)
-		scoreArgs = append(scoreArgs, navLike, navLike, navLike)
+		scoreArgs = append(scoreArgs, navLike, navLike, navLike, navLike, navLike)
 	}
 
 	if len(whereParts) == 0 {
@@ -601,7 +631,10 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.id,
 			p.url,
 			p.title,
+			p.h1,
+			p.h2,
 			p.description,
+			SUBSTR(p.content, 1, 4000) AS body_preview,
 			CASE
 				WHEN p.description != '' THEN SUBSTR(p.description, 1, 240)
 				ELSE SUBSTR(p.content, 1, 240)
@@ -642,30 +675,35 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 	var candidates []searchCandidate
 	for rows.Next() {
 		var (
-			candidate   searchCandidate
-			crawledAt   sql.NullTime
-			seedFlag    int
-			snippetText sql.NullString
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			seedFlag       int
+			snippetText    sql.NullString
 		)
 		if err := rows.Scan(
 			&candidate.ID,
 			&candidate.URL,
 			&candidate.Title,
+			&candidate.H1,
+			&candidate.H2,
 			&candidate.Description,
+			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
-			&candidate.publishedAt,
+			&publishedAtStr,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
-		); err != nil {
+); err != nil {
 			return nil, 0, fmt.Errorf("scanning fuzzy candidate: %w", err)
 		}
 
 		candidate.Snippet = snippetText.String
+		candidate.publishedAtStr = publishedAtStr.String
 		candidate.mode = searchModeFuzzy
 		candidate.isSeed = seedFlag == 1
 		if crawledAt.Valid {
@@ -712,7 +750,10 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.id,
 			p.url,
 			p.title,
+			p.h1,
+			p.h2,
 			p.description,
+			SUBSTR(p.content, 1, 4000) AS body_preview,
 			CASE
 				WHEN p.description != '' THEN SUBSTR(p.description, 1, 240)
 				ELSE SUBSTR(p.content, 1, 240)
@@ -727,6 +768,8 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 650.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.url) LIKE ? THEN 220.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.title) LIKE ? THEN 160.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
 				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 220.0 ELSE 0 END
 				+ CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 20.0 ELSE 0 END
 				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
@@ -741,6 +784,8 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			OR (? != '' AND LOWER(p.domain) LIKE ?)
 			OR LOWER(p.url) LIKE ?
 			OR LOWER(p.title) LIKE ?
+			OR LOWER(p.h1) LIKE ?
+			OR LOWER(p.h2) LIKE ?
 		ORDER BY sql_score DESC, p.crawled_at DESC
 		LIMIT ?
 	`
@@ -752,6 +797,8 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		navLike,
 		navLike,
 		titleLike,
+		titleLike,
+		titleLike,
 		lang,
 		lang,
 		domainExact,
@@ -759,6 +806,8 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		navTerm,
 		navLike,
 		navLike,
+		titleLike,
+		titleLike,
 		titleLike,
 		limit,
 	}
@@ -772,22 +821,26 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 	var candidates []searchCandidate
 	for rows.Next() {
 		var (
-			candidate   searchCandidate
-			crawledAt   sql.NullTime
-			seedFlag    int
-			snippetText sql.NullString
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			seedFlag       int
+			snippetText    sql.NullString
 		)
 		if err := rows.Scan(
 			&candidate.ID,
 			&candidate.URL,
 			&candidate.Title,
+			&candidate.H1,
+			&candidate.H2,
 			&candidate.Description,
+			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
 			&candidate.Region,
 			&crawledAt,
-			&candidate.publishedAt,
+			&publishedAtStr,
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
@@ -796,6 +849,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		}
 
 		candidate.Snippet = snippetText.String
+		candidate.publishedAtStr = publishedAtStr.String
 		candidate.mode = searchModeNavigational
 		candidate.isSeed = seedFlag == 1
 		if crawledAt.Valid {
@@ -849,7 +903,12 @@ func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lan
 
 func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string) (float64, bool) {
 	titleNorm := normalizeSearchText(candidate.Title)
-	descNorm := normalizeSearchText(candidate.Description)
+	h1Norm := normalizeSearchText(candidate.H1)
+	h2Norm := normalizeSearchText(candidate.H2)
+	bodyNorm := normalizeSearchText(candidate.BodyPreview)
+	if bodyNorm == "" {
+		bodyNorm = normalizeSearchText(candidate.Description)
+	}
 	urlNorm := normalizeSearchText(candidate.URL)
 	domainNorm := normalizeSearchText(candidate.Domain)
 	urlDomain := candidate.Domain
@@ -862,13 +921,17 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	rootLabelNorm := normalizeSearchText(domainInfo.rootLabel)
 
 	titleTokens := uniqueStrings(strings.Fields(titleNorm))
-	descTokens := uniqueStrings(strings.Fields(descNorm))
+	h1Tokens := uniqueStrings(strings.Fields(h1Norm))
+	h2Tokens := uniqueStrings(strings.Fields(h2Norm))
+	bodyTokens := uniqueStrings(strings.Fields(bodyNorm))
 	urlTokens := uniqueStrings(strings.Fields(urlNorm))
 	domainTokens := uniqueStrings(append(strings.Fields(domainNorm), strings.Fields(effectiveDomainNorm)...))
 	domainTokens = uniqueStrings(append(domainTokens, strings.Fields(rootLabelNorm)...))
 
 	titlePhrase := bestFieldPhraseScore(query.normalized, query.tokens, titleNorm, titleTokens)
-	descPhrase := bestFieldPhraseScore(query.normalized, query.tokens, descNorm, descTokens)
+	h1Phrase := bestFieldPhraseScore(query.normalized, query.tokens, h1Norm, h1Tokens)
+	h2Phrase := bestFieldPhraseScore(query.normalized, query.tokens, h2Norm, h2Tokens)
+	bodyPhrase := bestFieldPhraseScore(query.normalized, query.tokens, bodyNorm, bodyTokens)
 	urlPhrase := bestFieldPhraseScore(query.normalized, query.tokens, urlNorm, urlTokens)
 	domainPhrase := max(
 		bestFieldPhraseScore(query.normalized, query.tokens, domainNorm, domainTokens),
@@ -877,9 +940,15 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	)
 
 	titleAvg, titleCoverage, titleExact := searchTokenCoverage(query.tokens, titleTokens)
+	h1Avg, h1Coverage, _ := searchTokenCoverage(query.tokens, h1Tokens)
+	h2Avg, h2Coverage, _ := searchTokenCoverage(query.tokens, h2Tokens)
+	bodyAvg, bodyCoverage, _ := searchTokenCoverage(query.tokens, bodyTokens)
 	domainAvg, domainCoverage, _ := searchTokenCoverage(query.tokens, domainTokens)
 	urlAvg, urlCoverage, _ := searchTokenCoverage(query.tokens, urlTokens)
-	descAvg, descCoverage, _ := searchTokenCoverage(query.tokens, descTokens)
+
+	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + bodyAvg) / 8.0
+	weightedFieldCoverage := (3.0*titleCoverage + 2.0*h1Coverage + 2.0*h2Coverage + bodyCoverage) / 8.0
+	fixedTF := fixedWeightedTermFrequency(query.tokens, titleNorm, h1Norm, h2Norm, bodyNorm)
 
 	isHomepage := isSearchHomepage(candidate.URL)
 	domainPhraseWeight := 260.0
@@ -897,14 +966,13 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 
 	score := candidate.sqlScore * 0.35
 	score += searchModeBonus(candidate.mode)
-	score += 700.0 * titlePhrase
+	score += 560.0*titlePhrase + 360.0*h1Phrase + 360.0*h2Phrase + 170.0*bodyPhrase
 	score += domainPhraseWeight * domainPhrase
-	score += 140.0 * descPhrase
 	score += 90.0 * urlPhrase
-	score += 420.0*titleAvg + 120.0*titleCoverage
+	score += 430.0*weightedFieldAvg + 180.0*weightedFieldCoverage
+	score += 55.0 * fixedTF
 	score += domainTokenWeight*domainAvg + domainCoverageWeight*domainCoverage
 	score += 130.0*urlAvg + 40.0*urlCoverage
-	score += 90.0*descAvg + 30.0*descCoverage
 
 	if len(query.tokens) > 0 && titleExact == len(query.tokens) {
 		score += 180.0
@@ -923,7 +991,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	if candidate.isSeed {
 		score += 35.0
 	}
-	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAt)
+	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAtStr)
 	score += searchContentLengthScore(candidate.contentLen)
 
 	if query.navigational && domainInfo.isRootDomain && isHomepage && domainPhrase >= 0.95 {
@@ -934,8 +1002,8 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 
 	if candidate.mode == searchModeFuzzy {
-		strongestPhrase := max(titlePhrase, domainPhrase)
-		strongestToken := max(titleAvg, max(domainAvg, urlAvg))
+		strongestPhrase := max(max(titlePhrase, h1Phrase), max(max(h2Phrase, bodyPhrase), domainPhrase))
+		strongestToken := max(weightedFieldAvg, max(domainAvg, urlAvg))
 		if strongestPhrase < 0.72 && strongestToken < 0.78 {
 			return 0, false
 		}
@@ -959,10 +1027,19 @@ func searchModeBonus(mode searchMode) float64 {
 	}
 }
 
-func searchFreshnessScore(crawledAt time.Time, publishedAt sql.NullTime) float64 {
+func searchFreshnessScore(crawledAt time.Time, publishedAtStr string) float64 {
 	bestTime := crawledAt
-	if publishedAt.Valid && !publishedAt.Time.IsZero() {
-		bestTime = publishedAt.Time
+	if publishedAtStr != "" {
+		if t, err := time.Parse(time.RFC3339, publishedAtStr); err == nil && !t.IsZero() {
+			bestTime = t
+		} else {
+			for _, fmt := range []string{"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02"} {
+				if t, err := time.Parse(fmt, publishedAtStr); err == nil && !t.IsZero() {
+					bestTime = t
+					break
+				}
+			}
+		}
 	}
 	if bestTime.IsZero() {
 		return 0
@@ -976,6 +1053,50 @@ func searchContentLengthScore(contentLen int) float64 {
 		return 0
 	}
 	return min(float64(contentLen)/800.0, 25.0)
+}
+
+func fixedWeightedTermFrequency(queryTokens []string, titleNorm, h1Norm, h2Norm, bodyNorm string) float64 {
+	if len(queryTokens) == 0 {
+		return 0
+	}
+
+	queryTokens = uniqueStrings(queryTokens)
+	titleFreq := tokenFrequencyMap(strings.Fields(titleNorm))
+	h1Freq := tokenFrequencyMap(strings.Fields(h1Norm))
+	h2Freq := tokenFrequencyMap(strings.Fields(h2Norm))
+	bodyFreq := tokenFrequencyMap(strings.Fields(bodyNorm))
+
+	return weightedTokenFrequency(queryTokens, titleFreq, 3.0, 4) +
+		weightedTokenFrequency(queryTokens, h1Freq, 2.0, 5) +
+		weightedTokenFrequency(queryTokens, h2Freq, 2.0, 5) +
+		weightedTokenFrequency(queryTokens, bodyFreq, 1.0, 10)
+}
+
+func tokenFrequencyMap(tokens []string) map[string]int {
+	freq := make(map[string]int, len(tokens))
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		freq[token]++
+	}
+	return freq
+}
+
+func weightedTokenFrequency(queryTokens []string, fieldFreq map[string]int, weight float64, maxPerToken int) float64 {
+	if len(queryTokens) == 0 || len(fieldFreq) == 0 {
+		return 0
+	}
+
+	total := 0.0
+	for _, token := range queryTokens {
+		count := fieldFreq[token]
+		if maxPerToken > 0 && count > maxPerToken {
+			count = maxPerToken
+		}
+		total += float64(count) * weight
+	}
+	return total
 }
 
 func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, coverage float64, exactMatches int) {

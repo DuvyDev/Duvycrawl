@@ -35,14 +35,16 @@ type LinkAnchor struct {
 // ParseResult contains the structured data extracted from an HTML page.
 type ParseResult struct {
 	Title       string
+	H1          string
+	H2          string
 	Description string
-	Content     string        // Visible text content, stripped of HTML
-	Links       []string      // Absolute URLs found in <a> tags
-	Anchors     []LinkAnchor  // Links with anchor text for backlink indexing
-	Canonical   string        // Canonical URL if specified
-	Language    string        // Detected language code (e.g. "es", "en")
-	Images      []ImageMeta   // Images found on the page
-	PublishedAt time.Time     // Publication date extracted from meta/JSON-LD
+	Content     string       // Visible text content, stripped of HTML
+	Links       []string     // Absolute URLs found in <a> tags
+	Anchors     []LinkAnchor // Links with anchor text for backlink indexing
+	Canonical   string       // Canonical URL if specified
+	Language    string       // Detected language code (e.g. "es", "en")
+	Images      []ImageMeta  // Images found on the page
+	PublishedAt time.Time    // Publication date extracted from meta/JSON-LD
 }
 
 // Parser extracts structured data from HTML documents.
@@ -137,13 +139,15 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	// Get the text from the main content area.
 	// Try <main>, <article>, then fall back to <body>.
-	var contentText string
-	mainContent := doc.Find("main, article, [role=main]").First()
-	if mainContent.Length() > 0 {
-		contentText = extractText(mainContent)
-	} else {
-		contentText = extractText(doc.Find("body"))
+	contentRoot := doc.Find("main, article, [role=main]").First()
+	if contentRoot.Length() == 0 {
+		contentRoot = doc.Find("body").First()
 	}
+
+	result.H1 = extractHeadingText(contentRoot, "h1", 1200)
+	result.H2 = extractHeadingText(contentRoot, "h2", 2000)
+
+	contentText := extractText(contentRoot)
 
 	result.Content = normalizeWhitespace(contentText)
 
@@ -312,6 +316,32 @@ func resolveURL(base *url.URL, href string) string {
 func normalizeWhitespace(s string) string {
 	fields := strings.Fields(s)
 	return strings.Join(fields, " ")
+}
+
+func extractHeadingText(root *goquery.Selection, selector string, maxLen int) string {
+	if root == nil || root.Length() == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 4)
+	seen := make(map[string]struct{})
+	root.Find(selector).Each(func(_ int, s *goquery.Selection) {
+		text := normalizeWhitespace(strings.TrimSpace(s.Text()))
+		if text == "" {
+			return
+		}
+		if _, exists := seen[text]; exists {
+			return
+		}
+		seen[text] = struct{}{}
+		parts = append(parts, text)
+	})
+
+	joined := strings.Join(parts, " ")
+	if maxLen > 0 && len(joined) > maxLen {
+		joined = joined[:maxLen]
+	}
+	return joined
 }
 
 // isBlockElement returns true for HTML tags that are typically block-level.

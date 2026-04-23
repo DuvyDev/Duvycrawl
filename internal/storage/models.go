@@ -11,13 +11,15 @@ type Page struct {
 	URL            string    `json:"url"`
 	Domain         string    `json:"domain"`
 	Title          string    `json:"title"`
+	H1             string    `json:"h1,omitempty"`
+	H2             string    `json:"h2,omitempty"`
 	Description    string    `json:"description"`
 	Content        string    `json:"content,omitempty"` // Clean text, no HTML
 	Language       string    `json:"language"`          // ISO 639-1 code (es, en, pt...)
 	Region         string    `json:"region"`            // Country code from TLD (uy, es, ar...)
 	StatusCode     int       `json:"status_code"`
-	ContentHash    string    `json:"content_hash"`    // SHA-256 of content for change detection
-	URLFingerprint string    `json:"url_fingerprint"` // Structural fingerprint for deduplication
+	ContentHash    string    `json:"content_hash"`           // SHA-256 of content for change detection
+	URLFingerprint string    `json:"url_fingerprint"`        // Structural fingerprint for deduplication
 	PublishedAt    time.Time `json:"published_at,omitempty"` // Article publication date
 	CrawledAt      time.Time `json:"crawled_at"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -121,11 +123,11 @@ type QueueStats struct {
 
 // CrawlerStats provides overall statistics about the crawler's work.
 type CrawlerStats struct {
-	TotalPages    int     `json:"total_pages"`
-	TotalDomains  int     `json:"total_domains"`
-	SeedDomains   int     `json:"seed_domains"`
-	Queue         QueueStats `json:"queue"`
-	DatabaseSizeMB float64 `json:"database_size_mb"`
+	TotalPages     int        `json:"total_pages"`
+	TotalDomains   int        `json:"total_domains"`
+	SeedDomains    int        `json:"seed_domains"`
+	Queue          QueueStats `json:"queue"`
+	DatabaseSizeMB float64    `json:"database_size_mb"`
 }
 
 // OutgoingLink represents a link from a source page to a target URL with anchor text.
@@ -136,21 +138,21 @@ type OutgoingLink struct {
 
 // LinkRecord represents an outgoing link from one page to another.
 type LinkRecord struct {
-	ID         int64  `json:"id"`
-	SourceID   int64  `json:"source_id"`
-	SourceURL  string `json:"source_url"`
-	TargetURL  string `json:"target_url"`
-	AnchorText string `json:"anchor_text"`
+	ID         int64     `json:"id"`
+	SourceID   int64     `json:"source_id"`
+	SourceURL  string    `json:"source_url"`
+	TargetURL  string    `json:"target_url"`
+	AnchorText string    `json:"anchor_text"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
 // BacklinkResult represents a page that links to a target URL.
 type BacklinkResult struct {
-	SourceID   int64     `json:"source_id"`
-	SourceURL  string    `json:"source_url"`
-	SourceTitle string   `json:"source_title"`
-	AnchorText string    `json:"anchor_text"`
-	CreatedAt  time.Time `json:"created_at"`
+	SourceID    int64     `json:"source_id"`
+	SourceURL   string    `json:"source_url"`
+	SourceTitle string    `json:"source_title"`
+	AnchorText  string    `json:"anchor_text"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // OutlinkResult represents a page that a source page links to.

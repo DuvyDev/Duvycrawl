@@ -9,6 +9,8 @@ var migrations = []string{
 		url          TEXT    NOT NULL UNIQUE,
 		domain       TEXT    NOT NULL DEFAULT '',
 		title        TEXT    NOT NULL DEFAULT '',
+		h1           TEXT    NOT NULL DEFAULT '',
+		h2           TEXT    NOT NULL DEFAULT '',
 		description  TEXT    NOT NULL DEFAULT '',
 		content      TEXT    NOT NULL DEFAULT '',
 		status_code  INTEGER NOT NULL DEFAULT 0,
@@ -85,6 +87,8 @@ var migrations = []string{
 	// --- Migration: add language/region columns to pages ---
 	`ALTER TABLE pages ADD COLUMN language TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE pages ADD COLUMN region TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN h1 TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN h2 TEXT NOT NULL DEFAULT ''`,
 
 	// --- Images table ---
 	`CREATE TABLE IF NOT EXISTS images (

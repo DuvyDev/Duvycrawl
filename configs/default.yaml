@@ -12,7 +12,7 @@ crawler:
   politeness_delay: 1s
   # Extra randomized duration added to politeness_delay (e.g. 500ms)
   # This makes crawl patterns less predictable and helps avoid blocks.
-  random_delay: 0s
+  random_delay: 500ms
   # Maximum retry attempts for failed requests
   max_retries: 3
   # User-Agent string sent with every request.
@@ -629,6 +629,11 @@ seeds:
     priority: 100
     start_urls:
       - https://www.techspot.com/
+
+  - domain: guru3d.com
+    priority: 100
+    start_urls:
+      - https://www.guru3d.com/
 
   # --- Adult +18 ---
 
