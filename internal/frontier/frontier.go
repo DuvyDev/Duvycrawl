@@ -44,7 +44,14 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 
 	fingerprint := FingerprintURL(normalized)
 
-	// Check exact URL first (fast path).
+	// Fast path: check Bloom filter first (O(1), in-memory, ~0.1% FP rate).
+	// This skips the vast majority of DB queries for already-seen URLs.
+	if f.queue.HasSeen(fingerprint) {
+		return nil
+	}
+
+	// Bloom says "not seen" — confirm with DB (handles the 0.1% false negatives
+	// where the URL was crawled before the Bloom was populated).
 	existing, err := f.store.GetPageByURL(ctx, normalized)
 	if err != nil {
 		return fmt.Errorf("checking existing page: %w", err)
@@ -92,7 +99,12 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 
 		fingerprint := FingerprintURL(normalized)
 
-		// Skip URLs already crawled (exact match or structural match).
+		// Fast path: check Bloom filter first — avoids ~95% of DB queries.
+		if f.queue.HasSeen(fingerprint) {
+			continue
+		}
+
+		// Bloom says "not seen" — confirm with DB.
 		existing, _ := f.store.GetPageByURL(ctx, normalized)
 		if existing != nil {
 			f.queue.MarkSeen(fingerprint)

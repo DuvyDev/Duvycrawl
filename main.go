@@ -66,7 +66,10 @@ func run() error {
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, front, limiter, logger)
+	batchWriter := storage.NewBatchWriter(store.WriteDB(), logger)
+	defer batchWriter.Stop()
+
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, logger)
 
 	sched := scheduler.New(store, front, scheduler.DefaultPolicy(), logger)
 

@@ -46,14 +46,15 @@ var botBlockKeywords = []string{
 // Engine is the main crawler orchestrator. It manages a pool of worker
 // goroutines that fetch, parse, and store web pages.
 type Engine struct {
-	cfg      *config.CrawlerConfig
-	store    storage.Storage
-	frontier *frontier.Frontier
-	fetcher  *Fetcher
-	parser   *Parser
-	robots   *RobotsCache
-	limiter  *ratelimit.DomainLimiter
-	logger   *slog.Logger
+	cfg         *config.CrawlerConfig
+	store       storage.Storage
+	batchWriter *storage.BatchWriter
+	frontier    *frontier.Frontier
+	fetcher     *Fetcher
+	parser      *Parser
+	robots      *RobotsCache
+	limiter     *ratelimit.DomainLimiter
+	logger      *slog.Logger
 
 	status atomic.Value // EngineStatus
 	cancel context.CancelFunc
@@ -74,19 +75,21 @@ type Engine struct {
 func NewEngine(
 	cfg *config.CrawlerConfig,
 	store storage.Storage,
+	batchWriter *storage.BatchWriter,
 	front *frontier.Frontier,
 	limiter *ratelimit.DomainLimiter,
 	logger *slog.Logger,
 ) *Engine {
 	e := &Engine{
-		cfg:      cfg,
-		store:    store,
-		frontier: front,
-		fetcher:  NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, cfg.ProxyURL, logger),
-		parser:   NewParser(),
-		robots:   NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
-		limiter:  limiter,
-		logger:   logger.With("component", "engine"),
+		cfg:         cfg,
+		store:       store,
+		batchWriter: batchWriter,
+		frontier:    front,
+		fetcher:     NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, cfg.ProxyURL, logger),
+		parser:      NewParser(),
+		robots:      NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
+		limiter:     limiter,
+		logger:      logger.With("component", "engine"),
 	}
 	e.status.Store(StatusIdle)
 	return e
@@ -146,6 +149,14 @@ func (e *Engine) Stop() {
 	}
 
 	e.wg.Wait()
+
+	// Flush any remaining batched writes before marking as stopped.
+	if e.batchWriter != nil {
+		if err := e.batchWriter.Flush(); err != nil {
+			e.logger.Warn("final batch flush failed", "error", err)
+		}
+	}
+
 	e.status.Store(StatusIdle)
 
 	e.logger.Info("crawler engine stopped",
@@ -333,10 +344,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		CrawledAt:      time.Now().UTC(),
 	}
 
-	if err := e.store.UpsertPage(ctx, page); err != nil {
-		e.retryOrFail(job, logger, "failed to store page", err)
-		return
-	}
+	e.batchWriter.WritePage(page)
 
 	e.pagesCrawled.Add(1)
 	logger.Info("page crawled successfully",
@@ -349,21 +357,14 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	)
 
 	if len(parsed.Anchors) > 0 {
-		storedPage, getErr := e.store.GetPageByURL(ctx, pageURL)
-		if getErr == nil && storedPage != nil {
-			outgoing := make([]storage.OutgoingLink, 0, len(parsed.Anchors))
-			for _, a := range parsed.Anchors {
-				outgoing = append(outgoing, storage.OutgoingLink{
-					TargetURL:  a.URL,
-					AnchorText: a.Anchor,
-				})
-			}
-			if err := e.store.StoreLinks(ctx, storedPage.ID, storedPage.URL, outgoing); err != nil {
-				logger.Warn("failed to store outgoing links", "error", err, "count", len(outgoing))
-			}
-		} else if getErr != nil {
-			logger.Warn("failed to lookup page for link storage", "error", getErr)
+		outgoing := make([]storage.OutgoingLink, 0, len(parsed.Anchors))
+		for _, a := range parsed.Anchors {
+			outgoing = append(outgoing, storage.OutgoingLink{
+				TargetURL:  a.URL,
+				AnchorText: a.Anchor,
+			})
 		}
+		e.batchWriter.WriteLinks(pageURL, outgoing)
 	}
 
 	// Store extracted images.
@@ -383,9 +384,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 				CrawledAt: now,
 			})
 		}
-		if err := e.store.UpsertImages(ctx, imageRecords); err != nil {
-			logger.Warn("failed to store images", "error", err, "count", len(imageRecords))
-		}
+		e.batchWriter.WriteImages(imageRecords)
 	}
 
 	// Enqueue discovered links if we haven't exceeded max depth.

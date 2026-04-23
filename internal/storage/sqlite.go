@@ -1966,6 +1966,12 @@ func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
 	return nil
 }
 
+// WriteDB returns the underlying write database connection.
+// Used by the BatchWriter to share the same serialized write connection.
+func (s *SQLiteStorage) WriteDB() *sql.DB {
+	return s.writeDB
+}
+
 // Close closes both SQLite connection pools.
 func (s *SQLiteStorage) Close() error {
 	s.logger.Info("closing SQLite storage")
