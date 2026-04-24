@@ -54,6 +54,7 @@ type Engine struct {
 	parser      *Parser
 	robots      *RobotsCache
 	limiter     *ratelimit.DomainLimiter
+	domainStats *DomainStatsCollector
 	logger      *slog.Logger
 
 	status atomic.Value // EngineStatus
@@ -78,6 +79,7 @@ func NewEngine(
 	batchWriter *storage.BatchWriter,
 	front *frontier.Frontier,
 	limiter *ratelimit.DomainLimiter,
+	domainStats *DomainStatsCollector,
 	logger *slog.Logger,
 ) *Engine {
 	e := &Engine{
@@ -89,6 +91,7 @@ func NewEngine(
 		parser:      NewParser(),
 		robots:      NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:     limiter,
+		domainStats: domainStats,
 		logger:      logger.With("component", "engine"),
 	}
 	e.status.Store(StatusIdle)
@@ -392,8 +395,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		e.enqueueDiscoveredLinks(ctx, logger, parsed.Links, job.Depth+1)
 	}
 
-	// Update domain stats.
-	e.updateDomainStats(ctx, job.Domain, result.Duration)
+	// Update domain stats (async, in-memory accumulator).
+	e.domainStats.Record(job.Domain, result.Duration)
 }
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.
@@ -432,33 +435,6 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 
 	if err := e.frontier.AddBatch(ctx, links, depth, priority); err != nil {
 		logger.Warn("failed to enqueue discovered links", "error", err, "count", len(links))
-	}
-}
-
-// updateDomainStats updates the crawl statistics for a domain.
-func (e *Engine) updateDomainStats(ctx context.Context, domainName string, fetchDuration time.Duration) {
-	domain, err := e.store.GetDomain(ctx, domainName)
-	if err != nil || domain == nil {
-		// Domain not tracked yet, create it.
-		domain = &storage.Domain{
-			Domain:        domainName,
-			LastCrawled:   time.Now().UTC(),
-			PagesCount:    1,
-			AvgResponseMs: int(fetchDuration.Milliseconds()),
-		}
-	} else {
-		domain.LastCrawled = time.Now().UTC()
-		domain.PagesCount++
-		// Exponential moving average for response time.
-		alpha := 0.3
-		domain.AvgResponseMs = int(alpha*float64(fetchDuration.Milliseconds()) + (1-alpha)*float64(domain.AvgResponseMs))
-	}
-
-	if err := e.store.UpsertDomain(ctx, domain); err != nil {
-		e.logger.Warn("failed to update domain stats",
-			"domain", domainName,
-			"error", err,
-		)
 	}
 }
 

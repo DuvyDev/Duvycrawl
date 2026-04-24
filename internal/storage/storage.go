@@ -59,6 +59,10 @@ type Storage interface {
 	// suitable for re-crawling.
 	GetStalePages(ctx context.Context, olderThan time.Time, limit int) ([]Page, error)
 
+	// GetRecentPages returns the most recently crawled pages, ordered by
+	// crawled_at descending. Used to re-populate the frontier after restart.
+	GetRecentPages(ctx context.Context, limit int) ([]Page, error)
+
 	// --- Crawl Queue Operations ---
 
 	// EnqueueURL adds a single URL to the crawl queue if it doesn't already exist.
@@ -91,6 +95,13 @@ type Storage interface {
 
 	// UpsertDomain inserts a new domain or updates an existing one.
 	UpsertDomain(ctx context.Context, domain *Domain) error
+
+	// FilterExistingURLs returns a set of URLs that already exist in the pages table.
+	// This is used for batch deduplication in the frontier.
+	FilterExistingURLs(ctx context.Context, urls []string) (map[string]struct{}, error)
+
+	// FilterExistingFingerprints returns a set of URL fingerprints that already exist.
+	FilterExistingFingerprints(ctx context.Context, fingerprints []string) (map[string]struct{}, error)
 
 	// GetDomain retrieves a domain by its name.
 	GetDomain(ctx context.Context, domainName string) (*Domain, error)

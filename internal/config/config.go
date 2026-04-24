@@ -68,6 +68,11 @@ type CrawlerConfig struct {
 	// MaxFallbackRetries is the maximum number of fallback attempts per URL
 	// when the primary User-Agent is detected to have failed.
 	MaxFallbackRetries int `yaml:"max_fallback_retries"`
+	// DomainStatsFlushInterval controls how often per-domain crawl statistics
+	// are flushed from memory to SQLite. Shorter intervals = more writes but
+	// fresher stats. Longer intervals = fewer writes but possible data loss on
+	// crash. Default: 30s.
+	DomainStatsFlushInterval time.Duration `yaml:"domain_stats_flush_interval"`
 }
 
 // SeedConfig represents a seed domain defined in the configuration file.
@@ -124,9 +129,10 @@ func DefaultConfig() *Config {
 			ParallelismPerDomain: 2,
 			DisableCookies:       false,
 			MaxIdleConnsPerHost:  100,
-			ProxyURL:             "",
-			FallbackUserAgent:    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-			MaxFallbackRetries:   1,
+			ProxyURL:                   "",
+			FallbackUserAgent:          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+			MaxFallbackRetries:         1,
+			DomainStatsFlushInterval:   30 * time.Second,
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",

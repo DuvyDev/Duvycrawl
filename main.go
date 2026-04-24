@@ -69,7 +69,10 @@ func run() error {
 	batchWriter := storage.NewBatchWriter(store.WriteDB(), logger)
 	defer batchWriter.Stop()
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, logger)
+	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)
+	defer domainStats.Stop()
+
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, logger)
 
 	sched := scheduler.New(store, front, scheduler.DefaultPolicy(), logger)
 
@@ -78,6 +81,11 @@ func run() error {
 	// --- Seed Bloom filter from existing DB pages ---
 	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {
 		logger.Warn("failed to seed bloom filter", "error", err)
+	}
+
+	// --- Re-queue recent pages to repopulate frontier after restart ---
+	if err := requeueRecentPages(ctx, store, front, logger); err != nil {
+		logger.Warn("failed to re-queue recent pages", "error", err)
 	}
 
 	// --- Seed Default Domains ---
@@ -93,6 +101,10 @@ func run() error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// --- Start Components ---
+
+	// Start the periodic wake goroutine so workers unblock when rate limiter
+	// slots free up even if no new URLs are being enqueued.
+	crawlQueue.StartPeriodicWake(ctx)
 
 	// Start the scheduler in a goroutine.
 	go sched.Start(ctx)
@@ -254,7 +266,7 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 			startURLs = []string{"https://" + seed.Domain + "/"}
 		}
 
-		if err := front.AddBatchDirect(ctx, startURLs, 0, priority); err != nil {
+		if _, err := front.AddBatchDirect(ctx, startURLs, 0, priority); err != nil {
 			logger.Warn("failed to enqueue seed URLs",
 				"domain", seed.Domain,
 				"error", err,
@@ -270,5 +282,37 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 		"enqueued", enqueued,
 	)
 
+	return nil
+}
+
+// requeueRecentPages fetches the most recently crawled pages from the database
+// and injects them back into the frontier. This prevents the crawler from
+// starving on restart when the in-memory queue is empty but the database
+// contains hundreds of thousands of previously crawled URLs.
+func requeueRecentPages(ctx context.Context, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
+	// Fetch the 5,000 most recent pages. This provides enough initial work
+	// for high worker counts without being excessive.
+	pages, err := store.GetRecentPages(ctx, 5000)
+	if err != nil {
+		return err
+	}
+	if len(pages) == 0 {
+		return nil
+	}
+
+	urls := make([]string, 0, len(pages))
+	for _, p := range pages {
+		urls = append(urls, p.URL)
+	}
+
+	added, err := front.AddBatchDirect(ctx, urls, 0, storage.PriorityNormal)
+	if err != nil {
+		return fmt.Errorf("re-queuing recent pages: %w", err)
+	}
+
+	logger.Info("re-queued recent pages into frontier",
+		"fetched", len(urls),
+		"enqueued", added,
+	)
 	return nil
 }

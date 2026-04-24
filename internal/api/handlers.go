@@ -218,7 +218,7 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 		priority = storage.PriorityNormal
 	}
 
-	if err := h.frontier.AddBatchDirect(r.Context(), req.URLs, 0, priority); err != nil {
+	if _, err := h.frontier.AddBatchDirect(r.Context(), req.URLs, 0, priority); err != nil {
 		h.logger.Error("failed to enqueue URLs", "error", err, "count", len(req.URLs))
 		writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
 		return

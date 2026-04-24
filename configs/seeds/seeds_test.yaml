@@ -1,27 +1,13 @@
 seeds:
   - domain: news.ycombinator.com
+    priority: 100
+    start_urls:
+      - https://news.ycombinator.com/
+      - https://news.ycombinator.com/newest
+      - https://news.ycombinator.com/front
+      - https://news.ycombinator.com/show
+  - domain: curlie.org
     priority: 90
-  - domain: reddit.com
-    priority: 80
-  - domain: wikipedia.org
-    priority: 80
-  - domain: fandom.com
-    priority: 75
-  - domain: cnn.com
-    priority: 75
-  - domain: github.com
-    priority: 70
-  - domain: tumblr.com
-    priority: 65
-  - domain: learn.microsoft.com
-    priority: 60
-  - domain: store.steampowered.com
-    priority: 45
-  - domain: play.google.com
-    priority: 40
-  - domain: infobae.com
-    priority: 35
-  - domain: privacytools.io
-    priority: 20
-  - domain: catalogodatos.gub.uy
-    priority: 15
+    start_urls:
+      - https://curlie.org/en
+      - https://curlie.org/es

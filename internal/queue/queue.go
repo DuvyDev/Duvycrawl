@@ -175,6 +175,29 @@ func (q *Queue) EnqueueRetry(job *Job) bool {
 	return true
 }
 
+// EnqueueBatchDirect adds multiple jobs without checking the Bloom filter.
+// Use this for explicit re-injection (startup, scheduler, API) where
+// deduplication is either unwanted or handled externally.
+func (q *Queue) EnqueueBatchDirect(jobs []*Job) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	added := 0
+	for _, job := range jobs {
+		job.ID = q.nextID.Add(1)
+		q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
+		added++
+	}
+
+	q.enqueued.Add(int64(added))
+
+	if added > 0 && q.workerWaiters > 0 {
+		q.cond.Broadcast()
+	}
+
+	return added
+}
+
 // Dequeue finds the highest-priority job from any domain where
 // readyFn returns true. It sorts candidates by priority first, then
 // checks readiness in order — calling readyFn only once (on the first

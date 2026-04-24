@@ -85,12 +85,25 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 // AddBatch enqueues multiple URLs for crawling, skipping URLs that have
 // already been crawled (exist in the pages table). Use this for discovered
 // links during crawling to avoid re-fetching known pages.
+//
+// Deduplication is performed in two stages:
+//   1. Bloom filter (in-memory, O(1)) — catches ~99.9% of duplicates.
+//   2. SQLite batch lookup — confirms the remainder in 2 queries instead of 2N.
 func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priority int) error {
 	if len(rawURLs) == 0 {
 		return nil
 	}
 
-	var jobs []*queue.Job
+	type candidate struct {
+		normalized  string
+		domain      string
+		fingerprint string
+	}
+
+	var candidates []candidate
+	var urlBatch []string
+	var fingerprintBatch []string
+
 	for _, rawURL := range rawURLs {
 		normalized, domain, err := CanonicalizeURL(rawURL)
 		if err != nil {
@@ -99,30 +112,50 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 
 		fingerprint := FingerprintURL(normalized)
 
-		// Fast path: check Bloom filter first — avoids ~95% of DB queries.
+		// Fast path: check Bloom filter first — avoids ~99.9% of DB queries.
 		if f.queue.HasSeen(fingerprint) {
 			continue
 		}
 
-		// Bloom says "not seen" — confirm with DB.
-		existing, _ := f.store.GetPageByURL(ctx, normalized)
-		if existing != nil {
-			f.queue.MarkSeen(fingerprint)
+		candidates = append(candidates, candidate{normalized, domain, fingerprint})
+		urlBatch = append(urlBatch, normalized)
+		fingerprintBatch = append(fingerprintBatch, fingerprint)
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Batch confirmation against the database: 2 queries total instead of 2N.
+	existingURLs, err := f.store.FilterExistingURLs(ctx, urlBatch)
+	if err != nil {
+		f.logger.Warn("batch URL deduplication failed, proceeding with Bloom-only filter", "error", err)
+		existingURLs = map[string]struct{}{}
+	}
+
+	existingFingerprints, err := f.store.FilterExistingFingerprints(ctx, fingerprintBatch)
+	if err != nil {
+		f.logger.Warn("batch fingerprint deduplication failed, proceeding with Bloom-only filter", "error", err)
+		existingFingerprints = map[string]struct{}{}
+	}
+
+	var jobs []*queue.Job
+	for _, c := range candidates {
+		if _, exists := existingURLs[c.normalized]; exists {
+			f.queue.MarkSeen(c.fingerprint)
 			continue
 		}
-
-		existingFingerprint, _ := f.store.GetPageByFingerprint(ctx, fingerprint)
-		if existingFingerprint != nil {
-			f.queue.MarkSeen(fingerprint)
+		if _, exists := existingFingerprints[c.fingerprint]; exists {
+			f.queue.MarkSeen(c.fingerprint)
 			continue
 		}
 
 		jobs = append(jobs, &queue.Job{
-			URL:         normalized,
-			Domain:      domain,
+			URL:         c.normalized,
+			Domain:      c.domain,
 			Depth:       depth,
 			Priority:    priority,
-			Fingerprint: fingerprint,
+			Fingerprint: c.fingerprint,
 		})
 	}
 
@@ -142,12 +175,13 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 	return nil
 }
 
-// AddBatchDirect enqueues URLs without checking the pages table.
-// Use this for seed injection (startup), scheduler re-crawls, and
+// AddBatchDirect enqueues URLs without checking the pages table or the Bloom
+// filter. Use this for seed injection (startup), scheduler re-crawls, and
 // API-requested crawls — cases where we explicitly want to (re)crawl.
-func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, priority int) error {
+// Returns the number of URLs actually enqueued.
+func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, priority int) (int, error) {
 	if len(rawURLs) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	var jobs []*queue.Job
@@ -168,10 +202,10 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 	}
 
 	if len(jobs) == 0 {
-		return nil
+		return 0, nil
 	}
 
-	added := f.queue.EnqueueBatch(jobs)
+	added := f.queue.EnqueueBatchDirect(jobs)
 	if added > 0 {
 		f.logger.Debug("batch enqueued URLs (direct)",
 			"submitted", len(jobs),
@@ -180,7 +214,7 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 			"priority", priority,
 		)
 	}
-	return nil
+	return added, nil
 }
 
 // Dequeue finds the next job whose domain is ready according to readyFn.

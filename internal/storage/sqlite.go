@@ -135,8 +135,8 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		writeDB.Close()
 		return nil, fmt.Errorf("opening read database: %w", err)
 	}
-	readDB.SetMaxOpenConns(4)
-	readDB.SetMaxIdleConns(4)
+	readDB.SetMaxOpenConns(8)
+	readDB.SetMaxIdleConns(8)
 	readDB.SetConnMaxLifetime(0)
 	if err := configureReadDB(ctx, readDB); err != nil {
 		readDB.Close()
@@ -306,6 +306,12 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
+	// Use a dedicated timeout for search so that slow modes do not accumulate
+	// beyond a reasonable bound. This also prevents context-cancelled errors
+	// from cascading through sequential query attempts.
+	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	candidateLimit := searchCandidateLimit(limit, offset)
 	plans := []struct {
 		mode     searchMode
@@ -323,20 +329,29 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	)
 
 	for _, plan := range plans {
+		if searchCtx.Err() != nil {
+			break
+		}
 		if plan.ftsQuery == "" {
 			continue
 		}
 
-		count, err := s.countFTSCandidates(ctx, plan.ftsQuery)
+		count, err := s.countFTSCandidates(searchCtx, plan.ftsQuery)
 		if err != nil {
+			if searchCtx.Err() != nil {
+				break
+			}
 			return nil, 0, fmt.Errorf("counting %s results for %q: %w", plan.mode, query, err)
 		}
 		if count == 0 {
 			continue
 		}
 
-		results, err := s.searchFTSCandidates(ctx, plan.mode, plan.ftsQuery, q, lang, candidateLimit)
+		results, err := s.searchFTSCandidates(searchCtx, plan.mode, plan.ftsQuery, q, lang, candidateLimit)
 		if err != nil {
+			if searchCtx.Err() != nil {
+				break
+			}
 			return nil, 0, fmt.Errorf("searching %s candidates for %q: %w", plan.mode, query, err)
 		}
 		if len(results) == 0 {
@@ -349,9 +364,12 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		break
 	}
 
-	if len(candidates) == 0 {
-		results, count, err := s.searchFuzzyCandidates(ctx, q, lang, candidateLimit)
+	if len(candidates) == 0 && searchCtx.Err() == nil {
+		results, count, err := s.searchFuzzyCandidates(searchCtx, q, lang, candidateLimit)
 		if err != nil {
+			if searchCtx.Err() != nil {
+				return nil, 0, fmt.Errorf("search timed out for %q", query)
+			}
 			return nil, 0, fmt.Errorf("searching fuzzy candidates for %q: %w", query, err)
 		}
 		if len(results) == 0 {
@@ -363,12 +381,11 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		selectedMode = searchModeFuzzy
 	}
 
-	if q.navigational {
-		navigationCandidates, err := s.searchNavigationalCandidates(ctx, q, lang, min(candidateLimit, 80))
-		if err != nil {
-			return nil, 0, fmt.Errorf("searching navigational candidates for %q: %w", query, err)
+	if q.navigational && searchCtx.Err() == nil {
+		navigationCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 80))
+		if err == nil {
+			candidates = mergeSearchCandidates(candidates, navigationCandidates)
 		}
-		candidates = mergeSearchCandidates(candidates, navigationCandidates)
 	}
 
 	reranked := rerankSearchCandidates(candidates, q, lang)
@@ -1513,6 +1530,42 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	return results
 }
 
+// GetRecentPages returns the most recently crawled pages.
+func (s *SQLiteStorage) GetRecentPages(ctx context.Context, limit int) ([]Page, error) {
+	query := `
+		SELECT id, url, domain, title, description, '', status_code, content_hash, crawled_at, created_at, updated_at
+		FROM pages
+		ORDER BY crawled_at DESC
+		LIMIT ?
+	`
+
+	rows, err := s.readDB.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying recent pages: %w", err)
+	}
+	defer rows.Close()
+
+	var pages []Page
+	for rows.Next() {
+		var p Page
+		var crawledAt, createdAt, updatedAt sql.NullTime
+		if err := rows.Scan(&p.ID, &p.URL, &p.Domain, &p.Title, &p.Description, &p.Content, &p.StatusCode, &p.ContentHash, &crawledAt, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scanning recent page: %w", err)
+		}
+		if crawledAt.Valid {
+			p.CrawledAt = crawledAt.Time
+		}
+		if createdAt.Valid {
+			p.CreatedAt = createdAt.Time
+		}
+		if updatedAt.Valid {
+			p.UpdatedAt = updatedAt.Time
+		}
+		pages = append(pages, p)
+	}
+	return pages, rows.Err()
+}
+
 // GetStalePages returns pages crawled before the given time, for re-crawling.
 func (s *SQLiteStorage) GetStalePages(ctx context.Context, olderThan time.Time, limit int) ([]Page, error) {
 	query := `
@@ -1777,6 +1830,73 @@ func (s *SQLiteStorage) GetQueueStats(ctx context.Context) (*QueueStats, error) 
 		return nil, fmt.Errorf("querying queue stats: %w", err)
 	}
 	return &stats, nil
+}
+
+// --------------------------------------------------------------------------
+// Batch Deduplication
+// --------------------------------------------------------------------------
+
+// FilterExistingURLs returns a set of URLs that already exist in the pages table.
+// It performs a single batched query instead of N individual lookups.
+func (s *SQLiteStorage) FilterExistingURLs(ctx context.Context, urls []string) (map[string]struct{}, error) {
+	if len(urls) == 0 {
+		return map[string]struct{}{}, nil
+	}
+
+	placeholders := make([]string, len(urls))
+	args := make([]any, len(urls))
+	for i, u := range urls {
+		placeholders[i] = "?"
+		args[i] = u
+	}
+
+	query := fmt.Sprintf("SELECT url FROM pages WHERE url IN (%s)", strings.Join(placeholders, ","))
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch URL lookup: %w", err)
+	}
+	defer rows.Close()
+
+	existing := make(map[string]struct{}, len(urls))
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, fmt.Errorf("scanning existing URL: %w", err)
+		}
+		existing[u] = struct{}{}
+	}
+	return existing, rows.Err()
+}
+
+// FilterExistingFingerprints returns a set of URL fingerprints that already exist.
+func (s *SQLiteStorage) FilterExistingFingerprints(ctx context.Context, fingerprints []string) (map[string]struct{}, error) {
+	if len(fingerprints) == 0 {
+		return map[string]struct{}{}, nil
+	}
+
+	placeholders := make([]string, len(fingerprints))
+	args := make([]any, len(fingerprints))
+	for i, fp := range fingerprints {
+		placeholders[i] = "?"
+		args[i] = fp
+	}
+
+	query := fmt.Sprintf("SELECT url_fingerprint FROM pages WHERE url_fingerprint IN (%s)", strings.Join(placeholders, ","))
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch fingerprint lookup: %w", err)
+	}
+	defer rows.Close()
+
+	existing := make(map[string]struct{}, len(fingerprints))
+	for rows.Next() {
+		var fp string
+		if err := rows.Scan(&fp); err != nil {
+			return nil, fmt.Errorf("scanning existing fingerprint: %w", err)
+		}
+		existing[fp] = struct{}{}
+	}
+	return existing, rows.Err()
 }
 
 // --------------------------------------------------------------------------

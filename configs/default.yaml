@@ -3,9 +3,9 @@
 
 crawler:
   # Number of concurrent crawl workers
-  workers: 300
+  workers: 600
   # Maximum link depth to follow from seed pages
-  max_depth: 3
+  max_depth: 5
   # HTTP request timeout per page
   request_timeout: 10s
   # Minimum delay between requests to the same domain
@@ -34,13 +34,17 @@ crawler:
   seed_domains_only: false
   # Max concurrent requests to the SAME domain (like Colly's Parallelism).
   # Higher = faster for a single domain, but be polite. Default: 2.
-  parallelism_per_domain: 2
+  parallelism_per_domain: 4
   # Disable cookie handling. Leave false unless you specifically want
   # to avoid session cookies (most sites require cookies to work).
   disable_cookies: false
   # Max idle keep-alive connections per host. Increase for high throughput
   # when crawling the same domains repeatedly.
-  max_idle_conns_per_host: 100
+  max_idle_conns_per_host: 150
+  # How often per-domain crawl statistics are flushed from memory to SQLite.
+  # Shorter intervals = fresher stats but more DB writes.
+  # Longer intervals = fewer writes but possible data loss on crash.
+  domain_stats_flush_interval: 30s
 
 storage:
   # Path to the SQLite database file

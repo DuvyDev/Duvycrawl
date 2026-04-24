@@ -121,7 +121,7 @@ func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, 
 		urls = append(urls, p.URL)
 	}
 
-	if err := s.frontier.AddBatchDirect(ctx, urls, 0, priority); err != nil {
+	if _, err := s.frontier.AddBatchDirect(ctx, urls, 0, priority); err != nil {
 		s.logger.Error("failed to re-enqueue stale pages",
 			"error", err,
 			"count", len(urls),
