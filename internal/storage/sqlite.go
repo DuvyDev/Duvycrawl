@@ -306,13 +306,18 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
-	// Use a dedicated timeout for search so that slow modes do not accumulate
-	// beyond a reasonable bound. This also prevents context-cancelled errors
-	// from cascading through sequential query attempts.
 	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	candidateLimit := searchCandidateLimit(limit, offset)
+
+	var (
+		candidates   []searchCandidate
+		total        int
+		selectedMode searchMode
+	)
+
+	// --- FTS modes: try exact → prefix → relaxed, pick the first with matches ---
 	plans := []struct {
 		mode     searchMode
 		ftsQuery string
@@ -321,12 +326,6 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.tokens)},
 		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.tokens)},
 	}
-
-	var (
-		candidates   []searchCandidate
-		total        int
-		selectedMode searchMode
-	)
 
 	for _, plan := range plans {
 		if searchCtx.Err() != nil {
@@ -364,8 +363,9 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		break
 	}
 
+	// --- Fallback to fuzzy LIKE-based search if FTS found nothing ---
 	if len(candidates) == 0 && searchCtx.Err() == nil {
-		results, count, err := s.searchFuzzyCandidates(searchCtx, q, lang, candidateLimit)
+		results, fuzzyTotal, err := s.searchFuzzyCandidates(searchCtx, q, lang, candidateLimit)
 		if err != nil {
 			if searchCtx.Err() != nil {
 				return nil, 0, fmt.Errorf("search timed out for %q", query)
@@ -377,12 +377,13 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		}
 
 		candidates = results
-		total = count
+		total = fuzzyTotal
 		selectedMode = searchModeFuzzy
 	}
 
-	if q.navigational && searchCtx.Err() == nil {
-		navigationCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 80))
+	// --- Navigational boost when FTS/fuzzy gave few results ---
+	if q.navigational && len(candidates) < 30 && searchCtx.Err() == nil {
+		navigationCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
 		if err == nil {
 			candidates = mergeSearchCandidates(candidates, navigationCandidates)
 		}
@@ -392,6 +393,11 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	if len(reranked) == 0 {
 		return nil, 0, nil
 	}
+
+	// --- Domain diversity: interleave results so one domain doesn't
+	//     dominate the first page. First 3 positions = max 1 per domain,
+	//     positions 4-10 = max 2, positions 11+ = max 3.
+	reranked = diversifyByDomain(reranked)
 
 	if selectedMode == searchModeFuzzy {
 		total = len(reranked)
@@ -404,12 +410,70 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	end := min(offset+limit, len(reranked))
+
+	// --- Load body previews only for the final result set ---
+	if err := s.loadResultBodies(searchCtx, reranked[offset:end]); err != nil {
+		s.logger.Warn("failed to load result bodies", "error", err)
+	}
+
 	results := make([]SearchResult, 0, end-offset)
 	for _, candidate := range reranked[offset:end] {
 		results = append(results, candidate.SearchResult)
 	}
 
 	return results, total, nil
+}
+
+// loadResultBodies fills in BodyPreview and Snippet for the final result set
+// by fetching content from the database. This avoids loading 4KB of content
+// per candidate during the initial search query.
+func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searchCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	ids := make([]string, len(candidates))
+	args := make([]any, len(candidates))
+	for i, c := range candidates {
+		ids[i] = "?"
+		args[i] = c.ID
+	}
+
+	query := fmt.Sprintf(`
+		SELECT id, SUBSTR(content, 1, 4000) FROM pages WHERE id IN (%s)
+	`, strings.Join(ids, ","))
+
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("loading result bodies: %w", err)
+	}
+	defer rows.Close()
+
+	bodyMap := make(map[int64]string, len(candidates))
+	for rows.Next() {
+		var id int64
+		var body string
+		if err := rows.Scan(&id, &body); err != nil {
+			continue
+		}
+		bodyMap[id] = body
+	}
+
+	for i := range candidates {
+		if body, ok := bodyMap[candidates[i].ID]; ok {
+			candidates[i].BodyPreview = body
+			if candidates[i].Snippet == "" {
+				if candidates[i].Description != "" {
+					candidates[i].Snippet = candidates[i].Description
+				} else if len(body) > 240 {
+					candidates[i].Snippet = body[:240]
+				} else {
+					candidates[i].Snippet = body
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func newSearchQuery(query string) searchQuery {
@@ -438,12 +502,9 @@ func newSearchQuery(query string) searchQuery {
 }
 
 func searchCandidateLimit(limit, offset int) int {
-	want := offset + limit*20
-	if want < 150 {
-		want = 150
-	}
-	if want > 1000 {
-		want = 1000
+	want := limit*8 + 30
+	if want > 200 {
+		want = 200
 	}
 	return want
 }
@@ -538,7 +599,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.h1,
 			p.h2,
 			p.description,
-			SUBSTR(p.content, 1, 4000) AS body_preview,
 			snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
 			p.domain,
 			p.language,
@@ -563,7 +623,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	}
 	defer rows.Close()
 
-var candidates []searchCandidate
+	var candidates []searchCandidate
 	for rows.Next() {
 		var (
 			candidate      searchCandidate
@@ -579,7 +639,6 @@ var candidates []searchCandidate
 			&candidate.H1,
 			&candidate.H2,
 			&candidate.Description,
-			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
@@ -590,7 +649,7 @@ var candidates []searchCandidate
 			&seedFlag,
 			&candidate.contentLen,
 		); err != nil {
-			return nil, fmt.Errorf("scanning navigational candidate: %w", err)
+			return nil, fmt.Errorf("scanning FTS candidate: %w", err)
 		}
 
 		candidate.Snippet = snippetText.String
@@ -657,14 +716,6 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 	}
 
 	whereClause := strings.Join(whereParts, " OR ")
-	countSQL := fmt.Sprintf(`SELECT COUNT(*) FROM pages p WHERE %s`, whereClause)
-	var total int
-	if err := s.readDB.QueryRowContext(ctx, countSQL, whereArgs...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("counting fuzzy candidates: %w", err)
-	}
-	if total == 0 {
-		return nil, 0, nil
-	}
 
 	querySQL := fmt.Sprintf(`
 		SELECT
@@ -674,10 +725,9 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.h1,
 			p.h2,
 			p.description,
-			SUBSTR(p.content, 1, 4000) AS body_preview,
 			CASE
 				WHEN p.description != '' THEN SUBSTR(p.description, 1, 240)
-				ELSE SUBSTR(p.content, 1, 240)
+				ELSE ''
 			END AS snippet,
 			p.domain,
 			p.language,
@@ -691,7 +741,8 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 				%s
 			) AS sql_score,
 			COALESCE(d.is_seed, 0) AS is_seed,
-			LENGTH(p.content) AS content_len
+			LENGTH(p.content) AS content_len,
+			COUNT(*) OVER() AS total_count
 		FROM pages p
 		LEFT JOIN domains d ON d.domain = p.domain
 		WHERE %s
@@ -713,6 +764,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 	defer rows.Close()
 
 	var candidates []searchCandidate
+	var totalCount int
 	for rows.Next() {
 		var (
 			candidate      searchCandidate
@@ -728,7 +780,6 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			&candidate.H1,
 			&candidate.H2,
 			&candidate.Description,
-			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
@@ -738,7 +789,8 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			&candidate.sqlScore,
 			&seedFlag,
 			&candidate.contentLen,
-); err != nil {
+			&totalCount,
+		); err != nil {
 			return nil, 0, fmt.Errorf("scanning fuzzy candidate: %w", err)
 		}
 
@@ -756,7 +808,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 		return nil, 0, fmt.Errorf("iterating fuzzy candidates: %w", err)
 	}
 
-	return candidates, total, nil
+	return candidates, totalCount, nil
 }
 
 func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query searchQuery, lang string, limit int) ([]searchCandidate, error) {
@@ -793,10 +845,9 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.h1,
 			p.h2,
 			p.description,
-			SUBSTR(p.content, 1, 4000) AS body_preview,
 			CASE
 				WHEN p.description != '' THEN SUBSTR(p.description, 1, 240)
-				ELSE SUBSTR(p.content, 1, 240)
+				ELSE ''
 			END AS snippet,
 			p.domain,
 			p.language,
@@ -874,7 +925,6 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&candidate.H1,
 			&candidate.H2,
 			&candidate.Description,
-			&candidate.BodyPreview,
 			&snippetText,
 			&candidate.Domain,
 			&candidate.Language,
@@ -1034,6 +1084,44 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAtStr)
 	score += searchContentLengthScore(candidate.contentLen)
 
+	// --- Direct domain match boost for navigational queries ---
+	// Boosts pages whose domain exactly matches the search term.
+	// Only boosts exact domain=term matches (e.g. "reddit" → reddit.com),
+	// never domains that merely contain the term (e.g. redditstatus.com).
+	if query.domainLike != "" || query.navTerm != "" {
+		candidateDomain := strings.TrimPrefix(candidate.Domain, "www.")
+		matchDomain := query.domainLike
+		if matchDomain == "" {
+			matchDomain = query.navTerm
+		}
+		if candidateDomain == matchDomain {
+			// e.g. query="reddit.com" → reddit.com, or query="reddit" → reddit (root domain only)
+			score += 5000.0
+			if isHomepage {
+				score += 3000.0
+			}
+		} else if candidateDomain == matchDomain+".com" ||
+			candidateDomain == matchDomain+".net" ||
+			candidateDomain == matchDomain+".org" ||
+			candidateDomain == matchDomain+".io" ||
+			candidateDomain == matchDomain+".es" ||
+			candidateDomain == matchDomain+".uk" ||
+			candidateDomain == matchDomain+".de" ||
+			candidateDomain == matchDomain+".fr" ||
+			candidateDomain == matchDomain+".it" ||
+			candidateDomain == matchDomain+".pt" ||
+			candidateDomain == matchDomain+".mx" ||
+			candidateDomain == matchDomain+".ar" ||
+			candidateDomain == matchDomain+".br" ||
+			candidateDomain == matchDomain+".uy" {
+			// e.g. query="reddit" → reddit.com, reddit.org, reddit.es, etc.
+			score += 4000.0
+			if isHomepage {
+				score += 2500.0
+			}
+		}
+	}
+
 	if query.navigational && domainInfo.isRootDomain && isHomepage && domainPhrase >= 0.95 {
 		score += 1200.0
 	}
@@ -1050,6 +1138,76 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 
 	return score, true
+}
+
+// diversifyByDomain reorders search results so that one domain doesn't dominate
+// the first page. It preserves score order within each domain but interleaves
+// different domains to produce a Google-like result layout:
+//
+//   - Positions 0-2:  max 1 result per domain
+//   - Positions 3-9:  max 2 results per domain
+//   - Position 10+:   max 3 results per domain
+//
+// Deferred results (that exceeded their domain's limit) are re-inserted in
+// subsequent passes as the per-domain quota increases at deeper positions.
+func diversifyByDomain(candidates []searchCandidate) []searchCandidate {
+	if len(candidates) <= 3 {
+		return candidates
+	}
+
+	var result []searchCandidate
+	domainCount := make(map[string]int)
+
+	// First pass: place results respecting per-domain limits.
+	var deferred []searchCandidate
+	for _, c := range candidates {
+		maxForDomain := maxPerDomainAtPosition(len(result))
+		if domainCount[c.Domain] < maxForDomain {
+			result = append(result, c)
+			domainCount[c.Domain]++
+		} else {
+			deferred = append(deferred, c)
+		}
+	}
+
+	// Second pass: try to place deferred results now that positions have
+	// shifted and per-domain quotas have increased.
+	for len(deferred) > 0 {
+		placed := false
+		var remaining []searchCandidate
+		for _, c := range deferred {
+			maxForDomain := maxPerDomainAtPosition(len(result))
+			if domainCount[c.Domain] < maxForDomain {
+				result = append(result, c)
+				domainCount[c.Domain]++
+				placed = true
+			} else {
+				remaining = append(remaining, c)
+			}
+		}
+		deferred = remaining
+		if !placed {
+			// Nothing more can be placed, append the rest.
+			result = append(result, deferred...)
+			break
+		}
+	}
+
+	return result
+}
+
+// maxPerDomainAtPosition returns the maximum number of results allowed from
+// a single domain at the given result position. This enforces domain diversity
+// in search results.
+func maxPerDomainAtPosition(pos int) int {
+	switch {
+	case pos < 3:
+		return 1
+	case pos < 10:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func searchModeBonus(mode searchMode) float64 {
