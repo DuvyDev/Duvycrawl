@@ -155,8 +155,8 @@ func (bw *BatchWriter) flushLocked() error {
 	// 1. Upsert all buffered pages
 	// -----------------------------------------------------------------
 	pageStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
@@ -171,7 +171,14 @@ func (bw *BatchWriter) flushLocked() error {
 			url_fingerprint  = excluded.url_fingerprint,
 			published_at     = COALESCE(excluded.published_at, pages.published_at),
 			crawled_at       = excluded.crawled_at,
-			updated_at       = CURRENT_TIMESTAMP
+			updated_at       = CURRENT_TIMESTAMP,
+			schema_type      = excluded.schema_type,
+			schema_title     = excluded.schema_title,
+			schema_description = excluded.schema_description,
+			schema_image     = excluded.schema_image,
+			schema_author    = excluded.schema_author,
+			schema_keywords  = excluded.schema_keywords,
+			schema_rating    = excluded.schema_rating
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare page upsert: %w", err)
@@ -183,11 +190,17 @@ func (bw *BatchWriter) flushLocked() error {
 		if !page.PublishedAt.IsZero() {
 			publishedAt = page.PublishedAt
 		}
+		var schemaRating any
+		if page.SchemaRating > 0 {
+			schemaRating = page.SchemaRating
+		}
 		_, err := pageStmt.ExecContext(ctx,
 			page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
 			page.Content, page.Language, page.Region,
 			page.StatusCode, page.ContentHash, page.URLFingerprint,
 			publishedAt, page.CrawledAt,
+			page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
+			page.SchemaAuthor, page.SchemaKeywords, schemaRating,
 		)
 		if err != nil {
 			bw.logger.Warn("batch upsert page failed", "url", page.URL, "error", err)

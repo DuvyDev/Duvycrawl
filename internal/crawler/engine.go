@@ -304,6 +304,13 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		return
 	}
 
+	if result.Truncated {
+		logger.Warn("page truncated at size limit, metadata and links preserved but content incomplete",
+			"url", job.URL,
+			"limit_kb", e.cfg.MaxPageSizeKB,
+		)
+	}
+
 	// Parse the HTML.
 	parsed, err := e.parser.Parse(result.Body, result.ContentType, result.FinalURL)
 	if err != nil {
@@ -331,20 +338,27 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Store the page.
 	page := &storage.Page{
-		URL:            pageURL,
-		Domain:         job.Domain,
-		Title:          truncateString(parsed.Title, 500),
-		H1:             truncateString(parsed.H1, 1000),
-		H2:             truncateString(parsed.H2, 2000),
-		Description:    truncateString(parsed.Description, 1000),
-		Content:        parsed.Content,
-		Language:       parsed.Language,
-		Region:         region,
-		StatusCode:     result.StatusCode,
-		ContentHash:    contentHash,
-		URLFingerprint: urlFingerprint,
-		PublishedAt:    parsed.PublishedAt,
-		CrawledAt:      time.Now().UTC(),
+		URL:               pageURL,
+		Domain:            job.Domain,
+		Title:             truncateString(parsed.Title, 500),
+		H1:                truncateString(parsed.H1, 1000),
+		H2:                truncateString(parsed.H2, 2000),
+		Description:       truncateString(parsed.Description, 1000),
+		Content:           parsed.Content,
+		Language:          parsed.Language,
+		Region:            region,
+		StatusCode:        result.StatusCode,
+		ContentHash:       contentHash,
+		URLFingerprint:    urlFingerprint,
+		PublishedAt:       parsed.PublishedAt,
+		CrawledAt:         time.Now().UTC(),
+		SchemaType:        parsed.SchemaType,
+		SchemaTitle:       truncateString(parsed.SchemaTitle, 500),
+		SchemaDescription: truncateString(parsed.SchemaDescription, 1000),
+		SchemaImage:       truncateString(parsed.SchemaImage, 2000),
+		SchemaAuthor:      truncateString(parsed.SchemaAuthor, 500),
+		SchemaKeywords:    truncateString(parsed.SchemaKeywords, 1000),
+		SchemaRating:      parsed.SchemaRating,
 	}
 
 	e.batchWriter.WritePage(page)

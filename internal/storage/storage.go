@@ -30,7 +30,7 @@ type Storage interface {
 	// SearchPages performs a full-text search and returns paginated results.
 	// Returns the matching results and the total count of matches.
 	// If lang is non-empty, results in that language are boosted in ranking.
-	SearchPages(ctx context.Context, query string, limit, offset int, lang string) ([]SearchResult, int, error)
+	SearchPages(ctx context.Context, query string, limit, offset int, lang string, domain string, schemaType string) ([]SearchResult, int, error)
 
 	// --- Image Operations ---
 
@@ -59,9 +59,9 @@ type Storage interface {
 	// suitable for re-crawling.
 	GetStalePages(ctx context.Context, olderThan time.Time, limit int) ([]Page, error)
 
-	// GetRecentPages returns the most recently crawled pages, ordered by
-	// crawled_at descending. Used to re-populate the frontier after restart.
-	GetRecentPages(ctx context.Context, limit int) ([]Page, error)
+	// GetFreshURLs returns a set of URLs from the given list that were crawled
+	// more recently than the given TTL. Used to skip recently-indexed URLs.
+	GetFreshURLs(ctx context.Context, urls []string, newerThan time.Time) (map[string]struct{}, error)
 
 	// --- Crawl Queue Operations ---
 

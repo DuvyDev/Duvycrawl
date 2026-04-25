@@ -2,9 +2,9 @@ package crawler
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/url"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +45,15 @@ type ParseResult struct {
 	Language    string       // Detected language code (e.g. "es", "en")
 	Images      []ImageMeta  // Images found on the page
 	PublishedAt time.Time    // Publication date extracted from meta/JSON-LD
+
+	// Schema.org (JSON-LD) structured data
+	SchemaType        string
+	SchemaTitle       string
+	SchemaDescription string
+	SchemaImage       string
+	SchemaAuthor      string
+	SchemaKeywords    string
+	SchemaRating      float64
 }
 
 // Parser extracts structured data from HTML documents.
@@ -130,12 +139,25 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// --- Extract publication date ---
 	result.PublishedAt = extractPublishedAt(doc)
 
+	// --- Extract schema.org JSON-LD structured data ---
+	schema := extractJSONLD(doc)
+	result.SchemaType = schema.Type
+	result.SchemaTitle = schema.Title
+	result.SchemaDescription = schema.Description
+	result.SchemaImage = schema.Image
+	result.SchemaAuthor = schema.Author
+	result.SchemaKeywords = schema.Keywords
+	result.SchemaRating = schema.Rating
+	if result.PublishedAt.IsZero() && !schema.DatePublished.IsZero() {
+		result.PublishedAt = schema.DatePublished
+	}
+
 	// --- Extract images (before removing elements) ---
 	result.Images = extractImages(doc, base)
 
 	// Extract visible text content.
-	// Remove script, style, noscript, nav, footer, header elements first.
-	doc.Find("script, style, noscript, nav, footer, header, iframe, svg").Remove()
+	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
+	doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
 
 	// Get the text from the main content area.
 	// Try <main>, <article>, then fall back to <body>.
@@ -545,8 +567,8 @@ func extractPublishedAt(doc *goquery.Document) time.Time {
 	}
 
 	// Strategy 3: JSON-LD (schema.org) datePublished.
-	if t := extractJSONLDDates(doc); !t.IsZero() {
-		return t
+	if schema := extractJSONLD(doc); !schema.DatePublished.IsZero() {
+		return schema.DatePublished
 	}
 
 	return time.Time{}
@@ -574,32 +596,176 @@ func extractTimeElement(doc *goquery.Document) time.Time {
 	return best
 }
 
-func extractJSONLDDates(doc *goquery.Document) time.Time {
-	var best time.Time
+// SchemaData holds extracted schema.org JSON-LD fields.
+type SchemaData struct {
+	Type           string
+	Title          string
+	Description    string
+	Image          string
+	Author         string
+	Keywords       string
+	Rating         float64
+	DatePublished  time.Time
+}
+
+// extractJSONLD parses all application/ld+json script blocks and extracts
+// relevant schema.org fields. It handles both single objects and @graph arrays.
+func extractJSONLD(doc *goquery.Document) SchemaData {
+	var best SchemaData
 	doc.Find(`script[type="application/ld+json"]`).Each(func(_ int, s *goquery.Selection) {
-		text := s.Text()
-		text = strings.TrimSpace(text)
+		text := strings.TrimSpace(s.Text())
 		if text == "" {
 			return
 		}
 
-		// Extract datePublished or dateCreated using simple regex.
-		for _, pattern := range []string{
-			`"datePublished"\s*:\s*"([^"]+)"`,
-			`"dateCreated"\s*:\s*"([^"]+)"`,
-		} {
-			re := regexp.MustCompile(pattern)
-			matches := re.FindStringSubmatch(text)
-			if len(matches) > 1 {
-				if t := parseDateString(matches[1]); !t.IsZero() {
-					if best.IsZero() || t.Before(best) {
-						best = t
+		var raw interface{}
+		if err := json.Unmarshal([]byte(text), &raw); err != nil {
+			return
+		}
+
+		// JSON-LD can be a single object or an array of objects.
+		var objects []map[string]interface{}
+		switch v := raw.(type) {
+		case map[string]interface{}:
+			// Single object, possibly with @graph.
+			if graph, ok := v["@graph"].([]interface{}); ok {
+				for _, item := range graph {
+					if m, ok := item.(map[string]interface{}); ok {
+						objects = append(objects, m)
+					}
+				}
+			} else {
+				objects = append(objects, v)
+			}
+		case []interface{}:
+			for _, item := range v {
+				if m, ok := item.(map[string]interface{}); ok {
+					objects = append(objects, m)
+				}
+			}
+		}
+
+		for _, obj := range objects {
+			schemaType := stringFromJSONLD(obj["@type"])
+			// Skip types that are not useful for search (e.g. BreadcrumbList, WebSite).
+			if schemaType == "BreadcrumbList" || schemaType == "WebSite" || schemaType == "Organization" {
+				continue
+			}
+
+			if best.Type == "" {
+				best.Type = schemaType
+			}
+			if best.Title == "" {
+				best.Title = stringFromJSONLD(obj["headline"])
+				if best.Title == "" {
+					best.Title = stringFromJSONLD(obj["name"])
+				}
+			}
+			if best.Description == "" {
+				best.Description = stringFromJSONLD(obj["description"])
+			}
+			if best.Image == "" {
+				best.Image = extractImageURL(obj["image"])
+				if best.Image == "" {
+					best.Image = extractImageURL(obj["thumbnailUrl"])
+				}
+			}
+			if best.Author == "" {
+				if author, ok := obj["author"].(map[string]interface{}); ok {
+					best.Author = stringFromJSONLD(author["name"])
+				} else if a, ok := obj["author"].(string); ok {
+					best.Author = a
+				}
+			}
+			if best.Keywords == "" {
+				best.Keywords = stringFromJSONLD(obj["keywords"])
+				if best.Keywords == "" {
+					if sec, ok := obj["articleSection"].(string); ok {
+						best.Keywords = sec
+					}
+				}
+			}
+			if best.Rating == 0 {
+				if ar, ok := obj["aggregateRating"].(map[string]interface{}); ok {
+					if rv, ok := ar["ratingValue"].(float64); ok {
+						best.Rating = rv
+					} else if rvStr, ok := ar["ratingValue"].(string); ok {
+						if rv, err := strconv.ParseFloat(rvStr, 64); err == nil {
+							best.Rating = rv
+						}
+					}
+				}
+			}
+			if best.DatePublished.IsZero() {
+				if dp, ok := obj["datePublished"].(string); ok && dp != "" {
+					best.DatePublished = parseDateString(dp)
+				}
+				if best.DatePublished.IsZero() {
+					if dc, ok := obj["dateCreated"].(string); ok && dc != "" {
+						best.DatePublished = parseDateString(dc)
 					}
 				}
 			}
 		}
 	})
 	return best
+}
+
+// extractImageURL extracts an image URL from a JSON-LD field that may be
+// a string, an ImageObject with a "url" property, or an array of either.
+func extractImageURL(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	if m, ok := v.(map[string]interface{}); ok {
+		if s, ok := m["url"].(string); ok {
+			return strings.TrimSpace(s)
+		}
+		if s, ok := m["contentUrl"].(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+		for _, item := range arr {
+			if s, ok := item.(string); ok && s != "" {
+				return strings.TrimSpace(s)
+			}
+			if m, ok := item.(map[string]interface{}); ok {
+				if s, ok := m["url"].(string); ok && s != "" {
+					return strings.TrimSpace(s)
+				}
+				if s, ok := m["contentUrl"].(string); ok && s != "" {
+					return strings.TrimSpace(s)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// stringFromJSONLD extracts a string value from a JSON-LD field that may be
+// a string, an object with @value, or an array of strings.
+func stringFromJSONLD(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	if m, ok := v.(map[string]interface{}); ok {
+		if s, ok := m["@value"].(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
+		if s, ok := arr[0].(string); ok {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // dateFormats lists common date formats found in HTML meta tags and JSON-LD,

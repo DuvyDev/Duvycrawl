@@ -73,6 +73,9 @@ type CrawlerConfig struct {
 	// fresher stats. Longer intervals = fewer writes but possible data loss on
 	// crash. Default: 30s.
 	DomainStatsFlushInterval time.Duration `yaml:"domain_stats_flush_interval"`
+	// AutoStart controls whether the crawler starts automatically on launch.
+	// When false, you must start it via the API: POST /api/v1/crawler/start
+	AutoStart bool `yaml:"auto_start"`
 }
 
 // SeedConfig represents a seed domain defined in the configuration file.
@@ -133,6 +136,7 @@ func DefaultConfig() *Config {
 			FallbackUserAgent:          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
 			MaxFallbackRetries:         1,
 			DomainStatsFlushInterval:   30 * time.Second,
+			AutoStart:                  true,
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",

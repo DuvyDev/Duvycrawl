@@ -1,95 +1,90 @@
 # Getting Started
 
-Guía rápida para poner Duvycrawl en funcionamiento.
+Quick guide to get Duvycrawl running.
 
 ---
 
-## Requisitos
+## Requirements
 
-- **Go 1.22+** (desarrollado con Go 1.26)
-- No requiere bases de datos externas ni servicios adicionales
+- **Go 1.23+**
+- No external databases or services required
 
-## Instalación
+## Installation
 
 ```bash
-# Clonar el repositorio
+# Clone the repository
 git clone https://github.com/DuvyDev/Duvycrawl.git
 cd Duvycrawl
 
-# Descargar dependencias
+# Download dependencies
 go mod tidy
 
-# Compilar el binario
-make build
-# El binario se genera en bin/duvycrawl.exe
+# Build the binary
+go build -o duvycrawl .
 ```
 
-## Primer Inicio
+## Docker (Recommended)
 
 ```bash
-# Opción 1: Ejecutar directamente (modo desarrollo)
-make run
-
-# Opción 2: Ejecutar el binario compilado
-./bin/duvycrawl.exe -config configs/default.yaml
+docker compose up -d
 ```
 
-Al iniciar por primera vez, Duvycrawl:
+The API will be available at `http://localhost:8080`.
 
-1. **Crea la base de datos** SQLite en `./data/duvycrawl.db`
-2. **Registra 18 dominios seed** (Reddit, GitHub, Wikipedia, etc.)
-3. **Encola las URLs iniciales** de cada seed (25 URLs en total)
-4. **Inicia el crawler** automáticamente (configurable con `-auto-start=false`)
-5. **Levanta el API** en `http://localhost:8080`
+## First Start
 
-## Verificar que Funciona
+```bash
+# Run with defaults
+./duvycrawl
+
+# Run with custom config
+./duvycrawl -config configs/custom.yaml
+
+# Don't auto-start the crawler (API only)
+./duvycrawl -no-start
+```
+
+On first start, Duvycrawl:
+
+1. **Creates the SQLite database** at `./data/duvycrawl.db`
+2. **Registers 18 seed domains** (Reddit, GitHub, Wikipedia, etc.)
+3. **Enqueues initial URLs** from each seed
+4. **Starts the crawler** automatically if `auto_start: true` in config
+5. **Starts the API** at `http://localhost:8080`
+
+## Verify It Works
 
 ```bash
 # Health check
 curl http://localhost:8080/api/v1/health
 
-# Ver estadísticas
+# Check stats
 curl http://localhost:8080/api/v1/stats
 
-# Ver el estado del crawler
+# Check crawler status
 curl http://localhost:8080/api/v1/crawler/status
+
+# Search
+curl "http://localhost:8080/api/v1/search?q=golang&limit=10"
 ```
 
-> **Nota para Windows (PowerShell):** Usá `Invoke-RestMethod` en lugar de `curl`:
-> ```powershell
-> Invoke-RestMethod -Uri "http://localhost:8080/api/v1/health"
-> ```
+## CLI Flags
 
-## Flags de Línea de Comandos
-
-| Flag | Default | Descripción |
+| Flag | Default | Description |
 |------|---------|-------------|
-| `-config` | `configs/default.yaml` | Ruta al archivo de configuración YAML |
-| `-auto-start` | `true` | Iniciar el crawling automáticamente al arrancar |
+| `-config` | `configs/default.yaml` | Path to YAML config file |
+| `-no-start` | `false` | Override `auto_start` in config; do not start crawler |
 
-### Ejemplos
+## Stop Duvycrawl
 
-```bash
-# Iniciar sin crawlear automáticamente (solo API)
-./bin/duvycrawl.exe -auto-start=false
+Press **Ctrl+C** in the terminal. Shutdown is graceful:
 
-# Usar un archivo de configuración personalizado
-./bin/duvycrawl.exe -config ./mi-config.yaml
+1. Workers finish the current page
+2. Database connection is closed
+3. HTTP server stops
 
-# Combinados
-./bin/duvycrawl.exe -config ./mi-config.yaml -auto-start=false
-```
-
-## Detener Duvycrawl
-
-Presioná **Ctrl+C** en la terminal. El shutdown es graceful:
-
-1. Los workers terminan la página que están procesando
-2. Se cierra la conexión a la base de datos
-3. Se detiene el servidor HTTP
-
-No se pierden datos durante el shutdown.
+No data is lost during shutdown.
 
 ---
 
-Siguiente: [Configuración](./configuration.md) · [API Reference](./api-reference.md)
+Next: [Configuration](./configuration.md) · [API Reference](./api-reference.md)

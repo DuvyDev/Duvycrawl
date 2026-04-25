@@ -1,104 +1,148 @@
-# Duvycrawl 🕷️
+# Duvycrawl
 
-A fast, efficient web crawler written in Go, designed for powering a personal search engine.
+[![Go Report Card](https://goreportcard.com/badge/github.com/DuvyDev/Duvycrawl)](https://goreportcard.com/report/github.com/DuvyDev/Duvycrawl)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+Duvycrawl is a high-performance, personal web crawler and search engine written in Go. It crawls websites, indexes content using SQLite FTS5, extracts schema.org structured data, and exposes a REST API for full-text search and crawler control.
 
 ## Features
 
-- **Concurrent crawling** with configurable worker pool
-- **Full-text search** powered by SQLite FTS5
-- **REST API** for frontend integration and remote control
-- **Priority-based URL frontier** with domain fairness
-- **robots.txt** compliance
-- **Per-domain rate limiting** for polite crawling
-- **Automatic re-crawling** with configurable freshness policies
-- **Seed domains** list for bootstrapping with priority sites
-- **Graceful shutdown** — never loses data mid-crawl
-- **Zero external infrastructure** — everything runs in a single binary with SQLite
+- **Fast crawling**: Concurrent workers with per-domain rate limiting, Bloom-filter deduplication, and connection pooling.
+- **Full-text search**: SQLite FTS5 with hybrid ranking (SQL pre-filter + Go re-ranking), domain diversity, and schema.org boosts.
+- **Structured data extraction**: Automatic parsing of JSON-LD (schema.org) for rich results — images, authors, ratings, article types, and keywords.
+- **Search API**: Filter by domain (`?domain=`), schema type (`?type=Recipe`), language (`?lang=es`), and paginate results.
+- **Image search**: Indexed image metadata with alt-text search.
+- **Optional Cloudflare Warp**: Route crawler traffic through a SOCKS5 proxy for privacy.
+- **Docker-ready**: Multi-stage Dockerfile with health checks and non-root user.
+- **Production security**: Rate limiting, security headers (CSP, HSTS, etc.), and request tracing.
 
 ## Quick Start
 
-### Prerequisites
-
-- Go 1.22+ (developed with Go 1.26)
-
-### Build & Run
+### Docker (recommended)
 
 ```bash
-# Clone the repository
 git clone https://github.com/DuvyDev/Duvycrawl.git
 cd Duvycrawl
-
-# Build
-make build
-
-# Run (uses configs/default.yaml by default)
-make run
+docker compose up -d
 ```
 
-### Configuration
+The API will be available at `http://localhost:8080`.
 
-Edit `configs/default.yaml` to customize:
+### Binary
+
+```bash
+# Build
+go build -o duvycrawl .
+
+# Run with defaults
+./duvycrawl
+
+# Run with custom config
+./duvycrawl -config configs/custom.yaml
+```
+
+## Configuration
+
+Copy `configs/default.yaml` and adjust to your needs:
 
 ```yaml
 crawler:
-  workers: 10              # Concurrent workers
-  max_depth: 3             # Link depth from seeds
-  politeness_delay: 1s     # Delay between same-domain requests
-  respect_robots: true     # Honor robots.txt
+  workers: 400
+  max_depth: 1
+  seed_domains_only: true
+  auto_start: true
+  proxy_url: ""               # "socks5h://warp:1080" for Cloudflare Warp
 
 storage:
   db_path: "./data/duvycrawl.db"
 
 api:
+  host: "0.0.0.0"
   port: 8080
 ```
+
+### Optional: Cloudflare Warp
+
+Uncomment the `warp` service in `docker-compose.yml` and set:
+
+```yaml
+crawler:
+  proxy_url: "socks5h://warp:1080"
+```
+
+All crawler traffic will be routed through Warp while the API remains directly accessible.
 
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/health` | Health check |
-| `GET` | `/api/v1/search?q=...&page=1&limit=10` | Full-text search |
-| `GET` | `/api/v1/pages/{id}` | Get page details |
-| `GET` | `/api/v1/stats` | Crawler statistics |
-| `POST` | `/api/v1/crawl` | Queue URL(s) for crawling |
+| `GET` | `/api/v1/search` | Full-text search |
+| `GET` | `/api/v1/images/search` | Image search |
+| `POST` | `/api/v1/crawl` | Enqueue URLs for crawling |
 | `GET` | `/api/v1/queue` | Queue status |
-| `GET` | `/api/v1/seeds` | List seed domains |
-| `POST` | `/api/v1/seeds` | Add seed domain |
-| `DELETE` | `/api/v1/seeds/{domain}` | Remove seed domain |
-| `POST` | `/api/v1/crawler/start` | Start the crawler |
-| `POST` | `/api/v1/crawler/stop` | Stop the crawler |
-| `GET` | `/api/v1/crawler/status` | Crawler status |
+| `POST` | `/api/v1/crawler/start` | Start crawler |
+| `POST` | `/api/v1/crawler/stop` | Stop crawler |
 
-### Example: Search
+### Search Examples
 
 ```bash
-curl "http://localhost:8080/api/v1/search?q=golang+tutorial&limit=10"
+# Basic search
+curl "http://localhost:8080/api/v1/search?q=golang&limit=10"
+
+# Filter by domain
+curl "http://localhost:8080/api/v1/search?q=recetas&domain=directoalpaladar.com"
+
+# Filter by schema type (Recipe, NewsArticle, Product, etc.)
+curl "http://localhost:8080/api/v1/search?q=pollo&type=Recipe"
+
+# Spanish content with pagination
+curl "http://localhost:8080/api/v1/search?q=github&limit=10&page=1&lang=es"
 ```
 
-### Example: Queue a URL
+### Crawl URLs
 
 ```bash
+# Crawl a single URL (skips if indexed within 24h)
 curl -X POST http://localhost:8080/api/v1/crawl \
   -H "Content-Type: application/json" \
-  -d '{"urls": ["https://example.com"]}'
+  -d '{"urls": ["https://github.com"]}'
+
+# Force re-crawl
+curl -X POST http://localhost:8080/api/v1/crawl \
+  -H "Content-Type: application/json" \
+  -d '{"urls": ["https://github.com"], "force": true}'
 ```
 
 ## Architecture
 
 ```
-cmd/duvycrawl/         → Entry point
-internal/
-  ├── config/          → YAML configuration
-  ├── crawler/         → Engine, fetcher, parser, robots.txt
-  ├── frontier/        → Priority URL queue
-  ├── ratelimit/       → Per-domain rate limiting
-  ├── storage/         → SQLite + FTS5 persistence
-  ├── scheduler/       → Re-crawl scheduling
-  ├── api/             → REST API server
-  └── seeds/           → Default seed domains
+Duvycrawl/
+├── cmd/duvycrawl/          # Entry point
+├── internal/
+│   ├── api/                # REST API (handlers, middleware)
+│   ├── config/             # YAML configuration
+│   ├── crawler/            # Fetcher, Parser, Engine
+│   ├── frontier/           # URL queue + Bloom filter dedup
+│   ├── ratelimit/          # Per-domain rate limiting
+│   ├── scheduler/          # Re-crawl scheduling
+│   ├── storage/            # SQLite + FTS5
+│   └── seeds/              # Default seed domains
+├── configs/
+│   └── default.yaml        # Default configuration
+├── data/                   # SQLite DB + Bloom filter
+├── docs/                   # Documentation
+├── Dockerfile
+└── docker-compose.yml
 ```
+
+## Tech Stack
+
+- **Go 1.23** — core language
+- **SQLite (modernc.org/sqlite)** — pure-Go, CGO-free, with FTS5 full-text search
+- **goquery** — HTML parsing
+- **Bloom filter** — fast URL deduplication (bits-and-blooms/bitset)
 
 ## License
 
-MIT
+Apache 2.0 — see [LICENSE](LICENSE).

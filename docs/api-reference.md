@@ -1,35 +1,36 @@
 # API Reference
 
-Duvycrawl expone una API REST en `http://localhost:8080` (configurable).
-Todos los endpoints devuelven JSON con `Content-Type: application/json`.
+Duvycrawl exposes a REST API at `http://localhost:8080` (configurable).
+All endpoints return JSON with `Content-Type: application/json`.
 
 ---
 
-## Tabla de Endpoints
+## Endpoint Table
 
-| Método | Path | Descripción |
+| Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/health` | Health check |
-| `GET` | `/api/v1/search` | Búsqueda full-text |
-| `GET` | `/api/v1/pages/{id}` | Detalle de una página |
-| `GET` | `/api/v1/stats` | Estadísticas generales |
-| `POST` | `/api/v1/crawl` | Encolar URLs para crawlear |
-| `GET` | `/api/v1/pages/lookup` | Buscar página por URL exacta |
-| `GET` | `/api/v1/queue` | Estado de la cola |
-| `GET` | `/api/v1/seeds` | Listar dominios seed |
-| `POST` | `/api/v1/seeds` | Agregar dominio seed |
-| `DELETE` | `/api/v1/seeds/{domain}` | Eliminar dominio seed |
-| `POST` | `/api/v1/crawler/start` | Iniciar el crawler |
-| `POST` | `/api/v1/crawler/stop` | Detener el crawler |
-| `GET` | `/api/v1/crawler/status` | Estado del crawler |
+| `GET` | `/api/v1/search` | Full-text search |
+| `GET` | `/api/v1/images/search` | Image search |
+| `GET` | `/api/v1/pages/{id}` | Page detail by ID |
+| `GET` | `/api/v1/pages/lookup` | Lookup page by exact URL |
+| `GET` | `/api/v1/stats` | General statistics |
+| `POST` | `/api/v1/crawl` | Enqueue URLs for crawling |
+| `GET` | `/api/v1/queue` | Queue status |
+| `GET` | `/api/v1/seeds` | List seed domains |
+| `POST` | `/api/v1/seeds` | Add seed domain |
+| `DELETE` | `/api/v1/seeds/{domain}` | Remove seed domain |
+| `POST` | `/api/v1/crawler/start` | Start crawler |
+| `POST` | `/api/v1/crawler/stop` | Stop crawler |
+| `GET` | `/api/v1/crawler/status` | Crawler status |
 
 ---
 
-## Endpoints en Detalle
+## Endpoints in Detail
 
 ### `GET /api/v1/health`
 
-Health check simple. Útil para monitoreo.
+Simple health check. Useful for monitoring.
 
 **Response** `200 OK`
 ```json
@@ -44,15 +45,18 @@ Health check simple. Útil para monitoreo.
 
 ### `GET /api/v1/search`
 
-Búsqueda full-text sobre las páginas indexadas usando SQLite FTS5.
+Full-text search over indexed pages using SQLite FTS5.
 
 **Query Parameters**
 
-| Param | Tipo | Default | Descripción |
+| Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `q` | string | *requerido* | Texto a buscar |
-| `page` | int | `1` | Número de página |
-| `limit` | int | `10` | Resultados por página (máx: 100) |
+| `q` | string | *required* | Search text |
+| `page` | int | `1` | Page number |
+| `limit` | int | `10` | Results per page (max: 100) |
+| `lang` | string | `""` | Boost results in this language (e.g. `es`, `en`) |
+| `domain` | string | `""` | Filter by domain (e.g. `github.com`) |
+| `type` | string | `""` | Filter by schema.org type (e.g. `Recipe`, `NewsArticle`) |
 
 **Response** `200 OK`
 ```json
@@ -61,6 +65,8 @@ Búsqueda full-text sobre las páginas indexadas usando SQLite FTS5.
   "total": 42,
   "page": 1,
   "limit": 10,
+  "domain": "",
+  "type": "",
   "results": [
     {
       "id": 1234,
@@ -69,146 +75,45 @@ Búsqueda full-text sobre las páginas indexadas usando SQLite FTS5.
       "description": "A tutorial for the Go programming language.",
       "snippet": "...learn <mark>Golang</mark> with this comprehensive <mark>tutorial</mark>...",
       "domain": "go.dev",
+      "language": "en",
       "crawled_at": "2026-04-21T20:00:00Z",
-      "rank": -4.02
+      "updated_at": "2026-04-21T20:00:00Z",
+      "published_at": "2026-04-20T10:00:00Z",
+      "rank": 1450.5,
+      "schema_type": "TechArticle",
+      "schema_image": "https://go.dev/images/gophers.png",
+      "schema_author": "Go Team",
+      "schema_keywords": "go, golang, tutorial",
+      "schema_rating": 0
     }
   ]
 }
 ```
 
-**Notas sobre la búsqueda:**
-- Los `snippet` contienen tags `<mark>` alrededor de las palabras encontradas
-- El `rank` es el score de relevancia de FTS5 (más negativo = más relevante)
-- Se busca en título, descripción y contenido de la página
-- Soporta operadores FTS5: `"frase exacta"`, `word1 AND word2`, `word1 OR word2`, `word1 NOT word2`
-
-**Error** `400 Bad Request` — Si falta el parámetro `q`
-```json
-{
-  "error": "missing required query parameter 'q'"
-}
-```
+**Search notes:**
+- `snippet` contains `<mark>` tags around matched words
+- `rank` is the composite relevance score (higher = better)
+- Supports FTS5 operators: `"exact phrase"`, `word1 AND word2`, `word1 OR word2`
 
 ---
 
-### `GET /api/v1/pages/lookup`
+### `GET /api/v1/images/search`
 
-Busca una página por su URL exacta. Útil para verificar si una URL ya fue crawleada.
+Search indexed images by alt text, title, and context.
 
 **Query Parameters**
 
-| Param | Tipo | Descripción |
-|-------|------|-------------|
-| `url` | string | URL exacta a buscar (requerido) |
-
-**Response** `200 OK`
-```json
-{
-  "data": {
-    "id": 43,
-    "url": "https://learn.microsoft.com/en-us/dotnet/csharp/",
-    "domain": "learn.microsoft.com",
-    "title": "C# Guide - .NET managed language",
-    "description": "The C# guide has everything you need...",
-    "content": "Get started Tour of C# Concept Fundamentals...",
-    "status_code": 200,
-    "content_hash": "a1b2c3d4...",
-    "crawled_at": "2026-04-21T23:36:14Z",
-    "created_at": "2026-04-21T23:36:14Z",
-    "updated_at": "2026-04-21T23:36:14Z"
-  }
-}
-```
-
-**Error** `404 Not Found` — Si la URL no existe en la base de datos.
-```json
-{
-  "error": "page not found"
-}
-```
-
-**Error** `400 Bad Request` — Si falta el parámetro `url`.
-```json
-{
-  "error": "missing required query parameter 'url'"
-}
-```
-
----
-
-### `GET /api/v1/pages/{id}`
-
-Retorna el detalle completo de una página por su ID.
-
-**Path Parameters**
-
-| Param | Tipo | Descripción |
-|-------|------|-------------|
-| `id` | int | ID numérico de la página |
-
-**Response** `200 OK`
-```json
-{
-  "data": {
-    "id": 43,
-    "url": "https://learn.microsoft.com/en-us/dotnet/csharp/",
-    "domain": "learn.microsoft.com",
-    "title": "C# Guide - .NET managed language",
-    "description": "The C# guide has everything you need...",
-    "content": "Get started Tour of C# Concept Fundamentals...",
-    "status_code": 200,
-    "content_hash": "a1b2c3d4...",
-    "crawled_at": "2026-04-21T23:36:14Z",
-    "created_at": "2026-04-21T23:36:14Z",
-    "updated_at": "2026-04-21T23:36:14Z"
-  }
-}
-```
-
-**Error** `404 Not Found`
-```json
-{
-  "error": "page not found"
-}
-```
-
----
-
-### `GET /api/v1/stats`
-
-Estadísticas generales del crawler.
-
-**Response** `200 OK`
-```json
-{
-  "data": {
-    "stats": {
-      "total_pages": 125,
-      "total_domains": 23,
-      "seed_domains": 18,
-      "queue": {
-        "pending": 3691,
-        "in_progress": 10,
-        "done": 0,
-        "failed": 2,
-        "total": 3703
-      },
-      "database_size_mb": 3.37
-    },
-    "engine_status": "running",
-    "session": {
-      "pages_crawled": 127,
-      "pages_errored": 0
-    }
-  }
-}
-```
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `q` | string | *required* | Search text |
+| `page` | int | `1` | Page number |
+| `limit` | int | `10` | Results per page |
 
 ---
 
 ### `POST /api/v1/crawl`
 
-Encola una o más URLs para ser crawleadas.
+Enqueue one or more URLs for crawling. By default, URLs crawled within the last 24 hours are skipped.
 
 **Request Body**
 ```json
@@ -217,20 +122,31 @@ Encola una o más URLs para ser crawleadas.
     "https://example.com",
     "https://another-site.org/page"
   ],
-  "priority": 50
+  "priority": 50,
+  "force": false
 }
 ```
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `urls` | string[] | *requerido* | Lista de URLs a crawlear (máx: 1000) |
-| `priority` | int | `10` | Prioridad en la cola (mayor = se procesa antes) |
+| `urls` | string[] | *required* | URLs to crawl (max: 1000) |
+| `priority` | int | `10` | Queue priority (higher = processed sooner) |
+| `force` | bool | `false` | Re-crawl even if recently indexed |
 
 **Response** `202 Accepted`
 ```json
 {
-  "message": "URLs enqueued for crawling",
-  "count": 2
+  "queued": 2,
+  "skipped": 0
+}
+```
+
+If some URLs were skipped:
+```json
+{
+  "queued": 1,
+  "skipped": 1,
+  "reason": "already_indexed"
 }
 ```
 
@@ -238,7 +154,7 @@ Encola una o más URLs para ser crawleadas.
 
 ### `GET /api/v1/queue`
 
-Estado actual de la cola de crawling.
+Current crawl queue status.
 
 **Response** `200 OK`
 ```json
@@ -255,67 +171,9 @@ Estado actual de la cola de crawling.
 
 ---
 
-### `GET /api/v1/seeds`
-
-Lista todos los dominios seed registrados.
-
-**Response** `200 OK`
-```json
-{
-  "data": [
-    {
-      "id": 1,
-      "domain": "reddit.com",
-      "is_seed": true,
-      "pages_count": 5,
-      "avg_response_ms": 230,
-      "created_at": "2026-04-21T23:34:35Z"
-    }
-  ]
-}
-```
-
----
-
-### `POST /api/v1/seeds`
-
-Agrega un nuevo dominio seed. Automáticamente encola la página principal del dominio.
-
-**Request Body**
-```json
-{
-  "domain": "news.ycombinator.com",
-  "priority": 90
-}
-```
-
-**Response** `201 Created`
-```json
-{
-  "message": "seed domain added",
-  "domain": "news.ycombinator.com"
-}
-```
-
----
-
-### `DELETE /api/v1/seeds/{domain}`
-
-Elimina un dominio de la lista de seeds. Las páginas ya crawleadas se mantienen.
-
-**Response** `200 OK`
-```json
-{
-  "message": "seed domain removed",
-  "domain": "news.ycombinator.com"
-}
-```
-
----
-
 ### `POST /api/v1/crawler/start`
 
-Inicia el motor de crawling.
+Start the crawler engine.
 
 **Response** `200 OK`
 ```json
@@ -324,7 +182,7 @@ Inicia el motor de crawling.
 }
 ```
 
-**Error** `409 Conflict` — Si ya está corriendo
+**Error** `409 Conflict` — If already running
 ```json
 {
   "error": "crawler is already running"
@@ -335,7 +193,7 @@ Inicia el motor de crawling.
 
 ### `POST /api/v1/crawler/stop`
 
-Detiene el crawler de forma graceful (los workers terminan la página actual).
+Gracefully stop the crawler.
 
 **Response** `200 OK`
 ```json
@@ -348,7 +206,7 @@ Detiene el crawler de forma graceful (los workers terminan la página actual).
 
 ### `GET /api/v1/crawler/status`
 
-Estado actual del motor de crawling.
+Current crawler engine status.
 
 **Response** `200 OK`
 ```json
@@ -359,26 +217,42 @@ Estado actual del motor de crawling.
 }
 ```
 
-Valores posibles de `status`: `idle`, `running`, `stopping`.
+Possible `status` values: `idle`, `running`, `stopping`.
 
 ---
 
 ## Headers
 
+### Security
+
+Production-grade security headers are included on every response:
+
+```
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+X-XSS-Protection: 1; mode=block
+Referrer-Policy: strict-origin-when-cross-origin
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+Content-Security-Policy: default-src 'self'; ...
+```
+
 ### CORS
 
-Todos los endpoints incluyen headers CORS permisivos para desarrollo:
+CORS headers are included for frontend access:
 ```
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS
 Access-Control-Allow-Headers: Content-Type, Authorization, X-Request-ID
 ```
 
+### Rate Limiting
+
+API requests are limited to **120 requests per minute per IP**. Exceeded requests receive `429 Too Many Requests` with a `Retry-After: 60` header.
+
 ### Request ID
 
-Cada response incluye un `X-Request-ID` header para trazabilidad.
-Podés enviar tu propio `X-Request-ID` en la request para correlacionar logs.
+Every response includes an `X-Request-ID` header for traceability. You can send your own `X-Request-ID` to correlate logs.
 
 ---
 
-Siguiente: [Ejemplos de Uso](./examples.md) · [Arquitectura](./architecture.md)
+Next: [Examples](./examples.md) · [Architecture](./architecture.md)

@@ -1,6 +1,0 @@
-# Desarrollo
-make run
-
-# Producción
-make build
-./bin/duvycrawl.exe -config configs/default.yaml

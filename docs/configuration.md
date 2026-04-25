@@ -1,26 +1,31 @@
-# Configuración
+# Configuration
 
-Duvycrawl se configura a través de un archivo YAML. Por defecto usa `configs/default.yaml`.
+Duvycrawl is configured via a YAML file. By default it uses `configs/default.yaml`.
 
 ---
 
-## Archivo Completo con Defaults
+## Full Config with Defaults
 
 ```yaml
 crawler:
-  workers: 10
+  workers: 400
   max_depth: 3
-  request_timeout: 15s
+  request_timeout: 10s
   politeness_delay: 1s
   random_delay: 500ms
-  parallelism_per_domain: 2
   max_retries: 3
-  user_agent: "Duvycrawl/1.0 (+https://github.com/DuvyDev/Duvycrawl)"
-  max_page_size_kb: 5120
-  respect_robots: true
+  user_agent: "Mozilla/5.0 ..."
+  fallback_user_agent: "Mozilla/5.0 ...bingbot..."
+  max_fallback_retries: 1
+  max_page_size_kb: 512
+  respect_robots: false
+  seed_domains_only: false
+  parallelism_per_domain: 4
   disable_cookies: false
-  max_idle_conns_per_host: 100
+  max_idle_conns_per_host: 150
   proxy_url: ""
+  domain_stats_flush_interval: 30s
+  auto_start: true
 
 storage:
   db_path: "./data/duvycrawl.db"
@@ -36,99 +41,69 @@ logging:
 
 ---
 
-## Secciones
+## Sections
 
-### `crawler` — Motor de Crawling
+### `crawler` — Crawling Engine
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `workers` | int | `10` | Número de goroutines concurrentes que crawlean páginas. Más workers = más velocidad, pero más carga en tu red y los servidores destino. Rango: 1–100. |
-| `max_depth` | int | `3` | Profundidad máxima de links a seguir desde las páginas seed. `0` = solo las páginas seed, `1` = seeds + links directos, etc. |
-| `request_timeout` | duration | `15s` | Timeout máximo para una request HTTP individual. Incluye conexión, TLS y descarga del body. |
-| `politeness_delay` | duration | `1s` | Delay mínimo entre requests al **mismo dominio**. Evita saturar servidores. Mínimo permitido: `100ms`. |
-| `random_delay` | duration | `500ms` | Jitter aleatorio añadido al delay entre requests. Hace el crawling menos predecible. |
-| `parallelism_per_domain` | int | `2` | Número de requests concurrentes permitidas al mismo dominio. Valores altos = más rápido pero más agresivo. |
-| `max_retries` | int | `3` | Intentos máximos para una URL que falla. Después del último intento, la URL se marca como failed. |
-| `user_agent` | string | (ver arriba) | User-Agent enviado en cada request. Algunos sitios bloquean crawlers sin User-Agent válido. |
-| `max_page_size_kb` | int | `5120` | Tamaño máximo de página a descargar (en KB). Páginas más grandes se ignoran. Default: 5 MB. |
-| `respect_robots` | bool | `true` | Si es `true`, respeta las directivas de `robots.txt`. **Recomendado dejarlo en `true`**. |
-| `disable_cookies` | bool | `false` | Si es `true`, desactiva el cookie jar. Útil para sitios que no requieren sesión. |
-| `max_idle_conns_per_host` | int | `100` | Conexiones idle máximas por host. Aumentar mejora reutilización de conexiones HTTP keep-alive. |
-| `proxy_url` | string | `""` | URL de proxy HTTP/SOCKS5. Formato: `http://proxy:8080` o `socks5://proxy:1080`. Vacío = sin proxy. |
+| `workers` | int | `400` | Concurrent crawl goroutines. Range: 1–10000. |
+| `max_depth` | int | `3` | Max link depth from seed pages. `0` = seeds only. |
+| `request_timeout` | duration | `10s` | HTTP request timeout. |
+| `politeness_delay` | duration | `1s` | Min delay between requests to the same domain. |
+| `random_delay` | duration | `500ms` | Random jitter added to politeness delay. |
+| `max_retries` | int | `3` | Max retry attempts for failed requests. |
+| `user_agent` | string | (see above) | Primary User-Agent. |
+| `fallback_user_agent` | string | (see above) | Fallback UA for bot-blocked sites. |
+| `max_fallback_retries` | int | `1` | Max fallback attempts per URL. |
+| `max_page_size_kb` | int | `512` | Max page size in KB. Larger pages are truncated, not discarded. |
+| `respect_robots` | bool | `false` | Whether to honor robots.txt. |
+| `seed_domains_only` | bool | `false` | If `true`, only crawl within seed domains. |
+| `parallelism_per_domain` | int | `4` | Max concurrent requests to the same domain. |
+| `disable_cookies` | bool | `false` | Disable cookie jar. |
+| `max_idle_conns_per_host` | int | `150` | Max idle keep-alive connections per host. |
+| `proxy_url` | string | `""` | Proxy URL. Supports `http://`, `https://`, `socks5://`, `socks5h://`. |
+| `domain_stats_flush_interval` | duration | `30s` | How often domain stats are flushed from memory to SQLite. |
+| `auto_start` | bool | `true` | Automatically start crawling on launch. Set to `false` to start via API. |
 
-### `storage` — Persistencia
+### `storage` — Persistence
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `db_path` | string | `./data/duvycrawl.db` | Ruta al archivo SQLite. El directorio se crea automáticamente si no existe. |
+| `db_path` | string | `./data/duvycrawl.db` | SQLite database path. |
 
-### `api` — Servidor REST
+### `api` — REST Server
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `host` | string | `0.0.0.0` | Dirección IP donde escucha el server. `0.0.0.0` acepta conexiones de cualquier interfaz; `127.0.0.1` solo localhost. |
-| `port` | int | `8080` | Puerto TCP del API. Rango: 1–65535. |
+| `host` | string | `0.0.0.0` | Bind address. `127.0.0.1` for localhost only. |
+| `port` | int | `8080` | TCP port. |
 
-### `logging` — Logs
+### `logging` — Logging
 
-| Campo | Tipo | Default | Descripción |
+| Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `level` | string | `info` | Nivel mínimo de log. Opciones: `debug`, `info`, `warn`, `error`. |
-| `format` | string | `text` | Formato de salida. `text` = legible para humanos, `json` = para herramientas de log (ELK, etc). |
+| `level` | string | `info` | Min log level: `debug`, `info`, `warn`, `error`. |
+| `format` | string | `text` | Output format: `text` or `json`. |
 
 ---
 
-## Ejemplos de Configuración
+## Cloudflare Warp (SOCKS5)
 
-### Crawling Agresivo (red local / testing)
-
-```yaml
-crawler:
-  workers: 50
-  max_depth: 5
-  request_timeout: 30s
-  politeness_delay: 200ms
-  max_retries: 5
-
-logging:
-  level: "debug"
-```
-
-### Crawling Conservador (uso liviano)
+Set the proxy in `configs/default.yaml`:
 
 ```yaml
 crawler:
-  workers: 3
-  max_depth: 2
-  politeness_delay: 3s
-  max_retries: 1
-
-logging:
-  level: "warn"
+  proxy_url: "socks5h://warp:1080"
 ```
 
-### Producción con Logs JSON
-
-```yaml
-crawler:
-  workers: 15
-  max_depth: 3
-  politeness_delay: 1s
-
-api:
-  host: "127.0.0.1"
-  port: 9090
-
-logging:
-  level: "info"
-  format: "json"
-```
+Then uncomment the `warp` service in `docker-compose.yml`. The crawler will route all traffic through Warp while the API remains directly accessible.
 
 ---
 
-## Validación
+## Validation
 
-La configuración se valida al iniciar. Si hay valores inválidos, Duvycrawl muestra un error claro y no arranca:
+Configuration is validated on startup. Invalid values produce a clear error:
 
 ```
 fatal: loading configuration: invalid configuration: crawler.workers must be >= 1, got 0
@@ -136,4 +111,4 @@ fatal: loading configuration: invalid configuration: crawler.workers must be >= 
 
 ---
 
-Siguiente: [API Reference](./api-reference.md) · [Ejemplos de Uso](./examples.md)
+Next: [API Reference](./api-reference.md) · [Examples](./examples.md)

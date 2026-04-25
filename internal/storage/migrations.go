@@ -146,6 +146,16 @@ var migrations = []string{
 	`ALTER TABLE pages ADD COLUMN published_at DATETIME`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_published_at ON pages(published_at)`,
 
+	// --- Schema.org (JSON-LD) structured data ---
+	`ALTER TABLE pages ADD COLUMN schema_type TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_title TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_description TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_image TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_author TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_keywords TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN schema_rating REAL`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_schema_type ON pages(schema_type)`,
+
 	// --- Links table (for backlink analysis) ---
 	`CREATE TABLE IF NOT EXISTS links (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

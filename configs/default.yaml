@@ -3,16 +3,16 @@
 
 crawler:
   # Number of concurrent crawl workers
-  workers: 600
+  workers: 300
   # Maximum link depth to follow from seed pages
-  max_depth: 5
+  max_depth: 1
   # HTTP request timeout per page
-  request_timeout: 10s
+  request_timeout: 15s
   # Minimum delay between requests to the same domain
   politeness_delay: 1s
   # Extra randomized duration added to politeness_delay (e.g. 500ms)
   # This makes crawl patterns less predictable and helps avoid blocks.
-  random_delay: 500ms
+  random_delay: 1000ms
   # Maximum retry attempts for failed requests
   max_retries: 3
   # User-Agent string sent with every request.
@@ -26,7 +26,7 @@ crawler:
   # Max retry attempts when using the fallback UA.
   max_fallback_retries: 1
   # Maximum page size to download (in KB)
-  max_page_size_kb: 1024
+  max_page_size_kb: 512
   # Whether to respect robots.txt directives
   respect_robots: false
   # If true, ONLY crawl pages within seed domains.
@@ -34,7 +34,7 @@ crawler:
   seed_domains_only: false
   # Max concurrent requests to the SAME domain (like Colly's Parallelism).
   # Higher = faster for a single domain, but be polite. Default: 2.
-  parallelism_per_domain: 4
+  parallelism_per_domain: 8
   # Disable cookie handling. Leave false unless you specifically want
   # to avoid session cookies (most sites require cookies to work).
   disable_cookies: false
@@ -45,6 +45,9 @@ crawler:
   # Shorter intervals = fresher stats but more DB writes.
   # Longer intervals = fewer writes but possible data loss on crash.
   domain_stats_flush_interval: 30s
+  # Whether to start crawling automatically on launch.
+  # Set to false to start via API: POST /api/v1/crawler/start
+  auto_start: true
 
 storage:
   # Path to the SQLite database file

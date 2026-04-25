@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/api"
 	"github.com/DuvyDev/Duvycrawl/internal/config"
@@ -34,7 +35,7 @@ func main() {
 func run() error {
 	// --- Parse CLI Flags ---
 	configPath := flag.String("config", "configs/default.yaml", "path to YAML configuration file")
-	autoStart := flag.Bool("auto-start", true, "automatically start crawling on launch")
+	noStart := flag.Bool("no-start", false, "override auto_start in config: do not start crawler on launch")
 	flag.Parse()
 
 	// --- Load Configuration ---
@@ -42,6 +43,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
+
+	// --no-start flag overrides auto_start from config.
+	autoStart := cfg.Crawler.AutoStart && !*noStart
 
 	// --- Initialize Logger ---
 	logger := initLogger(cfg.Logging)
@@ -83,9 +87,9 @@ func run() error {
 		logger.Warn("failed to seed bloom filter", "error", err)
 	}
 
-	// --- Re-queue recent pages to repopulate frontier after restart ---
-	if err := requeueRecentPages(ctx, store, front, logger); err != nil {
-		logger.Warn("failed to re-queue recent pages", "error", err)
+	// --- Re-queue stale pages to give the crawler initial work on restart.
+	if err := requeueStalePagesOnStartup(ctx, store, front, logger); err != nil {
+		logger.Warn("failed to re-queue stale pages on startup", "error", err)
 	}
 
 	// --- Seed Default Domains ---
@@ -110,7 +114,7 @@ func run() error {
 	go sched.Start(ctx)
 
 	// Start the crawler engine if auto-start is enabled.
-	if *autoStart {
+	if autoStart {
 		engine.Start(ctx)
 	} else {
 		logger.Info("crawler not auto-started, use API to start: POST /api/v1/crawler/start")
@@ -285,33 +289,44 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 	return nil
 }
 
-// requeueRecentPages fetches the most recently crawled pages from the database
-// and injects them back into the frontier. This prevents the crawler from
-// starving on restart when the in-memory queue is empty but the database
-// contains hundreds of thousands of previously crawled URLs.
-func requeueRecentPages(ctx context.Context, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
-	// Fetch the 5,000 most recent pages. This provides enough initial work
-	// for high worker counts without being excessive.
-	pages, err := store.GetRecentPages(ctx, 5000)
+// requeueStalePagesOnStartup re-queues pages that haven't been crawled recently,
+// giving the crawler initial work on restart without re-crawling fresh content.
+func requeueStalePagesOnStartup(ctx context.Context, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
+	// Seed pages older than 4 hours get re-queued with high priority.
+	seedCutoff := time.Now().Add(-4 * time.Hour)
+	staleSeeds, err := store.GetStalePages(ctx, seedCutoff, 200)
 	if err != nil {
 		return err
 	}
-	if len(pages) == 0 {
+
+	// Normal pages older than 3 days get re-queued with low priority.
+	normalCutoff := time.Now().Add(-72 * time.Hour)
+	stalePages, err := store.GetStalePages(ctx, normalCutoff, 2000)
+	if err != nil {
+		return err
+	}
+
+	var allURLs []string
+	for _, p := range staleSeeds {
+		allURLs = append(allURLs, p.URL)
+	}
+	for _, p := range stalePages {
+		allURLs = append(allURLs, p.URL)
+	}
+
+	if len(allURLs) == 0 {
+		logger.Info("no stale pages to re-queue on startup")
 		return nil
 	}
 
-	urls := make([]string, 0, len(pages))
-	for _, p := range pages {
-		urls = append(urls, p.URL)
-	}
-
-	added, err := front.AddBatchDirect(ctx, urls, 0, storage.PriorityNormal)
+	added, err := front.AddBatchDirect(ctx, allURLs, 0, storage.PriorityNormal)
 	if err != nil {
-		return fmt.Errorf("re-queuing recent pages: %w", err)
+		return fmt.Errorf("re-queuing stale pages on startup: %w", err)
 	}
 
-	logger.Info("re-queued recent pages into frontier",
-		"fetched", len(urls),
+	logger.Info("re-queued stale pages on startup",
+		"stale_seeds", len(staleSeeds),
+		"stale_pages", len(stalePages),
 		"enqueued", added,
 	)
 	return nil

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 // FetchResult contains the raw result of an HTTP fetch operation.
@@ -23,6 +25,7 @@ type FetchResult struct {
 	ContentType string
 	FinalURL    string // After redirects
 	Duration    time.Duration
+	Truncated   bool // True if body exceeded max size and was truncated
 }
 
 // Fetcher handles HTTP requests for downloading web pages.
@@ -118,8 +121,21 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
 		if err == nil {
-			transport.Proxy = http.ProxyURL(parsedProxy)
-			logger.Info("using proxy", "url", proxyURL)
+			// SOCKS5 proxy (including socks5h:// for remote DNS resolution).
+			if parsedProxy.Scheme == "socks5" || parsedProxy.Scheme == "socks5h" {
+				dialer, err := proxy.FromURL(parsedProxy, proxy.Direct)
+				if err == nil {
+					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+						return dialer.Dial(network, addr)
+					}
+					logger.Info("using socks5 proxy", "url", proxyURL)
+				} else {
+					logger.Warn("failed to create socks5 dialer, ignoring proxy", "url", proxyURL, "error", err)
+				}
+			} else {
+				transport.Proxy = http.ProxyURL(parsedProxy)
+				logger.Info("using http proxy", "url", proxyURL)
+			}
 		} else {
 			logger.Warn("invalid proxy URL, ignoring", "url", proxyURL, "error", err)
 		}
@@ -283,18 +299,20 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 		}, fmt.Errorf("non-HTML content type: %s", contentType)
 	}
 
-	// Read body with size limit to prevent downloading huge files.
+// Read body with size limit to prevent downloading huge files.
+	// If the page exceeds the limit, we keep what we have (truncated) so
+	// that metadata, title, and outbound links can still be extracted.
 	maxBytes := int64(f.maxBodySizeKB) * 1024
-	limitedReader := io.LimitReader(resp.Body, maxBytes+1)
+	limitedReader := io.LimitReader(resp.Body, maxBytes)
 
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("reading body from %q: %w", targetURL, err)
 	}
 
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("page %q exceeds max size of %d KB", targetURL, f.maxBodySizeKB)
-	}
+	// Drain the rest of the body to reuse the connection, but discard it.
+	discarded, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 1))
+	truncated := discarded > 0
 
 	return &FetchResult{
 		StatusCode:  resp.StatusCode,
@@ -302,6 +320,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 		ContentType: contentType,
 		FinalURL:    resp.Request.URL.String(),
 		Duration:    duration,
+		Truncated:   truncated,
 	}, nil
 }
 

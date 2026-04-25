@@ -70,6 +70,8 @@ type searchResponse struct {
 	Total   int                    `json:"total"`
 	Page    int                    `json:"page"`
 	Limit   int                    `json:"limit"`
+	Domain  string                 `json:"domain,omitempty"`
+	Type    string                 `json:"type,omitempty"`
 	Results []storage.SearchResult `json:"results"`
 }
 
@@ -94,8 +96,10 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	offset := (page - 1) * limit
 
 	lang := r.URL.Query().Get("lang")
+	domain := r.URL.Query().Get("domain")
+	schemaType := r.URL.Query().Get("type")
 
-	results, total, err := h.store.SearchPages(r.Context(), query, limit, offset, lang)
+	results, total, err := h.store.SearchPages(r.Context(), query, limit, offset, lang, domain, schemaType)
 	if err != nil {
 		h.logger.Error("search failed", "query", query, "error", err)
 		writeError(w, http.StatusInternalServerError, "search failed")
@@ -107,11 +111,13 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, searchResponse{
-		Query:   query,
-		Total:   total,
-		Page:    page,
-		Limit:   limit,
-		Results: results,
+		Query:      query,
+		Total:      total,
+		Page:       page,
+		Limit:      limit,
+		Domain:     domain,
+		Type:       schemaType,
+		Results:    results,
 	})
 }
 
@@ -193,9 +199,12 @@ func (h *Handlers) GetStats(w http.ResponseWriter, r *http.Request) {
 type crawlRequest struct {
 	URLs     []string `json:"urls"`
 	Priority int      `json:"priority,omitempty"`
+	Force    bool     `json:"force,omitempty"`
 }
 
 // CrawlURLs enqueues one or more URLs for crawling.
+// By default (force=false), URLs that were crawled within the last 24 hours
+// are skipped to avoid redundant re-indexing. Set force=true to override.
 func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 	var req crawlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -218,16 +227,48 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 		priority = storage.PriorityNormal
 	}
 
-	if _, err := h.frontier.AddBatchDirect(r.Context(), req.URLs, 0, priority); err != nil {
-		h.logger.Error("failed to enqueue URLs", "error", err, "count", len(req.URLs))
-		writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
-		return
+	urlsToEnqueue := req.URLs
+	var skipped int
+
+	if !req.Force {
+		freshTTL := 24 * time.Hour
+		cutoff := time.Now().Add(-freshTTL)
+		fresh, err := h.store.GetFreshURLs(r.Context(), req.URLs, cutoff)
+		if err != nil {
+			h.logger.Warn("failed to check fresh URLs, enqueuing all", "error", err)
+		} else if len(fresh) > 0 {
+			filtered := make([]string, 0, len(req.URLs))
+			for _, u := range req.URLs {
+				if _, isFresh := fresh[u]; isFresh {
+					skipped++
+				} else {
+					filtered = append(filtered, u)
+				}
+			}
+			urlsToEnqueue = filtered
+		}
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"message": "URLs enqueued for crawling",
-		"count":   len(req.URLs),
-	})
+	var queued int
+	if len(urlsToEnqueue) > 0 {
+		var err error
+		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, 0, priority)
+		if err != nil {
+			h.logger.Error("failed to enqueue URLs", "error", err, "count", len(urlsToEnqueue))
+			writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
+			return
+		}
+	}
+
+	resp := map[string]any{
+		"queued":  queued,
+		"skipped": skipped,
+	}
+	if skipped > 0 {
+		resp["reason"] = "already_indexed"
+	}
+
+	writeJSON(w, http.StatusAccepted, resp)
 }
 
 // --- Queue ---

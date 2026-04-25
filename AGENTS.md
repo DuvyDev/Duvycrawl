@@ -5,14 +5,15 @@
 Duvycrawl es un web crawler escrito en Go que:
 - Crawlea páginas web siguiendo links
 - Almacena contenido en SQLite con índice FTS5 para búsqueda full-text
-- Expone una API REST para controlar el crawler y hacer búsquedas
-- Soporta rate limiting, robots.txt, y re-crawling periódico
+- Extrae schema.org (JSON-LD) para enriquecer resultados con imágenes, autor, tipo de contenido, rating, etc.
+- Expone una API REST para controlar el crawler y hacer búsquedas con filtrado por dominio, tipo, e idioma
+- Soporta rate limiting, robots.txt, re-crawling periódico, y proxy SOCKS5 (Cloudflare Warp)
 
 ## Estructura clave
 
 ```
 Duvycrawl/
-├── cmd/duvycrawl/          # Entry point
+├── main.go                 # Entry point
 ├── internal/
 │   ├── config/             # Config YAML
 │   ├── crawler/            # Engine, Fetcher, Parser, Robots
@@ -20,11 +21,14 @@ Duvycrawl/
 │   ├── ratelimit/          # Per-domain rate limiting (semaphore)
 │   ├── storage/            # SQLite + FTS5
 │   ├── scheduler/          # Re-crawl scheduling
-│   ├── api/                # REST API handlers
+│   ├── api/                # REST API handlers + middleware
 │   └── seeds/              # Default seed domains
 ├── configs/default.yaml    # Configuración por defecto
 ├── data/                   # SQLite DB + Bloom filter (auto-creado)
-└── docs/                   # Documentación
+├── docs/                   # Documentación
+├── Dockerfile
+├── docker-compose.yml
+└── README.md
 ```
 
 ## Decisiones arquitectónicas importantes
@@ -68,10 +72,10 @@ Esto resuelve el problema de caracteres corruptos (acentos, eñes) en sitios que
 
 ```bash
 # Windows PowerShell
-go build -o bin/duvycrawl.exe ./cmd/duvycrawl
+go build -o bin/duvycrawl.exe .
 
 # Linux/macOS
-go build -o bin/duvycrawl ./cmd/duvycrawl
+go build -o bin/duvycrawl .
 ```
 
 ## Run
@@ -82,6 +86,9 @@ go build -o bin/duvycrawl ./cmd/duvycrawl
 
 # Con config custom
 ./bin/duvycrawl -config configs/custom.yaml
+
+# Docker
+docker compose up -d
 ```
 
 ## Testing
@@ -99,3 +106,6 @@ No hay tests unitarios formales todavía. La verificación se hace vía:
 - Si se modifica `internal/storage/sqlite.go`, tener cuidado con `JULIANDAY()` — SQLite de modernc no parsea bien ISO 8601 con microsegundos. Usar `SUBSTR(crawled_at, 1, 10)` para extraer la fecha.
 - El Bloom filter usa `bits-and-blooms/bitset` y `tidwall/btree` para persistencia. Si se cambian estas dependencias, actualizar `go.mod`.
 - La firma de `/api/v1/search` NO debe cambiar: parámetros `q`, `page`, `limit`, `lang`.
+- `modernc.org/sqlite` devuelve `published_at` como string, no como `time.Time`. Escanear siempre como `sql.NullString` y parsear con `parseFlexibleTime`.
+- El proxy SOCKS5 usa `golang.org/x/net/proxy`. `socks5h://` fuerce resolución DNS remota a través del proxy.
+- Los campos schema.org (`schema_type`, `schema_image`, etc.) se agregaron con `ALTER TABLE`. Para DBs existentes, las filas viejas quedarán vacías.

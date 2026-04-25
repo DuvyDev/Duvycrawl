@@ -75,6 +75,8 @@ func NewServer(
 	handler := chain(
 		mux,
 		RecoveryMiddleware(apiLogger),
+		SecurityHeadersMiddleware,
+		RateLimitMiddleware(apiLogger),
 		LoggingMiddleware(apiLogger),
 		CORSMiddleware,
 		RequestIDMiddleware,
