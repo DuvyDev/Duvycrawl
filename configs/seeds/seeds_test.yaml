@@ -1,212 +1,23 @@
 seeds:
 
-## ENTRETENIMIENTO ##
-  - domain: warframe.com
+## EXAMPLE SEEDS ##
+  - domain: news.ycombinator.com
+    priority: 100
+    start_urls:
+      - https://news.ycombinator.com/
+      - https://news.ycombinator.com/newest
+      - https://news.ycombinator.com/front
+      - https://news.ycombinator.com/show
+  - domain: curlie.org
     priority: 90
     start_urls:
-      - https://warframe.com/es
-      - https://warframe.com/en
-  - domain: overframe.gg
-    priority: 85
-  - domain: wiki.warframe.com
-    priority: 80
-  - domain: warframe.fandom.com
-    priority: 80
-    start_urls:
-      - https://warframe.fandom.com/es
-      - https://warframe.fandom.com/wiki
-      - https://warframe.fandom.com/wiki/WARFRAME_Wiki
-  - domain: animeflv.net
-    priority: 80
-  - domain: jkanime.net
-    priority: 80
-  - domain: tvymanga3.net
-    priority: 80
-  - domain: fandom.com
-    priority: 75
-  - domain: hytale.com
-    priority: 65
-  - domain: hytalecharts.com
-    priority: 60
-  - domain: hyzen.net
-    priority: 60
-  - domain: crackrelease.com
-    priority: 60
-  - domain: crunchyroll.com
-    priority: 60
-  - domain: marvelrivals.com
-    priority: 60
-  - domain: curseforge.com
-    priority: 50
-  - domain: marvelrivals.gg
-    priority: 45
-  - domain: tracker.gg
-    priority: 45
-  - domain: alecaframe.com
-    priority: 45
-  - domain: steamgifts.com
-    priority: 45
-  - domain: steamdb.info
-    priority: 45
-  - domain: protondb.com
-    priority: 45
-  - domain: leagueoflegends.com
-    priority: 45
-  - domain: playvalorant.com
-    priority: 45
-  - domain: us.shop.battle.net
-    priority: 45
-  - domain: blizzard.com
-    priority: 45
-  - domain: twitch.tv
-    priority: 45
-  - domain: wiki.gg
-    priority: 35
-
-## DESARROLLO ##
-  - domain: nodejs.org
-    priority: 60
-  - domain: python.org
-    priority: 60
-  - domain: go.dev
-    priority: 60
-  - domain: hub.docker.com
-    priority: 60
-  - domain: github.com
-    priority: 60
-  - domain: sourceforge.net
-    priority: 60
-
-## VARIADO ###
-  - domain: proton.me
-    priority: 70
-  - domain: protonmail.com
-    priority: 70
-  - domain: infobae.com
-    priority: 70
-  - domain: kernel.org
-    priority: 30
-  - domain: addons.mozilla.org
-    priority: 30
-  - domain: f-droid.org
-    priority: 30
-  - domain: vencord.dev
-    priority: 30
-  - domain: opencode.ai
-    priority: 30
-  - domain: openrouter.ai
-    priority: 30
-  - domain: openai.com
-    priority: 30
-  - domain: antigravity.google.com
-    priority: 30
-  - domain: ollama.com
-    priority: 30
-  - domain: claude.ai
-    priority: 30
-  - domain: artificialanalysis.ai
-    priority: 30
-  - domain: perplexity.ai
-    priority: 30
-  - domain: ilovepdf.com
-    priority: 30
-  - domain: who.is
-    priority: 30
-  - domain: geolocation.com
-    priority: 30
-  - domain: freetubeapp.io
-    priority: 30
-  - domain: debian.org
-    priority: 30
-  - domain: ubuntu.com
-    priority: 30
-  - domain: archlinux.org
-    priority: 30
-  - domain: fedoraproject.org
-    priority: 30
-
-## URUGUAY ##
-  - domain: blog.portal.gub.uy
-    priority: 90
-  - domain: catalogodatos.gub.uy
-    priority: 90
-  - domain: gub.uy
-    priority: 90
-  - domain: inumet.gub.uy
-    priority: 90
-  - domain: mi.iduruguay.gub.uy
-    priority: 90
-  - domain: montevideo.gub.uy
-    priority: 90
-  - domain: parlamento.gub.uy
-    priority: 90
-  - domain: servicios.dgi.gub.uy
-    priority: 90
-  - domain: sucive.gub.uy
-    priority: 90
-  - domain: uruguayconcursa.gub.uy
-    priority: 90
-  - domain: antel.com.uy
-    priority: 85
-  - domain: brou.com.uy
-    priority: 85
-  - domain: impo.com.uy
-    priority: 85
-  - domain: ose.com.uy
-    priority: 85
-  - domain: uruguay.uy
-    priority: 85
-  - domain: ute.com.uy
-    priority: 85
-  - domain: oca.com.uy
-    priority: 80
-  - domain: prexcard.com
-    priority: 75
-  - domain: midinero.com.uy
-    priority: 75
-  - domain: meteored.com.uy
-    priority: 65
-  - domain: mercadolibre.com.uy
-    priority: 70
-  - domain: disco.com.uy
-    priority: 65
-  - domain: eldorado.com.uy
-    priority: 65
-  - domain: loi.com.uy
-    priority: 65
-  - domain: tiendainglesa.com.uy
-    priority: 65
-  - domain: uruguaynatural.com
-    priority: 65
-  - domain: vientos.uy
-    priority: 65
-  - domain: elpais.com.uy
-    priority: 65
-  - domain: telenoche.com.uy
-    priority: 65
-  - domain: elobservador.com.uy
-    priority: 60
-  - domain: subrayado.com.uy
-    priority: 60
-  - domain: ladiaria.com.uy
-    priority: 55
-  - domain: montevideo.com.uy
-    priority: 55
-  - domain: gallito.com.uy
-    priority: 45
-  - domain: correo.com.uy
-    priority: 45
-  - domain: dac.com.uy
-    priority: 45
-  - domain: tiendamia.com
-    priority: 45
-
-## ADULTO +18 ##
-  - domain: xvideos.com
-    priority: 45
-  - domain: pornhub.com
-    priority: 40
-  - domain: hentaila.com
-    priority: 35
-  - domain: hentaila.tv
-    priority: 35
+      - https://curlie.org/en
+      - https://curlie.org/es
+      - https://curlie.org/it
+      - https://curlie.org/fr
+      - https://curlie.org/de
+      - https://curlie.org/ja
+      - https://curlie.org/tr
+      - https://curlie.org/ru
+      - https://curlie.org/pl
+      - https://curlie.org/nl
