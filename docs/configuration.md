@@ -1,6 +1,8 @@
 # Configuration
 
-Duvycrawl is configured via a YAML file. By default it uses `configs/default.yaml`.
+Duvycrawl is configured via a YAML file and environment variables:
+- **YAML** (`configs/default.yaml`): crawler behavior (workers, depth, delays, etc.)
+- **`.env` file**: deployment-specific values (proxy, tunnel token, URLs)
 
 ---
 
@@ -90,16 +92,50 @@ logging:
 
 ## Cloudflare Warp (SOCKS5)
 
-Set the `PROXY_URL` environment variable in `docker-compose.yml`:
+Set `PROXY_URL` in your `.env` file:
 
-```yaml
-services:
-  duvycrawl:
-    environment:
-      - PROXY_URL=socks5h://warp:1080
+```env
+PROXY_URL=socks5://warp:1080
 ```
 
-Then uncomment the `warp` service and the dependency in `docker-compose.yml`. The crawler will route all traffic through Warp while the API remains directly accessible.
+The `warp` service is already configured in `docker-compose.yml`. The crawler routes all traffic through it while the API remains directly accessible on the internal network.
+
+Other proxy formats:
+
+```env
+# SOCKS5 with remote DNS resolution (recommended for Warp)
+PROXY_URL=socks5h://warp:1080
+
+# HTTP proxy
+PROXY_URL=http://proxy.example.com:8080
+
+# Disable proxy
+PROXY_URL=
+```
+
+---
+
+## Environment Variables
+
+All environment variables are set in the `.env` file (see `.env.example`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TUNNEL_TOKEN` | Yes | — | Cloudflare Tunnel token for public access |
+| `SITE_URL` | Yes | — | Public URL of the search UI (e.g. `https://search.example.com`) |
+| `CRAWLER_API` | Yes | — | Internal crawler API URL (e.g. `http://duvycrawl:8080/api/v1`) |
+| `PROXY_URL` | No | `socks5://warp:1080` | Proxy URL for crawler traffic |
+| `TZ` | No | `UTC` | Timezone |
+| `APP_PORT` | No | `8800` | Local debug port for the search UI |
+| `DDG_ENABLED` | No | `true` | Enable DuckDuckGo fallback results |
+| `DDG_RESULTS` | No | `3` | Number of DDG fallback results |
+| `DDG_CACHE_TTL_MINUTES` | No | `120` | DDG cache TTL in minutes |
+| `NEWS_MAX_ITEMS` | No | `5` | Max items in the news section |
+| `WIKIPEDIA_CARD_ENABLED` | No | `true` | Show Wikipedia summary card |
+| `RESULTS_PER_PAGE` | No | `10` | Search results per page |
+| `DEFAULT_LANG` | No | `en` | Default search language |
+
+> **Note**: Proxy is configured exclusively via `PROXY_URL` environment variable — not in YAML. This separates deployment config (proxy, tunnel) from crawler behavior (workers, depth).
 
 ---
 

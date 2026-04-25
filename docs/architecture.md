@@ -1,11 +1,89 @@
-# Arquitectura
+# Architecture
 
-Visión técnica de cómo Duvycrawl está diseñado internamente.
+Technical overview of Duvycrawl's internal design and production deployment.
 
 ---
 
-## Diagrama General
+## Production Deployment
 
+```
+                     Internet
+                        │
+                        ▼
+               ┌─────────────────┐
+               │  Cloudflare      │
+               │  Tunnel          │
+               │  (cloudflared)   │
+               └────────┬────────┘
+                        │  cloudflared-proxy
+                        ▼
+               ┌─────────────────┐
+               │  Suvy           │
+               │  (Search UI)    │
+               │  :8800          │
+               └────────┬────────┘
+                        │  suvynet
+                        ▼
+               ┌─────────────────┐
+               │  Duvycrawl      │
+               │  (Crawler+API)  │
+               │  :8080          │
+               └────────┬────────┘
+                        │  duvycrawl
+                        ▼
+               ┌─────────────────┐
+               │  Warp           │
+               │  (SOCKS5 proxy) │
+               │  :1080          │
+               └────────┬────────┘
+                        │
+                        ▼
+                     Internet
+                 (crawled sites)
+```
+
+Networks:
+- **cloudflared-proxy**: cloudflared ↔ suvy
+- **suvynet**: suvy ↔ duvycrawl (API calls)
+- **duvycrawl**: duvycrawl ↔ warp (SOCKS5 proxy)
+
+The crawler API is **not** exposed to the internet — only Suvy can reach it internally.
+
+---
+
+## Internal Architecture
+
+```
+┌──────────────────────────────┐
+│ REST API Server              │
+│ (net/http ServeMux, :8080)   │
+└──────────┬───────────────────┘
+           │
+┌────────────────────┼────────────────────┐
+│                    │                    │
+▼                    ▼                    ▼
+┌─────────────┐ ┌──────────────┐ ┌──────────────┐
+│ Scheduler   │ │ Frontier     │ │ Storage      │
+│ (re-crawl)  │──▶│ (URL queue) │ │ (SQLite)     │
+└─────────────┘ └──────┬───────┘ └──────────────┘
+                       │ ▲
+                       ▼ │
+              ┌──────────────────┐ │
+              │ Worker Pool      │ │
+              │ (N goroutines)   │ │
+              └───┬────┬────┬───┘ │
+                  │    │    │     │
+                  ▼    ▼    ▼     │
+              ┌──────────────────┐ │
+              │ Fetcher          │ │
+              │ (HTTP client)    │ │
+              └───────┬──────────┘ │
+                      │            │
+                      ▼            │
+              ┌──────────────────┐ │
+              │ Parser           │─┘
+              │ (HTML → data)    │
+              └──────────────────┘
 ```
                     ┌──────────────────────────────┐
                     │       REST API Server         │
@@ -62,7 +140,7 @@ Visión técnica de cómo Duvycrawl está diseñado internamente.
   - Gzip automático habilitado.
 - **Retry con backoff**: reintentos automáticos con espera creciente;
   no reintenta errores 4xx (excepto 429 Too Many Requests).
-- **Proxy HTTP/SOCKS5** soportado vía configuración YAML.
+- **Proxy HTTP/SOCKS5** soportado vía `PROXY_URL` environment variable.
 - **Headers realistas**: `Accept-Encoding`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`,
   simulando un navegador real.
 
@@ -122,21 +200,24 @@ Visión técnica de cómo Duvycrawl está diseñado internamente.
 
 ```
 Duvycrawl/
-├── cmd/duvycrawl/          # Entry point
+├── main.go             # Entry point
 ├── internal/
-│   ├── config/             # YAML config loading
-│   ├── crawler/            # Engine, Fetcher, Parser, Robots
-│   ├── frontier/           # URL priority queue
-│   ├── ratelimit/          # Per-domain rate limiting
-│   ├── storage/            # SQLite + FTS5 implementation
-│   ├── scheduler/          # Re-crawl scheduling
-│   ├── api/                # REST API (handlers, middleware, server)
-│   └── seeds/              # Default seed domains
-├── configs/                # YAML configuration files
-├── data/                   # SQLite database (auto-created)
-└── docs/                   # Documentation
+│   ├── config/         # YAML config loading
+│   ├── crawler/        # Engine, Fetcher, Parser, Robots
+│   ├── frontier/       # URL priority queue
+│   ├── ratelimit/      # Per-domain rate limiting
+│   ├── storage/        # SQLite + FTS5 implementation
+│   ├── scheduler/      # Re-crawl scheduling
+│   ├── api/            # REST API (handlers, middleware, server)
+│   └── seeds/          # Default seed domains
+├── configs/            # YAML configuration files
+├── data/               # SQLite database (auto-created)
+├── docs/               # Documentation
+├── .env.example        # Environment variable template
+├── Dockerfile
+└── docker-compose.yml  # Production deployment stack
 ```
 
 ---
 
-Anterior: [Ejemplos de Uso](./examples.md) · Inicio: [Getting Started](./getting-started.md)
+Previous: [Examples](./examples.md) · Next: [Getting Started](./getting-started.md)
