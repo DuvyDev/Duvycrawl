@@ -13,17 +13,17 @@ import (
 
 // FreshnessPolicy defines how often different types of pages should be re-crawled.
 type FreshnessPolicy struct {
-	SeedInterval    time.Duration // How often to re-crawl seed domain pages.
-	NormalInterval  time.Duration // How often to re-crawl normal pages.
-	UnchangedBonus  time.Duration // Extra time before re-crawling unchanged pages.
+	SeedInterval   time.Duration // How often to re-crawl seed domain pages.
+	NormalInterval time.Duration // How often to re-crawl normal pages.
+	UnchangedBonus time.Duration // Extra time before re-crawling unchanged pages.
 }
 
 // DefaultPolicy returns the default freshness policy.
 func DefaultPolicy() FreshnessPolicy {
 	return FreshnessPolicy{
 		SeedInterval:   24 * time.Hour,
-		NormalInterval: 7 * 24 * time.Hour,  // 7 days
-		UnchangedBonus: 7 * 24 * time.Hour,  // +7 days for unchanged pages (total: 14 days)
+		NormalInterval: 7 * 24 * time.Hour, // 7 days
+		UnchangedBonus: 7 * 24 * time.Hour, // +7 days for unchanged pages (total: 14 days)
 	}
 }
 

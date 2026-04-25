@@ -111,13 +111,13 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, searchResponse{
-		Query:      query,
-		Total:      total,
-		Page:       page,
-		Limit:      limit,
-		Domain:     domain,
-		Type:       schemaType,
-		Results:    results,
+		Query:   query,
+		Total:   total,
+		Page:    page,
+		Limit:   limit,
+		Domain:  domain,
+		Type:    schemaType,
+		Results: results,
 	})
 }
 
@@ -448,9 +448,9 @@ func (h *Handlers) CrawlerStatus(w http.ResponseWriter, r *http.Request) {
 	crawled, errored := h.engine.Stats()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":         h.engine.Status(),
-		"pages_crawled":  crawled,
-		"pages_errored":  errored,
+		"status":        h.engine.Status(),
+		"pages_crawled": crawled,
+		"pages_errored": errored,
 	})
 }
 
@@ -506,10 +506,10 @@ func (h *Handlers) GetBacklinks(w http.ResponseWriter, r *http.Request) {
 // --- Outlinks ---
 
 type outlinksResponse struct {
-	PageID  int64                  `json:"page_id"`
-	Total   int                    `json:"total"`
-	Page    int                    `json:"page"`
-	Limit   int                    `json:"limit"`
+	PageID  int64                   `json:"page_id"`
+	Total   int                     `json:"total"`
+	Page    int                     `json:"page"`
+	Limit   int                     `json:"limit"`
 	Results []storage.OutlinkResult `json:"results"`
 }
 

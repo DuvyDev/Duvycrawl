@@ -123,10 +123,10 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 
 // rateLimiter implements a simple token-bucket rate limiter per IP.
 type rateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	limit    int
-	window   time.Duration
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	limit   int
+	window  time.Duration
 }
 
 type bucket struct {

@@ -299,7 +299,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 		}, fmt.Errorf("non-HTML content type: %s", contentType)
 	}
 
-// Read body with size limit to prevent downloading huge files.
+	// Read body with size limit to prevent downloading huge files.
 	// If the page exceeds the limit, we keep what we have (truncated) so
 	// that metadata, title, and outbound links can still be extracted.
 	maxBytes := int64(f.maxBodySizeKB) * 1024

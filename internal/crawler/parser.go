@@ -598,14 +598,14 @@ func extractTimeElement(doc *goquery.Document) time.Time {
 
 // SchemaData holds extracted schema.org JSON-LD fields.
 type SchemaData struct {
-	Type           string
-	Title          string
-	Description    string
-	Image          string
-	Author         string
-	Keywords       string
-	Rating         float64
-	DatePublished  time.Time
+	Type          string
+	Title         string
+	Description   string
+	Image         string
+	Author        string
+	Keywords      string
+	Rating        float64
+	DatePublished time.Time
 }
 
 // extractJSONLD parses all application/ld+json script blocks and extracts
@@ -664,17 +664,8 @@ func extractJSONLD(doc *goquery.Document, base *url.URL) SchemaData {
 			if best.Description == "" {
 				best.Description = stringFromJSONLD(obj["description"])
 			}
-if best.Image == "" {
-			imgURL := extractImageURL(obj["image"])
-			if imgURL != "" {
-				if base != nil {
-					best.Image = resolveURL(base, imgURL)
-				} else {
-					best.Image = imgURL
-				}
-			}
 			if best.Image == "" {
-				imgURL = extractImageURL(obj["thumbnailUrl"])
+				imgURL := extractImageURL(obj["image"])
 				if imgURL != "" {
 					if base != nil {
 						best.Image = resolveURL(base, imgURL)
@@ -682,8 +673,17 @@ if best.Image == "" {
 						best.Image = imgURL
 					}
 				}
+				if best.Image == "" {
+					imgURL = extractImageURL(obj["thumbnailUrl"])
+					if imgURL != "" {
+						if base != nil {
+							best.Image = resolveURL(base, imgURL)
+						} else {
+							best.Image = imgURL
+						}
+					}
+				}
 			}
-		}
 			if best.Author == "" {
 				if author, ok := obj["author"].(map[string]interface{}); ok {
 					best.Author = stringFromJSONLD(author["name"])

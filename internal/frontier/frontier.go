@@ -87,8 +87,8 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 // links during crawling to avoid re-fetching known pages.
 //
 // Deduplication is performed in two stages:
-//   1. Bloom filter (in-memory, O(1)) — catches ~99.9% of duplicates.
-//   2. SQLite batch lookup — confirms the remainder in 2 queries instead of 2N.
+//  1. Bloom filter (in-memory, O(1)) — catches ~99.9% of duplicates.
+//  2. SQLite batch lookup — confirms the remainder in 2 queries instead of 2N.
 func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priority int) error {
 	if len(rawURLs) == 0 {
 		return nil

@@ -7,30 +7,30 @@ import (
 
 // Page represents a crawled web page with its extracted content and metadata.
 type Page struct {
-	ID             int64     `json:"id"`
-	URL            string    `json:"url"`
-	Domain         string    `json:"domain"`
-	Title          string    `json:"title"`
-	H1             string    `json:"h1,omitempty"`
-	H2             string    `json:"h2,omitempty"`
-	Description    string    `json:"description"`
-	Content        string    `json:"content,omitempty"` // Clean text, no HTML
-	Language       string    `json:"language"`          // ISO 639-1 code (es, en, pt...)
-	Region         string    `json:"region"`            // Country code from TLD (uy, es, ar...)
-	StatusCode     int       `json:"status_code"`
-	ContentHash    string    `json:"content_hash"`           // SHA-256 of content for change detection
-	URLFingerprint string    `json:"url_fingerprint"`        // Structural fingerprint for deduplication
-	PublishedAt        time.Time `json:"published_at,omitempty"` // Article publication date
-	CrawledAt          time.Time `json:"crawled_at"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
-	SchemaType         string    `json:"schema_type,omitempty"`         // e.g. Recipe, NewsArticle, Product
-	SchemaTitle        string    `json:"schema_title,omitempty"`        // JSON-LD headline/name
-	SchemaDescription  string    `json:"schema_description,omitempty"`  // JSON-LD description
-	SchemaImage        string    `json:"schema_image,omitempty"`        // JSON-LD image URL
-	SchemaAuthor       string    `json:"schema_author,omitempty"`       // JSON-LD author name
-	SchemaKeywords     string    `json:"schema_keywords,omitempty"`     // JSON-LD keywords (comma-separated)
-	SchemaRating       float64   `json:"schema_rating,omitempty"`       // JSON-LD aggregateRating value
+	ID                int64     `json:"id"`
+	URL               string    `json:"url"`
+	Domain            string    `json:"domain"`
+	Title             string    `json:"title"`
+	H1                string    `json:"h1,omitempty"`
+	H2                string    `json:"h2,omitempty"`
+	Description       string    `json:"description"`
+	Content           string    `json:"content,omitempty"` // Clean text, no HTML
+	Language          string    `json:"language"`          // ISO 639-1 code (es, en, pt...)
+	Region            string    `json:"region"`            // Country code from TLD (uy, es, ar...)
+	StatusCode        int       `json:"status_code"`
+	ContentHash       string    `json:"content_hash"`           // SHA-256 of content for change detection
+	URLFingerprint    string    `json:"url_fingerprint"`        // Structural fingerprint for deduplication
+	PublishedAt       time.Time `json:"published_at,omitempty"` // Article publication date
+	CrawledAt         time.Time `json:"crawled_at"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	SchemaType        string    `json:"schema_type,omitempty"`        // e.g. Recipe, NewsArticle, Product
+	SchemaTitle       string    `json:"schema_title,omitempty"`       // JSON-LD headline/name
+	SchemaDescription string    `json:"schema_description,omitempty"` // JSON-LD description
+	SchemaImage       string    `json:"schema_image,omitempty"`       // JSON-LD image URL
+	SchemaAuthor      string    `json:"schema_author,omitempty"`      // JSON-LD author name
+	SchemaKeywords    string    `json:"schema_keywords,omitempty"`    // JSON-LD keywords (comma-separated)
+	SchemaRating      float64   `json:"schema_rating,omitempty"`      // JSON-LD aggregateRating value
 }
 
 // CrawlJob represents a URL queued for crawling in the frontier.
@@ -78,24 +78,24 @@ type Domain struct {
 
 // SearchResult represents a single result from a full-text search query.
 type SearchResult struct {
-	ID          int64      `json:"id"`
-	URL         string     `json:"url"`
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	Snippet     string     `json:"snippet"` // FTS5 highlighted snippet
-	Domain      string     `json:"domain"`
-	Language    string     `json:"language"`
-	Region      string     `json:"region"`
-	CrawledAt   time.Time  `json:"crawled_at"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
-	PublishedAt *time.Time `json:"published_at,omitempty"`
+	ID               int64      `json:"id"`
+	URL              string     `json:"url"`
+	Title            string     `json:"title"`
+	Description      string     `json:"description"`
+	Snippet          string     `json:"snippet"` // FTS5 highlighted snippet
+	Domain           string     `json:"domain"`
+	Language         string     `json:"language"`
+	Region           string     `json:"region"`
+	CrawledAt        time.Time  `json:"crawled_at"`
+	UpdatedAt        *time.Time `json:"updated_at,omitempty"`
+	PublishedAt      *time.Time `json:"published_at,omitempty"`
 	Rank             float64    `json:"rank"` // Composite relevance score, higher = better
 	ReferringDomains int        `json:"referring_domains"`
 	SchemaType       string     `json:"schema_type,omitempty"`
 	SchemaImage      string     `json:"schema_image,omitempty"`
-	SchemaAuthor     string    `json:"schema_author,omitempty"`
-	SchemaKeywords   string  `json:"schema_keywords,omitempty"`
-	SchemaRating     float64   `json:"schema_rating,omitempty"`
+	SchemaAuthor     string     `json:"schema_author,omitempty"`
+	SchemaKeywords   string     `json:"schema_keywords,omitempty"`
+	SchemaRating     float64    `json:"schema_rating,omitempty"`
 }
 
 // ImageRecord represents an image discovered during crawling.
