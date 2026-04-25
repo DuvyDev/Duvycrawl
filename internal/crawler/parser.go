@@ -140,7 +140,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	result.PublishedAt = extractPublishedAt(doc)
 
 	// --- Extract schema.org JSON-LD structured data ---
-	schema := extractJSONLD(doc)
+	schema := extractJSONLD(doc, base)
 	result.SchemaType = schema.Type
 	result.SchemaTitle = schema.Title
 	result.SchemaDescription = schema.Description
@@ -567,7 +567,7 @@ func extractPublishedAt(doc *goquery.Document) time.Time {
 	}
 
 	// Strategy 3: JSON-LD (schema.org) datePublished.
-	if schema := extractJSONLD(doc); !schema.DatePublished.IsZero() {
+	if schema := extractJSONLD(doc, nil); !schema.DatePublished.IsZero() {
 		return schema.DatePublished
 	}
 
@@ -610,7 +610,7 @@ type SchemaData struct {
 
 // extractJSONLD parses all application/ld+json script blocks and extracts
 // relevant schema.org fields. It handles both single objects and @graph arrays.
-func extractJSONLD(doc *goquery.Document) SchemaData {
+func extractJSONLD(doc *goquery.Document, base *url.URL) SchemaData {
 	var best SchemaData
 	doc.Find(`script[type="application/ld+json"]`).Each(func(_ int, s *goquery.Selection) {
 		text := strings.TrimSpace(s.Text())
@@ -664,12 +664,26 @@ func extractJSONLD(doc *goquery.Document) SchemaData {
 			if best.Description == "" {
 				best.Description = stringFromJSONLD(obj["description"])
 			}
-			if best.Image == "" {
-				best.Image = extractImageURL(obj["image"])
-				if best.Image == "" {
-					best.Image = extractImageURL(obj["thumbnailUrl"])
+if best.Image == "" {
+			imgURL := extractImageURL(obj["image"])
+			if imgURL != "" {
+				if base != nil {
+					best.Image = resolveURL(base, imgURL)
+				} else {
+					best.Image = imgURL
 				}
 			}
+			if best.Image == "" {
+				imgURL = extractImageURL(obj["thumbnailUrl"])
+				if imgURL != "" {
+					if base != nil {
+						best.Image = resolveURL(base, imgURL)
+					} else {
+						best.Image = imgURL
+					}
+				}
+			}
+		}
 			if best.Author == "" {
 				if author, ok := obj["author"].(map[string]interface{}); ok {
 					best.Author = stringFromJSONLD(author["name"])

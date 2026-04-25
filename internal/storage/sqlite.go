@@ -40,7 +40,10 @@ type searchMode string
 
 const (
 	searchModeNavigational searchMode = "navigational"
+	searchModeFTSPhrase    searchMode = "fts_phrase"
+	searchModeFTSProximity searchMode = "fts_proximity"
 	searchModeFTSExact     searchMode = "fts_exact"
+	searchModeFTSMajority  searchMode = "fts_majority"
 	searchModeFTSPrefix    searchMode = "fts_prefix"
 	searchModeFTSRelaxed   searchMode = "fts_relaxed"
 	searchModeFuzzy        searchMode = "fuzzy"
@@ -336,12 +339,15 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		selectedMode searchMode
 	)
 
-	// --- FTS modes: try exact → prefix → relaxed, pick the first with matches ---
+	// --- FTS modes: try phrase → proximity → exact → majority (N-1) → prefix → relaxed ---
 	plans := []struct {
 		mode     searchMode
 		ftsQuery string
 	}{
+		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.tokens)},
+		{mode: searchModeFTSProximity, ftsQuery: buildFTSProximityQuery(q.tokens)},
 		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.tokens)},
+		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q.tokens)},
 		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.tokens)},
 		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.tokens)},
 	}
@@ -376,14 +382,21 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 			continue
 		}
 
-		candidates = results
-		total = count
-		selectedMode = plan.mode
-		break
+		if selectedMode == "" {
+			selectedMode = plan.mode
+		}
+		candidates = mergeSearchCandidates(candidates, results)
+		total += count
+
+		// If we've collected a decent number of solid candidates, stop evaluating relaxed modes.
+		if len(candidates) >= candidateLimit/2 {
+			break
+		}
 	}
 
 	// --- Fallback to fuzzy LIKE-based search if FTS found nothing ---
-	if len(candidates) == 0 && searchCtx.Err() == nil {
+	// Only apply fuzzy search if the query is a single word to avoid polluting multi-word searches.
+	if len(candidates) == 0 && searchCtx.Err() == nil && len(q.tokens) == 1 {
 		results, fuzzyTotal, err := s.searchFuzzyCandidates(searchCtx, q, lang, candidateLimit)
 		if err != nil {
 			if searchCtx.Err() != nil {
@@ -585,6 +598,15 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 
 	urlContains := "%" + query.lowered + "%"
 	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, urlContains}
+
+	for _, token := range query.tokens {
+		if len(token) > 2 {
+			scoreExpr += " + CASE WHEN LOWER(p.title) LIKE ? THEN 40.0 ELSE 0 END"
+			args = append(args, "%"+token+"%")
+			scoreExpr += " + CASE WHEN LOWER(p.h1) LIKE ? THEN 25.0 ELSE 0 END"
+			args = append(args, "%"+token+"%")
+		}
+	}
 
 	if lang != "" {
 		scoreExpr += " + CASE WHEN p.language = ? THEN 35.0 ELSE 0 END"
@@ -1312,8 +1334,14 @@ func searchModeBonus(mode searchMode) float64 {
 	switch mode {
 	case searchModeNavigational:
 		return 120.0
+	case searchModeFTSPhrase:
+		return 180.0
+	case searchModeFTSProximity:
+		return 160.0
 	case searchModeFTSExact:
 		return 140.0
+	case searchModeFTSMajority:
+		return 110.0
 	case searchModeFTSPrefix:
 		return 90.0
 	case searchModeFTSRelaxed:
@@ -1624,6 +1652,28 @@ func isSearchHomepage(rawURL string) bool {
 	return parsed.Path == "" || parsed.Path == "/"
 }
 
+func buildFTSPhraseQuery(tokens []string) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	escaped := make([]string, len(tokens))
+	for i, t := range tokens {
+		escaped[i] = escapeFTS5Token(t)
+	}
+	return `"` + strings.Join(escaped, " ") + `"`
+}
+
+func buildFTSProximityQuery(tokens []string) string {
+	if len(tokens) < 2 {
+		return "" // Proximity only makes sense for multiple tokens.
+	}
+	escaped := make([]string, len(tokens))
+	for i, t := range tokens {
+		escaped[i] = `"` + escapeFTS5Token(t) + `"`
+	}
+	return `NEAR(` + strings.Join(escaped, " ") + `, 4)`
+}
+
 func buildFTSExactQuery(tokens []string) string {
 	if len(tokens) == 0 {
 		return ""
@@ -1634,6 +1684,28 @@ func buildFTSExactQuery(tokens []string) string {
 		parts = append(parts, quoteFTS5Token(token))
 	}
 	return strings.Join(parts, " ")
+}
+
+func buildFTSMajorityQuery(tokens []string) string {
+	n := len(tokens)
+	if n < 3 {
+		return "" // Majority fallback only makes sense for 3+ words.
+	}
+
+	var clauses []string
+	// Generate combinations of N-1 tokens. For 4 tokens, this generates 4 clauses of 3 tokens each.
+	// (A B C) OR (A B D) OR (A C D) OR (B C D)
+	for skip := 0; skip < n; skip++ {
+		var parts []string
+		for i, t := range tokens {
+			if i == skip {
+				continue
+			}
+			parts = append(parts, quoteFTS5Token(t))
+		}
+		clauses = append(clauses, "("+strings.Join(parts, " ")+")")
+	}
+	return strings.Join(clauses, " OR ")
 }
 
 func buildFTSPrefixQuery(tokens []string) string {
