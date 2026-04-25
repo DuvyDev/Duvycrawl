@@ -23,7 +23,6 @@ crawler:
   parallelism_per_domain: 4
   disable_cookies: false
   max_idle_conns_per_host: 150
-  proxy_url: ""
   domain_stats_flush_interval: 30s
   auto_start: true
 
@@ -62,9 +61,10 @@ logging:
 | `parallelism_per_domain` | int | `4` | Max concurrent requests to the same domain. |
 | `disable_cookies` | bool | `false` | Disable cookie jar. |
 | `max_idle_conns_per_host` | int | `150` | Max idle keep-alive connections per host. |
-| `proxy_url` | string | `""` | Proxy URL. Supports `http://`, `https://`, `socks5://`, `socks5h://`. |
 | `domain_stats_flush_interval` | duration | `30s` | How often domain stats are flushed from memory to SQLite. |
 | `auto_start` | bool | `true` | Automatically start crawling on launch. Set to `false` to start via API. |
+
+> **Note**: Proxy is configured via `PROXY_URL` environment variable, not YAML. Supports `http://`, `https://`, `socks5://`, `socks5h://`. |
 
 ### `storage` — Persistence
 
@@ -90,14 +90,16 @@ logging:
 
 ## Cloudflare Warp (SOCKS5)
 
-Set the proxy in `configs/default.yaml`:
+Set the `PROXY_URL` environment variable in `docker-compose.yml`:
 
 ```yaml
-crawler:
-  proxy_url: "socks5h://warp:1080"
+services:
+  duvycrawl:
+    environment:
+      - PROXY_URL=socks5h://warp:1080
 ```
 
-Then uncomment the `warp` service in `docker-compose.yml`. The crawler will route all traffic through Warp while the API remains directly accessible.
+Then uncomment the `warp` service and the dependency in `docker-compose.yml`. The crawler will route all traffic through Warp while the API remains directly accessible.
 
 ---
 

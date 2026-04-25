@@ -80,6 +80,7 @@ func NewEngine(
 	front *frontier.Frontier,
 	limiter *ratelimit.DomainLimiter,
 	domainStats *DomainStatsCollector,
+	proxyURL string,
 	logger *slog.Logger,
 ) *Engine {
 	e := &Engine{
@@ -87,7 +88,7 @@ func NewEngine(
 		store:       store,
 		batchWriter: batchWriter,
 		frontier:    front,
-		fetcher:     NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, cfg.ProxyURL, logger),
+		fetcher:     NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, proxyURL, logger),
 		parser:      NewParser(),
 		robots:      NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:     limiter,

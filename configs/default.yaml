@@ -41,6 +41,9 @@ crawler:
   # Max idle keep-alive connections per host. Increase for high throughput
   # when crawling the same domains repeatedly.
   max_idle_conns_per_host: 150
+  # NOTE: Proxy is now configured via PROXY_URL environment variable.
+  # Use docker-compose.yml environment section or set PROXY_URL externally.
+  # Supports: http://, https://, socks5://, socks5h://
   # How often per-domain crawl statistics are flushed from memory to SQLite.
   # Shorter intervals = fresher stats but more DB writes.
   # Longer intervals = fewer writes but possible data loss on crash.

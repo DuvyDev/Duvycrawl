@@ -51,7 +51,6 @@ crawler:
   max_depth: 1
   seed_domains_only: true
   auto_start: true
-  proxy_url: ""               # "socks5h://warp:1080" for Cloudflare Warp
 
 storage:
   db_path: "./data/duvycrawl.db"
@@ -63,11 +62,13 @@ api:
 
 ### Optional: Cloudflare Warp
 
-Uncomment the `warp` service in `docker-compose.yml` and set:
+Uncomment the `warp` service in `docker-compose.yml` and set `PROXY_URL`:
 
 ```yaml
-crawler:
-  proxy_url: "socks5h://warp:1080"
+services:
+  duvycrawl:
+    environment:
+      - PROXY_URL=socks5h://warp:1080
 ```
 
 All crawler traffic will be routed through Warp while the API remains directly accessible.

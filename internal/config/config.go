@@ -58,9 +58,6 @@ type CrawlerConfig struct {
 	// connections to keep per host. Higher values improve throughput when
 	// crawling the same domains repeatedly.
 	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
-	// ProxyURL is an optional HTTP/SOCKS5 proxy URL for all requests.
-	// Example: "http://proxy.example.com:8080"
-	ProxyURL string `yaml:"proxy_url"`
 	// FallbackUserAgent is used when the primary User-Agent results in an
 	// empty page or a bot-block response. A Googlebot-style UA is a good
 	// default because some sites serve a simplified static version to bots.
@@ -132,7 +129,6 @@ func DefaultConfig() *Config {
 			ParallelismPerDomain: 2,
 			DisableCookies:       false,
 			MaxIdleConnsPerHost:  100,
-			ProxyURL:                   "",
 			FallbackUserAgent:          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
 			MaxFallbackRetries:         1,
 			DomainStatsFlushInterval:   30 * time.Second,
