@@ -24,9 +24,6 @@ WORKDIR /app
 # Install ca-certificates for HTTPS and tzdata for timezone support.
 RUN apk add --no-cache ca-certificates tzdata
 
-# Create non-root user.
-RUN adduser -D -u 1000 crawler
-
 # Copy binary from builder.
 COPY --from=builder /app/duvycrawl /app/duvycrawl
 
@@ -34,9 +31,7 @@ COPY --from=builder /app/duvycrawl /app/duvycrawl
 COPY --from=builder /app/configs/default.yaml /app/configs/default.yaml
 
 # Create data directory for SQLite.
-RUN mkdir -p /app/data && chown -R crawler:crawler /app/data
-
-USER crawler
+RUN mkdir -p /app/data
 
 EXPOSE 8080
 
