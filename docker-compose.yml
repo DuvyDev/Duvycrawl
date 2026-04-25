@@ -15,7 +15,7 @@ services:
   #      - net.ipv6.conf.all.disable_ipv6=0
   #      - net.ipv4.conf.all.src_valid_mark=1
   #    volumes:
-  #      - ./data:/var/lib/cloudflare-warp
+  #      - ./warp:/var/lib/cloudflare-warp
   #   networks:
   #     - duvycrawl
 
@@ -27,8 +27,8 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data:/app/data
-      - ./configs:/app/configs:ro
+      - ./crawl/data:/app/data
+      - ./crawl/configs:/app/configs:ro
     environment:
       - TZ=UTC
 #      - PROXY_URL=socks5://warp:1080
