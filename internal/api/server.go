@@ -71,6 +71,9 @@ func NewServer(
 	mux.HandleFunc("POST /api/v1/crawler/stop", handlers.StopCrawler)
 	mux.HandleFunc("GET /api/v1/crawler/status", handlers.CrawlerStatus)
 
+	// Maintenance
+	mux.HandleFunc("POST /api/v1/maintenance/rank", handlers.UpdateRankings)
+
 	// Apply middleware stack.
 	handler := chain(
 		mux,

@@ -130,6 +130,9 @@ type Storage interface {
 	// Vacuum runs SQLite's VACUUM command to reclaim disk space.
 	Vacuum(ctx context.Context) error
 
+	// UpdatePageRankings recalculates the referring_domains score for pages asynchronously.
+	UpdatePageRankings(ctx context.Context) error
+
 	// Close gracefully shuts down the storage layer.
 	Close() error
 }

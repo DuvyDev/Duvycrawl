@@ -89,12 +89,13 @@ type SearchResult struct {
 	CrawledAt   time.Time  `json:"crawled_at"`
 	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
 	PublishedAt *time.Time `json:"published_at,omitempty"`
-	Rank        float64    `json:"rank"` // Composite relevance score, higher = better
-	SchemaType  string     `json:"schema_type,omitempty"`
-	SchemaImage string     `json:"schema_image,omitempty"`
-	SchemaAuthor string    `json:"schema_author,omitempty"`
-	SchemaKeywords string  `json:"schema_keywords,omitempty"`
-	SchemaRating float64   `json:"schema_rating,omitempty"`
+	Rank             float64    `json:"rank"` // Composite relevance score, higher = better
+	ReferringDomains int        `json:"referring_domains"`
+	SchemaType       string     `json:"schema_type,omitempty"`
+	SchemaImage      string     `json:"schema_image,omitempty"`
+	SchemaAuthor     string    `json:"schema_author,omitempty"`
+	SchemaKeywords   string  `json:"schema_keywords,omitempty"`
+	SchemaRating     float64   `json:"schema_rating,omitempty"`
 }
 
 // ImageRecord represents an image discovered during crawling.

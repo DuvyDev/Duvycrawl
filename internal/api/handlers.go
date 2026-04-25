@@ -552,3 +552,21 @@ func (h *Handlers) GetOutlinks(w http.ResponseWriter, r *http.Request) {
 		Results: results,
 	})
 }
+
+// --- Maintenance ---
+
+// UpdateRankings triggers an asynchronous recalculation of referring domains for all pages.
+func (h *Handlers) UpdateRankings(w http.ResponseWriter, r *http.Request) {
+	// Execute async to not block the HTTP response
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := h.store.UpdatePageRankings(ctx); err != nil {
+			h.logger.Error("failed to update page rankings", "error", err)
+		}
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"message": "page ranking update initiated in background",
+	})
+}

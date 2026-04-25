@@ -169,4 +169,8 @@ var migrations = []string{
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_source_target ON links(source_id, target_url)`,
 	`CREATE INDEX IF NOT EXISTS idx_links_target_url ON links(target_url)`,
 	`CREATE INDEX IF NOT EXISTS idx_links_source_id ON links(source_id)`,
+
+	// --- Backlinks Scoring ---
+	`ALTER TABLE pages ADD COLUMN referring_domains INTEGER NOT NULL DEFAULT 0`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
 }

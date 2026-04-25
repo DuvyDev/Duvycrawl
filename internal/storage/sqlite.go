@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -635,7 +636,8 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.schema_image,
 			p.schema_author,
 			p.schema_keywords,
-			p.schema_rating
+			p.schema_rating,
+			p.referring_domains
 		FROM pages_fts
 		JOIN pages p ON p.id = pages_fts.rowid
 		LEFT JOIN domains d ON d.domain = p.domain
@@ -684,6 +686,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			&candidate.SchemaAuthor,
 			&candidate.SchemaKeywords,
 			&schemaRating,
+			&candidate.ReferringDomains,
 		); err != nil {
 			return nil, fmt.Errorf("scanning FTS candidate: %w", err)
 		}
@@ -798,7 +801,8 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.schema_image,
 			p.schema_author,
 			p.schema_keywords,
-			p.schema_rating
+			p.schema_rating,
+			p.referring_domains
 		FROM pages p
 		LEFT JOIN domains d ON d.domain = p.domain
 		WHERE %s
@@ -854,6 +858,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			&candidate.SchemaAuthor,
 			&candidate.SchemaKeywords,
 			&schemaRating,
+			&candidate.ReferringDomains,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning fuzzy candidate: %w", err)
 		}
@@ -952,7 +957,8 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.schema_image,
 			p.schema_author,
 			p.schema_keywords,
-			p.schema_rating
+			p.schema_rating,
+			p.referring_domains
 		FROM pages p
 		LEFT JOIN domains d ON d.domain = p.domain
 		WHERE
@@ -1027,6 +1033,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&candidate.SchemaAuthor,
 			&candidate.SchemaKeywords,
 			&schemaRating,
+			&candidate.ReferringDomains,
 		); err != nil {
 			return nil, fmt.Errorf("scanning navigational candidate: %w", err)
 		}
@@ -1180,6 +1187,13 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	score += domainTokenWeight*domainAvg + domainCoverageWeight*domainCoverage
 	score += 130.0*urlAvg + 40.0*urlCoverage
 	score += 25.0*schemaKeywordsAvg + 15.0*schemaKeywordsCoverage
+
+	// Referring Domains logarithmic boost
+	// math.Log1p(x) = ln(1 + x). 1 domain = ~0.69, 10 domains = ~2.4, 100 domains = ~4.6
+	// Multiply by a weight that makes a highly linked page rank above a similar content page.
+	if candidate.ReferringDomains > 0 {
+		score += math.Log1p(float64(candidate.ReferringDomains)) * 140.0
+	}
 
 	if len(query.tokens) > 0 && titleExact == len(query.tokens) {
 		score += 180.0
@@ -2421,6 +2435,49 @@ func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
 		return fmt.Errorf("vacuuming database: %w", err)
 	}
 	s.logger.Info("database vacuumed successfully")
+	return nil
+}
+
+// UpdatePageRankings recalculates the referring_domains score for pages.
+// It uses a batched approach to avoid locking the database for too long.
+func (s *SQLiteStorage) UpdatePageRankings(ctx context.Context) error {
+	s.logger.Info("starting page ranking update (referring domains)")
+	start := time.Now()
+
+	// 1. Reset all referring_domains to 0. We'll update the ones that have links.
+	// This is fast enough as a single transaction if the DB isn't massive,
+	// but can be optimized later if needed.
+	_, err := s.writeDB.ExecContext(ctx, `UPDATE pages SET referring_domains = 0`)
+	if err != nil {
+		return fmt.Errorf("resetting referring_domains: %w", err)
+	}
+
+	// 2. We can update all pages that have backlinks in a single UPDATE ... FROM query.
+	// SQLite supports UPDATE ... FROM since version 3.33.0.
+	query := `
+		WITH domain_counts AS (
+			SELECT
+				l.target_url,
+				COUNT(DISTINCT p_source.domain) as unique_domains
+			FROM links l
+			JOIN pages p_source ON p_source.id = l.source_id
+			JOIN pages p_target ON p_target.url = l.target_url
+			WHERE p_source.domain != p_target.domain
+			GROUP BY l.target_url
+		)
+		UPDATE pages
+		SET referring_domains = domain_counts.unique_domains
+		FROM domain_counts
+		WHERE pages.url = domain_counts.target_url;
+	`
+
+	res, err := s.writeDB.ExecContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("updating referring_domains: %w", err)
+	}
+
+	affected, _ := res.RowsAffected()
+	s.logger.Info("page ranking update completed", "affected", affected, "duration", time.Since(start))
 	return nil
 }
 
