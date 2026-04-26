@@ -122,11 +122,9 @@ func (e *Engine) Start(ctx context.Context) {
 		"seed_domains_only", e.cfg.SeedDomainsOnly,
 	)
 
-	// Load seed domains for filtering if SeedDomainsOnly is enabled.
-	if e.cfg.SeedDomainsOnly {
-		if err := e.loadSeedDomains(ctx); err != nil {
-			e.logger.Error("failed to load seed domains for filtering", "error", err)
-		}
+	// Load seed domains so we can tag pages with IsSeed.
+	if err := e.loadSeedDomains(ctx); err != nil {
+		e.logger.Error("failed to load seed domains", "error", err)
 	}
 
 	// Launch workers.
@@ -360,6 +358,7 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		SchemaAuthor:      truncateString(parsed.SchemaAuthor, 500),
 		SchemaKeywords:    truncateString(parsed.SchemaKeywords, 1000),
 		SchemaRating:      parsed.SchemaRating,
+		IsSeed:            e.seedDomains[job.Domain],
 	}
 
 	e.batchWriter.WritePage(page)
@@ -527,9 +526,6 @@ func (e *Engine) loadSeedDomains(ctx context.Context) error {
 // RefreshSeedDomains reloads the seed domains set.
 // Call this after adding/removing seeds via the API.
 func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
-	if !e.cfg.SeedDomainsOnly {
-		return nil
-	}
 	return e.loadSeedDomains(ctx)
 }
 

@@ -73,7 +73,7 @@ func run() error {
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
-	batchWriter := storage.NewBatchWriter(store.WriteDB(), logger)
+	batchWriter := storage.NewBatchWriter(store.WriteContentDB(), store.GraphDB(), logger)
 	defer batchWriter.Stop()
 
 	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)

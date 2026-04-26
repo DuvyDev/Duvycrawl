@@ -31,6 +31,7 @@ type Page struct {
 	SchemaAuthor      string    `json:"schema_author,omitempty"`      // JSON-LD author name
 	SchemaKeywords    string    `json:"schema_keywords,omitempty"`    // JSON-LD keywords (comma-separated)
 	SchemaRating      float64   `json:"schema_rating,omitempty"`      // JSON-LD aggregateRating value
+	IsSeed            bool      `json:"is_seed"`                      // True if domain is a seed domain
 }
 
 // CrawlJob represents a URL queued for crawling in the frontier.

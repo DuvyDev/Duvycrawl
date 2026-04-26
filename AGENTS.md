@@ -33,11 +33,15 @@ Duvycrawl/
 
 ## Decisiones arquitectónicas importantes
 
-### 1. SQLite + modernc.org/sqlite
+### 1. Arquitectura Multi-DB (SQLite + modernc.org/sqlite)
 
 Usamos `modernc.org/sqlite` (implementación pura en Go, sin CGO) con WAL mode habilitado.
-- **Ventaja**: compilación simple, sin dependencias de sistema.
-- **Trade-off**: `bm25()` de FTS5 devuelve 0 en esta implementación (bug conocido), por eso usamos ranking híbrido con CTE + ROW_NUMBER() + boosts manuales.
+Para evitar bloqueos de concurrencia (`SQLITE_BUSY`) entre las lecturas rápidas del buscador y las escrituras masivas del crawler, el almacenamiento está segmentado en 3 archivos independientes:
+- `content.db`: Almacena `pages` y el índice FTS5. Optimizado para búsquedas.
+- `crawler.db`: Almacena el estado asíncrono (`crawl_queue`, `domains`).
+- `graph.db`: Dedicado exclusivamente a la topología (`links`) con sincronización relajada para máxima velocidad de inserción.
+
+**Trade-off conocido**: `bm25()` de FTS5 devuelve 0 en esta implementación (bug conocido), por eso usamos ranking híbrido con CTE + ROW_NUMBER() + boosts manuales. Además, para calcular el PageRank cruzando datos, usamos `ATTACH DATABASE 'graph.db' AS graph` temporalmente sobre la conexión de `content.db`.
 
 ### 2. Bloom Filter para deduplicación
 

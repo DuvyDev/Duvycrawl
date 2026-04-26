@@ -96,7 +96,7 @@ crawler:
   auto_start: true
 
 storage:
-  db_path: "./data/duvycrawl.db"
+  db_path: "./data"
 
 api:
   host: "0.0.0.0"

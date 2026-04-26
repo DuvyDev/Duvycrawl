@@ -45,6 +45,8 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.tokens)},
 		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q.tokens)},
 		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.tokens)},
+		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q.tokens)},
+		{mode: searchModeFTSCore2, ftsQuery: buildFTSCore2Query(q.tokens)},
 		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.tokens)},
 	}
 
@@ -198,7 +200,7 @@ func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searc
 		SELECT id, SUBSTR(content, 1, 4000) FROM pages WHERE id IN (%s)
 	`, strings.Join(ids, ","))
 
-	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("loading result bodies: %w", err)
 	}
@@ -220,10 +222,13 @@ func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searc
 			if candidates[i].Snippet == "" {
 				if candidates[i].Description != "" {
 					candidates[i].Snippet = candidates[i].Description
-				} else if len(body) > 240 {
-					candidates[i].Snippet = body[:240]
 				} else {
-					candidates[i].Snippet = body
+					runes := []rune(body)
+					if len(runes) > 240 {
+						candidates[i].Snippet = string(runes[:240])
+					} else {
+						candidates[i].Snippet = body
+					}
 				}
 			}
 		}
@@ -270,7 +275,7 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 	}
 
 	var totalDocs float64
-	if err := s.readDB.QueryRowContext(ctx, `SELECT MAX(rowid) FROM pages_fts`).Scan(&totalDocs); err != nil {
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT MAX(rowid) FROM pages_fts`).Scan(&totalDocs); err != nil {
 		totalDocs = 10000.0
 	}
 	if totalDocs <= 0 {
@@ -291,7 +296,7 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 	}
 
 	query := fmt.Sprintf(`SELECT term, doc FROM pages_fts_vocab WHERE term IN (%s)`, strings.Join(placeholders, ","))
-	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		s.logger.Warn("failed to fetch IDF map", "error", err)
 		return idfMap, nil
@@ -311,7 +316,7 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 
 func (s *SQLiteStorage) countFTSCandidates(ctx context.Context, ftsQuery string) (int, error) {
 	var total int
-	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
 		return 0, err
 	}
 	return total, nil
@@ -336,7 +341,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	titlePrefix := query.lowered + "%"
 	titleContains := "%" + query.lowered + "%"
 
-	scoreExpr := "rank * 100.0" +
+	scoreExpr := "0.0" +
 		" + CASE WHEN LOWER(p.title) = ? THEN 500.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.title) LIKE ? THEN 300.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.title) LIKE ? THEN 180.0 ELSE 0 END" +
@@ -346,19 +351,30 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		" + CASE WHEN LOWER(p.url) LIKE ? THEN 100.0 ELSE 0 END" +
 		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 1 THEN 500.0 ELSE 0 END" +
 		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) BETWEEN 2 AND 3 THEN 150.0 ELSE 0 END" +
-		" + CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 40.0 ELSE 0 END" +
+		" + CASE WHEN p.is_seed = 1 THEN 40.0 ELSE 0 END" +
 		" + MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))"
 
 	urlContains := "%" + query.lowered + "%"
 	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, domainPrefix, domainPrefix, urlContains}
 
+	var scoreTokens []string
 	for _, token := range query.tokens {
-		if len(token) > 2 {
-			scoreExpr += " + CASE WHEN LOWER(p.title) LIKE ? THEN 40.0 ELSE 0 END"
-			args = append(args, "%"+token+"%")
-			scoreExpr += " + CASE WHEN LOWER(p.h1) LIKE ? THEN 25.0 ELSE 0 END"
-			args = append(args, "%"+token+"%")
+		if len([]rune(token)) > 3 {
+			scoreTokens = append(scoreTokens, token)
 		}
+	}
+	if len(scoreTokens) == 0 {
+		scoreTokens = query.tokens
+	}
+	if len(scoreTokens) > 4 {
+		scoreTokens = scoreTokens[:4]
+	}
+
+	for _, token := range scoreTokens {
+		scoreExpr += " + CASE WHEN LOWER(p.title) LIKE ? THEN 40.0 ELSE 0 END"
+		args = append(args, "%"+token+"%")
+		scoreExpr += " + CASE WHEN LOWER(p.h1) LIKE ? THEN 25.0 ELSE 0 END"
+		args = append(args, "%"+token+"%")
 	}
 
 	if lang != "" {
@@ -375,7 +391,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 				p.crawled_at
 			FROM pages_fts
 			JOIN pages p ON p.id = pages_fts.rowid
-			LEFT JOIN domains d ON d.domain = p.domain
+			
 			LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 			WHERE pages_fts MATCH ?
 		)
@@ -386,7 +402,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.h1,
 			p.h2,
 			p.description,
-			snippet(pages_fts, 2, '<mark>', '</mark>', '...', 32) AS snippet,
+			'' AS snippet,
 			p.domain,
 			p.language,
 			p.region,
@@ -394,7 +410,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.published_at,
 			p.updated_at,
 			m.sql_score,
-			COALESCE(d.is_seed, 0) AS is_seed,
+			p.is_seed,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
 			p.schema_image,
@@ -411,13 +427,13 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		) m
 		JOIN pages p ON p.id = m.id
 		JOIN pages_fts ON pages_fts.rowid = m.id
-		LEFT JOIN domains d ON d.domain = p.domain
+		
 		WHERE pages_fts MATCH ?
 		ORDER BY (m.sql_score + m.clicks * 150.0) DESC, m.crawled_at DESC
 	`, scoreExpr)
 	args = append(args, query.raw, matchQuery, limit, matchQuery)
 
-	rows, err := s.readDB.QueryContext(ctx, searchSQL, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -564,11 +580,11 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.updated_at,
 			(%s
 				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 50.0 ELSE 0 END
-				+ CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 20.0 ELSE 0 END
+				+ CASE WHEN p.is_seed = 1 THEN 20.0 ELSE 0 END
 				+ MAX(0.0, 15.0 - 0.15 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
 				%s
 			) AS sql_score,
-			COALESCE(d.is_seed, 0) AS is_seed,
+			p.is_seed,
 			LENGTH(p.content) AS content_len,
 			COUNT(*) OVER() AS total_count,
 			p.schema_type,
@@ -580,7 +596,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			COALESCE(p.pagerank, 1.0) AS pagerank,
 			COALESCE(sc.clicks, 0) AS clicks
 		FROM pages p
-		LEFT JOIN domains d ON d.domain = p.domain
+		
 		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE %s
 		ORDER BY (sql_score + COALESCE(sc.clicks, 0) * 150.0) DESC, p.crawled_at DESC
@@ -595,7 +611,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 	args = append(args, whereArgs...)
 	args = append(args, limit)
 
-	rows, err := s.readDB.QueryContext(ctx, querySQL, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("querying fuzzy candidates: %w", err)
 	}
@@ -730,11 +746,11 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
 				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 500.0 ELSE 0 END
-				+ CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 20.0 ELSE 0 END
+				+ CASE WHEN p.is_seed = 1 THEN 20.0 ELSE 0 END
 				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
 				+ CASE WHEN ? != '' AND p.language = ? THEN 20.0 ELSE 0 END
 			) AS sql_score,
-			COALESCE(d.is_seed, 0) AS is_seed,
+			p.is_seed,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
 			p.schema_image,
@@ -745,7 +761,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			COALESCE(p.pagerank, 1.0) AS pagerank,
 			COALESCE(sc.clicks, 0) AS clicks
 		FROM pages p
-		LEFT JOIN domains d ON d.domain = p.domain
+		
 		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE
 			(? != '' AND LOWER(p.domain) = ?)
@@ -781,7 +797,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		limit,
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, querySQL, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying navigational candidates: %w", err)
 	}
@@ -1132,8 +1148,12 @@ func searchModeBonus(mode searchMode) float64 {
 		return 110.0
 	case searchModeFTSPrefix:
 		return 90.0
+	case searchModeFTSCore:
+		return 70.0
+	case searchModeFTSCore2:
+		return 50.0
 	case searchModeFTSRelaxed:
-		return 40.0
+		return 30.0
 	default:
 		return 0.0
 	}
@@ -1480,8 +1500,8 @@ func buildFTSExactQuery(tokens []string) string {
 
 func buildFTSMajorityQuery(tokens []string) string {
 	n := len(tokens)
-	if n < 3 {
-		return "" // Majority fallback only makes sense for 3+ words.
+	if n < 3 || n > 6 {
+		return "" // Majority fallback only makes sense for 3-6 words.
 	}
 
 	var clauses []string
@@ -1516,20 +1536,106 @@ func buildFTSPrefixQuery(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
+func buildFTSCoreQuery(tokens []string) string {
+	if len(tokens) <= 3 {
+		return "" // Only useful for queries with > 3 words
+	}
+
+	var filtered []string
+	for _, t := range tokens {
+		if len([]rune(t)) > 3 {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = tokens
+	}
+
+	ordered := append([]string(nil), filtered...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
+	})
+
+	core := ordered
+	if len(core) > 3 {
+		core = core[:3] // Take the 3 longest words
+	}
+
+	parts := make([]string, 0, len(core))
+	for _, token := range core {
+		parts = append(parts, quoteFTS5Token(token))
+	}
+	// Implicit AND between bare words in FTS5
+	return strings.Join(parts, " ")
+}
+
+func buildFTSCore2Query(tokens []string) string {
+	if len(tokens) <= 2 {
+		return "" // Only useful for queries with > 2 words
+	}
+
+	var filtered []string
+	for _, t := range tokens {
+		if len([]rune(t)) > 3 {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = tokens
+	}
+
+	ordered := append([]string(nil), filtered...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
+	})
+
+	core := ordered
+	if len(core) > 2 {
+		core = core[:2] // Take the 2 longest words
+	}
+
+	parts := make([]string, 0, len(core))
+	for _, token := range core {
+		parts = append(parts, quoteFTS5Token(token))
+	}
+	// Implicit AND between bare words in FTS5
+	return strings.Join(parts, " ")
+}
+
 func buildFTSRelaxedQuery(tokens []string) string {
 	if len(tokens) == 0 {
 		return ""
 	}
 
+	var filtered []string
+	for _, t := range tokens {
+		if len([]rune(t)) > 3 {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = tokens
+	}
+
+	ordered := append([]string(nil), filtered...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
+	})
+
+	significant := ordered
+	if len(significant) > 4 {
+		significant = significant[:4] // Limit OR fallback to top 4 longest words
+	}
+
 	var parts []string
-	seen := make(map[string]struct{}, len(tokens)*2)
-	for _, token := range tokens {
+	seen := make(map[string]struct{}, len(significant)*2)
+	for _, token := range significant {
 		exact := quoteFTS5Token(token)
 		if _, ok := seen[exact]; !ok {
 			seen[exact] = struct{}{}
 			parts = append(parts, exact)
 		}
-		if len([]rune(token)) >= 3 {
+		if len([]rune(token)) >= 4 {
 			prefix := escapeFTS5Token(token) + "*"
 			if _, ok := seen[prefix]; !ok {
 				seen[prefix] = struct{}{}
@@ -1665,7 +1771,7 @@ func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url strin
 		return nil
 	}
 
-	_, err := s.writeDB.ExecContext(ctx, `
+	_, err := s.writeContentDB.ExecContext(ctx, `
 		INSERT INTO search_clicks (query, url, clicks)
 		VALUES (?, ?, 1)
 		ON CONFLICT(query, url) DO UPDATE SET clicks = clicks + 1
@@ -1681,7 +1787,7 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	// Count total matches.
 	var total int
 	countQuery := `SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH ?`
-	if err := s.readDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
+	if err := s.readContentDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting image results for %q: %w", query, err)
 	}
 
@@ -1700,7 +1806,7 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	LIMIT ? OFFSET ?
 	`
 
-	rows, err := s.readDB.QueryContext(ctx, searchQuery, query, limit, offset)
+	rows, err := s.readContentDB.QueryContext(ctx, searchQuery, query, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("searching images for %q: %w", query, err)
 	}

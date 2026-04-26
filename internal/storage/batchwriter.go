@@ -18,8 +18,9 @@ import (
 // It is safe for concurrent use — workers call the Write* methods from
 // multiple goroutines and the internal mutex serializes buffer access.
 type BatchWriter struct {
-	writeDB *sql.DB
-	logger  *slog.Logger
+	writeContentDB *sql.DB
+	graphDB        *sql.DB
+	logger         *slog.Logger
 
 	mu       sync.Mutex
 	pages    []*Page
@@ -38,16 +39,17 @@ type BatchWriter struct {
 
 // NewBatchWriter creates a background batch writer. Call Stop() on shutdown
 // to flush any remaining buffered data.
-func NewBatchWriter(writeDB *sql.DB, logger *slog.Logger) *BatchWriter {
+func NewBatchWriter(writeContentDB, graphDB *sql.DB, logger *slog.Logger) *BatchWriter {
 	bw := &BatchWriter{
-		writeDB:       writeDB,
-		logger:        logger.With("component", "batch_writer"),
-		links:         make(map[string][]OutgoingLink),
-		maxPages:      100,
-		maxLinks:      500,
-		maxImages:     500,
-		flushInterval: 2 * time.Second,
-		done:          make(chan struct{}),
+		writeContentDB: writeContentDB,
+		graphDB:        graphDB,
+		logger:         logger.With("component", "batch_writer"),
+		links:          make(map[string][]OutgoingLink),
+		maxPages:       100,
+		maxLinks:       500,
+		maxImages:      500,
+		flushInterval:  2 * time.Second,
+		done:           make(chan struct{}),
 	}
 	bw.wg.Add(1)
 	go bw.loop()
@@ -145,7 +147,7 @@ func (bw *BatchWriter) flushLocked() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	tx, err := bw.writeDB.BeginTx(ctx, nil)
+	tx, err := bw.writeContentDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin batch transaction: %w", err)
 	}
@@ -248,7 +250,13 @@ func (bw *BatchWriter) flushLocked() error {
 	// 3. Insert outgoing links
 	// -----------------------------------------------------------------
 	if len(bw.links) > 0 {
-		linkStmt, err := tx.PrepareContext(ctx, `
+		graphTx, err := bw.graphDB.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin graph transaction: %w", err)
+		}
+		defer graphTx.Rollback()
+
+		linkStmt, err := graphTx.PrepareContext(ctx, `
 			INSERT OR IGNORE INTO links (source_id, source_url, target_url, anchor_text)
 			VALUES (?, ?, ?, ?)
 		`)
@@ -260,7 +268,7 @@ func (bw *BatchWriter) flushLocked() error {
 		for sourceURL, links := range bw.links {
 			sourceID, ok := urlToID[sourceURL]
 			if !ok {
-				// Fallback: query DB directly within the transaction.
+				// Fallback: query DB directly from writeContentDB transaction
 				if err := tx.QueryRowContext(ctx,
 					"SELECT id FROM pages WHERE url = ?", sourceURL,
 				).Scan(&sourceID); err != nil {
@@ -269,7 +277,7 @@ func (bw *BatchWriter) flushLocked() error {
 				}
 			}
 
-			if _, err := tx.ExecContext(ctx, `DELETE FROM links WHERE source_id = ?`, sourceID); err != nil {
+			if _, err := graphTx.ExecContext(ctx, `DELETE FROM links WHERE source_id = ?`, sourceID); err != nil {
 				bw.logger.Warn("failed to delete old links", "source_id", sourceID, "error", err)
 			}
 
@@ -278,6 +286,10 @@ func (bw *BatchWriter) flushLocked() error {
 					bw.logger.Warn("batch link insert failed", "source", sourceURL, "target", link.TargetURL, "error", err)
 				}
 			}
+		}
+
+		if err := graphTx.Commit(); err != nil {
+			return fmt.Errorf("commit graph transaction: %w", err)
 		}
 	}
 

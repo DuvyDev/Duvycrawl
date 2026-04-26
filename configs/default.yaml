@@ -5,7 +5,7 @@ crawler:
   # Number of concurrent crawl workers
   workers: 300
   # Maximum link depth to follow from seed pages
-  max_depth: 1
+  max_depth: 2
   # HTTP request timeout per page
   request_timeout: 15s
   # Minimum delay between requests to the same domain
@@ -53,8 +53,8 @@ crawler:
   auto_start: true
 
 storage:
-  # Path to the SQLite database file
-  db_path: "./data/duvycrawl.db"
+  # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
+  db_path: "./data"
 
 api:
   # Host to bind the API server

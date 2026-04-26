@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,8 +13,8 @@ import (
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating, is_seed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
@@ -35,7 +36,8 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 			schema_image     = excluded.schema_image,
 			schema_author    = excluded.schema_author,
 			schema_keywords  = excluded.schema_keywords,
-			schema_rating    = excluded.schema_rating
+			schema_rating    = excluded.schema_rating,
+			is_seed          = excluded.is_seed
 	`
 
 	var publishedAt any
@@ -47,13 +49,13 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 		schemaRating = page.SchemaRating
 	}
 
-	_, err := s.writeDB.ExecContext(ctx, query,
+	_, err := s.writeContentDB.ExecContext(ctx, query,
 		page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
 		page.Content, page.Language, page.Region,
 		page.StatusCode, page.ContentHash, page.URLFingerprint,
 		publishedAt, page.CrawledAt,
 		page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
-		page.SchemaAuthor, page.SchemaKeywords, schemaRating,
+		page.SchemaAuthor, page.SchemaKeywords, schemaRating, page.IsSeed,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
@@ -82,7 +84,7 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 	var publishedAt sql.NullTime
 	var schemaRating sql.NullFloat64
 
-	err := s.readDB.QueryRowContext(ctx, query, arg).Scan(
+	err := s.readContentDB.QueryRowContext(ctx, query, arg).Scan(
 		&p.ID, &p.URL, &p.Domain, &p.Title, &p.H1, &p.H2, &p.Description,
 		&p.Content, &p.StatusCode, &p.ContentHash, &p.URLFingerprint,
 		&publishedAt, &crawledAt, &createdAt, &updatedAt,
@@ -116,7 +118,7 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 
 // GetAllPageURLs returns every crawled URL and its structural fingerprint.
 func (s *SQLiteStorage) GetAllPageURLs(ctx context.Context) (urls []string, fingerprints []string, err error) {
-	rows, err := s.readDB.QueryContext(ctx, "SELECT url, url_fingerprint FROM pages")
+	rows, err := s.readContentDB.QueryContext(ctx, "SELECT url, url_fingerprint FROM pages")
 	if err != nil {
 		return nil, nil, fmt.Errorf("querying all page URLs: %w", err)
 	}
@@ -150,7 +152,7 @@ func (s *SQLiteStorage) GetStalePages(ctx context.Context, olderThan time.Time, 
 		LIMIT ?
 	`
 
-	rows, err := s.readDB.QueryContext(ctx, query, olderThan, limit)
+	rows, err := s.readContentDB.QueryContext(ctx, query, olderThan, limit)
 	if err != nil {
 		return nil, fmt.Errorf("querying stale pages: %w", err)
 	}
@@ -197,7 +199,7 @@ func (s *SQLiteStorage) GetFreshURLs(ctx context.Context, urls []string, newerTh
 		WHERE url IN (%s) AND crawled_at >= ?
 	`, strings.Join(placeholders, ","))
 
-	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying fresh URLs: %w", err)
 	}
@@ -225,7 +227,7 @@ func (s *SQLiteStorage) EnqueueURL(ctx context.Context, job *CrawlJob) error {
 		INSERT OR IGNORE INTO crawl_queue (url, domain, depth, priority, status)
 		VALUES (?, ?, ?, ?, ?)
 	`
-	_, err := s.writeDB.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending)
+	_, err := s.crawlerDB.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("enqueuing URL %q: %w", job.URL, err)
 	}
@@ -238,7 +240,7 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 		return nil
 	}
 
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+	tx, err := s.crawlerDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning enqueue transaction: %w", err)
 	}
@@ -263,7 +265,7 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 // Jobs are ordered by priority (descending), then by FIFO (added_at ascending).
 // Claimed jobs are marked as in_progress.
 func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob, error) {
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+	tx, err := s.crawlerDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning dequeue transaction: %w", err)
 	}
@@ -319,7 +321,7 @@ func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob
 func (s *SQLiteStorage) CompleteJob(ctx context.Context, jobID int64, crawlErr error) error {
 	if crawlErr == nil {
 		// Success â€” remove from queue.
-		_, err := s.writeDB.ExecContext(ctx, `DELETE FROM crawl_queue WHERE id = ?`, jobID)
+		_, err := s.crawlerDB.ExecContext(ctx, `DELETE FROM crawl_queue WHERE id = ?`, jobID)
 		if err != nil {
 			return fmt.Errorf("deleting completed job %d: %w", jobID, err)
 		}
@@ -327,7 +329,7 @@ func (s *SQLiteStorage) CompleteJob(ctx context.Context, jobID int64, crawlErr e
 	}
 
 	// Failure â€” mark as failed with error message, increment retries.
-	_, err := s.writeDB.ExecContext(ctx, `
+	_, err := s.crawlerDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, error_msg = ?, retries = retries + 1
 		WHERE id = ?
@@ -346,7 +348,7 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 		return s.DequeueURLs(ctx, limit)
 	}
 
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+	tx, err := s.crawlerDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning dequeue transaction: %w", err)
 	}
@@ -411,7 +413,7 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 // This is used when a worker cannot process a job due to rate limiting
 // and wants to release it for another worker or a later attempt.
 func (s *SQLiteStorage) ReturnJob(ctx context.Context, jobID int64) error {
-	_, err := s.writeDB.ExecContext(ctx, `
+	_, err := s.crawlerDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, locked_at = NULL
 		WHERE id = ? AND status = ?
@@ -434,7 +436,7 @@ func (s *SQLiteStorage) GetQueueStats(ctx context.Context) (*QueueStats, error) 
 			COUNT(*)
 		FROM crawl_queue
 	`
-	err := s.readDB.QueryRowContext(ctx, query).Scan(
+	err := s.crawlerDB.QueryRowContext(ctx, query).Scan(
 		&stats.Pending, &stats.InProgress, &stats.Done, &stats.Failed, &stats.Total,
 	)
 	if err != nil {
@@ -462,7 +464,7 @@ func (s *SQLiteStorage) FilterExistingURLs(ctx context.Context, urls []string) (
 	}
 
 	query := fmt.Sprintf("SELECT url FROM pages WHERE url IN (%s)", strings.Join(placeholders, ","))
-	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("batch URL lookup: %w", err)
 	}
@@ -493,7 +495,7 @@ func (s *SQLiteStorage) FilterExistingFingerprints(ctx context.Context, fingerpr
 	}
 
 	query := fmt.Sprintf("SELECT url_fingerprint FROM pages WHERE url_fingerprint IN (%s)", strings.Join(placeholders, ","))
-	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("batch fingerprint lookup: %w", err)
 	}
@@ -536,7 +538,7 @@ func (s *SQLiteStorage) UpsertDomain(ctx context.Context, domain *Domain) error 
 		lastCrawled = &domain.LastCrawled
 	}
 
-	_, err := s.writeDB.ExecContext(ctx, query,
+	_, err := s.crawlerDB.ExecContext(ctx, query,
 		domain.Domain, domain.IsSeed, domain.RobotsTxt,
 		robotsFetched, lastCrawled,
 		domain.PagesCount, domain.AvgResponseMs,
@@ -552,7 +554,7 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 	var d Domain
 	var robotsFetched, lastCrawled, createdAt sql.NullTime
 
-	err := s.readDB.QueryRowContext(ctx, `
+	err := s.crawlerDB.QueryRowContext(ctx, `
 		SELECT id, domain, is_seed, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
 		FROM domains WHERE domain = ?
 	`, domainName).Scan(
@@ -581,7 +583,7 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 
 // GetSeedDomains returns all domains marked as seeds.
 func (s *SQLiteStorage) GetSeedDomains(ctx context.Context) ([]Domain, error) {
-	rows, err := s.readDB.QueryContext(ctx, `
+	rows, err := s.crawlerDB.QueryContext(ctx, `
 		SELECT id, domain, is_seed, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
 		FROM domains WHERE is_seed = TRUE
 		ORDER BY domain ASC
@@ -614,7 +616,7 @@ func (s *SQLiteStorage) GetSeedDomains(ctx context.Context) ([]Domain, error) {
 
 // DeleteDomain removes a domain from the seed list (sets is_seed = false).
 func (s *SQLiteStorage) DeleteDomain(ctx context.Context, domainName string) error {
-	result, err := s.writeDB.ExecContext(ctx, `UPDATE domains SET is_seed = FALSE WHERE domain = ?`, domainName)
+	result, err := s.crawlerDB.ExecContext(ctx, `UPDATE domains SET is_seed = FALSE WHERE domain = ?`, domainName)
 	if err != nil {
 		return fmt.Errorf("deleting domain %q: %w", domainName, err)
 	}
@@ -634,22 +636,25 @@ func (s *SQLiteStorage) UpdatePageRankings(ctx context.Context) error {
 	s.logger.Info("starting page ranking update (referring domains)")
 	start := time.Now()
 
-	// 1. Reset all referring_domains to 0. We'll update the ones that have links.
-	// This is fast enough as a single transaction if the DB isn't massive,
-	// but can be optimized later if needed.
-	_, err := s.writeDB.ExecContext(ctx, `UPDATE pages SET referring_domains = 0`)
+	// Use writeContentDB and attach graph.db for cross-database operations
+	graphPath := filepath.Join(s.dataDir, "graph.db")
+	_, err := s.writeContentDB.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS graph", graphPath))
+	if err != nil {
+		return fmt.Errorf("attaching graph database: %w", err)
+	}
+	defer s.writeContentDB.ExecContext(context.Background(), "DETACH DATABASE graph")
+
+	_, err = s.writeContentDB.ExecContext(ctx, `UPDATE pages SET referring_domains = 0`)
 	if err != nil {
 		return fmt.Errorf("resetting referring_domains: %w", err)
 	}
 
-	// 2. We can update all pages that have backlinks in a single UPDATE ... FROM query.
-	// SQLite supports UPDATE ... FROM since version 3.33.0.
 	query := `
 		WITH domain_counts AS (
 			SELECT
 				l.target_url,
 				COUNT(DISTINCT p_source.domain) as unique_domains
-			FROM links l
+			FROM graph.links l
 			JOIN pages p_source ON p_source.id = l.source_id
 			JOIN pages p_target ON p_target.url = l.target_url
 			WHERE p_source.domain != p_target.domain
@@ -661,7 +666,7 @@ func (s *SQLiteStorage) UpdatePageRankings(ctx context.Context) error {
 		WHERE pages.url = domain_counts.target_url;
 	`
 
-	res, err := s.writeDB.ExecContext(ctx, query)
+	res, err := s.writeContentDB.ExecContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("updating referring_domains: %w", err)
 	}
@@ -683,7 +688,7 @@ func (s *SQLiteStorage) computeIterativePageRank(ctx context.Context) error {
 	s.logger.Info("starting iterative PageRank computation")
 	start := time.Now()
 
-	rows, err := s.readDB.QueryContext(ctx, `SELECT id FROM pages`)
+	rows, err := s.readContentDB.QueryContext(ctx, `SELECT id FROM pages`)
 	if err != nil {
 		return err
 	}
@@ -711,9 +716,11 @@ func (s *SQLiteStorage) computeIterativePageRank(ctx context.Context) error {
 	outDegree := make([]int, N)
 	inboundLinks := make([][]int, N)
 
-	edgeRows, err := s.readDB.QueryContext(ctx, `
+	// Since we attached graph in the caller (UpdatePageRankings) on writeContentDB,
+	// we should use writeContentDB to read the joined data.
+	edgeRows, err := s.writeContentDB.QueryContext(ctx, `
 		SELECT l.source_id, p.id 
-		FROM links l
+		FROM graph.links l
 		JOIN pages p ON p.url = l.target_url
 		WHERE l.source_id != p.id
 	`)
@@ -766,7 +773,7 @@ func (s *SQLiteStorage) computeIterativePageRank(ctx context.Context) error {
 		}
 	}
 
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+	tx, err := s.writeContentDB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -799,7 +806,7 @@ func (s *SQLiteStorage) UpsertImages(ctx context.Context, images []ImageRecord) 
 		return nil
 	}
 
-	stmt, err := s.writeDB.PrepareContext(ctx, `
+	stmt, err := s.writeContentDB.PrepareContext(ctx, `
 		INSERT INTO images (url, page_url, page_id, domain, alt_text, title, context, width, height, crawled_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
@@ -839,7 +846,7 @@ func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceUR
 		return nil
 	}
 
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+	tx, err := s.graphDB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning store-links transaction: %w", err)
 	}
@@ -871,7 +878,7 @@ func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceUR
 
 func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limit, offset int) ([]BacklinkResult, int, error) {
 	var total int
-	if err := s.readDB.QueryRowContext(ctx,
+	if err := s.graphDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
@@ -881,12 +888,11 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 		return nil, 0, nil
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, `
-		SELECT l.source_id, l.source_url, COALESCE(p.title, ''), l.anchor_text, l.created_at
-		FROM links l
-		LEFT JOIN pages p ON p.id = l.source_id
-		WHERE l.target_url = ?
-		ORDER BY l.created_at DESC
+	rows, err := s.graphDB.QueryContext(ctx, `
+		SELECT source_id, source_url, anchor_text, created_at
+		FROM links
+		WHERE target_url = ?
+		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
 	`, targetURL, limit, offset)
 	if err != nil {
@@ -895,20 +901,50 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 	defer rows.Close()
 
 	var results []BacklinkResult
+	var sourceIDs []int64
 	for rows.Next() {
 		var r BacklinkResult
 		var createdAt sql.NullTime
-		if err := rows.Scan(&r.SourceID, &r.SourceURL, &r.SourceTitle, &r.AnchorText, &createdAt); err != nil {
+		if err := rows.Scan(&r.SourceID, &r.SourceURL, &r.AnchorText, &createdAt); err != nil {
 			return nil, 0, fmt.Errorf("scanning backlink: %w", err)
 		}
 		if createdAt.Valid {
 			r.CreatedAt = createdAt.Time
 		}
 		results = append(results, r)
+		sourceIDs = append(sourceIDs, r.SourceID)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("iterating backlinks: %w", err)
+	}
+
+	// Fetch titles from content.db
+	if len(sourceIDs) > 0 {
+		placeholders := make([]string, len(sourceIDs))
+		args := make([]any, len(sourceIDs))
+		for i, id := range sourceIDs {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		query := fmt.Sprintf("SELECT id, title FROM pages WHERE id IN (%s)", strings.Join(placeholders, ","))
+		titleRows, err := s.readContentDB.QueryContext(ctx, query, args...)
+		if err == nil {
+			defer titleRows.Close()
+			titleMap := make(map[int64]string)
+			for titleRows.Next() {
+				var id int64
+				var title string
+				if err := titleRows.Scan(&id, &title); err == nil {
+					titleMap[id] = title
+				}
+			}
+			for i := range results {
+				if t, ok := titleMap[results[i].SourceID]; ok {
+					results[i].SourceTitle = t
+				}
+			}
+		}
 	}
 
 	return results, total, nil
@@ -916,7 +952,7 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 
 func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, offset int) ([]OutlinkResult, int, error) {
 	var total int
-	if err := s.readDB.QueryRowContext(ctx,
+	if err := s.graphDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM links WHERE source_id = ?`, pageID,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting outlinks for page %d: %w", pageID, err)
@@ -926,7 +962,7 @@ func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, of
 		return nil, 0, nil
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, `
+	rows, err := s.graphDB.QueryContext(ctx, `
 		SELECT target_url, anchor_text, created_at
 		FROM links
 		WHERE source_id = ?
@@ -960,7 +996,7 @@ func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, of
 
 func (s *SQLiteStorage) GetBacklinkCount(ctx context.Context, targetURL string) (int, error) {
 	var count int
-	if err := s.readDB.QueryRowContext(ctx,
+	if err := s.graphDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)

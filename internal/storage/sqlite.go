@@ -27,12 +27,15 @@ import (
 // This eliminates SQLITE_BUSY errors under high concurrency while
 // maximizing read throughput in WAL mode.
 type SQLiteStorage struct {
-	readDB  *sql.DB
-	writeDB *sql.DB
-	logger  *slog.Logger
-	dbPath  string
+	readContentDB  *sql.DB
+	writeContentDB *sql.DB
+	crawlerDB      *sql.DB
+	graphDB        *sql.DB
+	logger         *slog.Logger
+	dataDir        string
 }
 
+// ... skipped types, keeping them below ...
 type searchMode string
 
 const (
@@ -42,6 +45,8 @@ const (
 	searchModeFTSExact     searchMode = "fts_exact"
 	searchModeFTSMajority  searchMode = "fts_majority"
 	searchModeFTSPrefix    searchMode = "fts_prefix"
+	searchModeFTSCore      searchMode = "fts_core"
+	searchModeFTSCore2     searchMode = "fts_core2"
 	searchModeFTSRelaxed   searchMode = "fts_relaxed"
 	searchModeFuzzy        searchMode = "fuzzy"
 )
@@ -84,88 +89,127 @@ var searchTextNormalizer = transform.Chain(
 )
 
 // NewSQLiteStorage creates a new SQLite-backed storage.
-// It creates the database directory if needed, opens the database,
-// configures optimal SQLite pragmas, and runs schema migrations.
+// It creates the database directory if needed and opens content.db, crawler.db, and graph.db.
 func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (*SQLiteStorage, error) {
 	// Ensure the directory exists.
-	dir := filepath.Dir(dbPath)
+	// We treat dbPath as the base path. If it ends in .db, we use its directory.
+	dir := dbPath
+	if strings.HasSuffix(dbPath, ".db") {
+		dir = filepath.Dir(dbPath)
+	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating database directory %q: %w", dir, err)
 	}
 
-	// --- Write pool: single connection, serialized writes ---
-	// High busy_timeout (30s) ensures writes wait instead of failing.
-	writeDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", dbPath)
-	writeDB, err := sql.Open("sqlite", writeDSN)
-	if err != nil {
-		return nil, fmt.Errorf("opening write database: %w", err)
-	}
-	// Single writer â€” this is the key: only one write can happen at a time,
-	// preventing SQLITE_BUSY errors entirely.
-	writeDB.SetMaxOpenConns(1)
-	writeDB.SetMaxIdleConns(1)
-	writeDB.SetConnMaxLifetime(0)
-	if err := configureWriteDB(ctx, writeDB); err != nil {
-		writeDB.Close()
-		return nil, fmt.Errorf("configuring write database: %w", err)
+	contentPath := filepath.Join(dir, "content.db")
+	crawlerPath := filepath.Join(dir, "crawler.db")
+	graphPath := filepath.Join(dir, "graph.db")
+
+	// Helper to open a DB with a specific DSN
+	openDB := func(dsn string, maxOpen, maxIdle int) (*sql.DB, error) {
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(maxOpen)
+		db.SetMaxIdleConns(maxIdle)
+		db.SetConnMaxLifetime(0)
+		return db, nil
 	}
 
-	// Verify write connection works.
-	if err := writeDB.PingContext(ctx); err != nil {
-		writeDB.Close()
-		return nil, fmt.Errorf("pinging write database: %w", err)
+	// --- 1. Content DB (Search Engine Core) ---
+	writeContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", contentPath)
+	writeContentDB, err := openDB(writeContentDSN, 1, 1)
+	if err != nil {
+		return nil, fmt.Errorf("opening write content database: %w", err)
+	}
+	if err := configureWriteDB(ctx, writeContentDB); err != nil {
+		writeContentDB.Close()
+		return nil, fmt.Errorf("configuring write content database: %w", err)
+	}
+	if err := migrateDB(ctx, writeContentDB, contentMigrations); err != nil {
+		writeContentDB.Close()
+		return nil, fmt.Errorf("running content migrations: %w", err)
+	}
+
+	readContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", contentPath)
+	readContentDB, err := openDB(readContentDSN, 8, 8)
+	if err != nil {
+		writeContentDB.Close()
+		return nil, fmt.Errorf("opening read content database: %w", err)
+	}
+	if err := configureReadDB(ctx, readContentDB); err != nil {
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("configuring read content database: %w", err)
+	}
+
+	// --- 2. Crawler DB (State Machine) ---
+	crawlerDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&_loc=auto", crawlerPath)
+	crawlerDB, err := openDB(crawlerDSN, 1, 1) // Keep single writer for queue
+	if err != nil {
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("opening crawler database: %w", err)
+	}
+	if err := configureWriteDB(ctx, crawlerDB); err != nil {
+		crawlerDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("configuring crawler database: %w", err)
+	}
+	if err := migrateDB(ctx, crawlerDB, crawlerMigrations); err != nil {
+		crawlerDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("running crawler migrations: %w", err)
+	}
+
+	// --- 3. Graph DB (Web Graph) ---
+	// _synchronous=OFF for extreme write speed on links, corruption here is acceptable as it can be rebuilt
+	graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OFF&_cache_size=-10000&_foreign_keys=ON&_loc=auto", graphPath)
+	graphDB, err := openDB(graphDSN, 1, 1)
+	if err != nil {
+		crawlerDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("opening graph database: %w", err)
+	}
+	if err := configureWriteDB(ctx, graphDB); err != nil {
+		graphDB.Close()
+		crawlerDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("configuring graph database: %w", err)
+	}
+	if err := migrateDB(ctx, graphDB, graphMigrations); err != nil {
+		graphDB.Close()
+		crawlerDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("running graph migrations: %w", err)
 	}
 
 	s := &SQLiteStorage{
-		writeDB: writeDB,
-		logger:  logger.With("component", "storage"),
-		dbPath:  dbPath,
+		readContentDB:  readContentDB,
+		writeContentDB: writeContentDB,
+		crawlerDB:      crawlerDB,
+		graphDB:        graphDB,
+		logger:         logger.With("component", "storage"),
+		dataDir:        dir,
 	}
 
-	// Run schema migrations (using write connection).
-	if err := s.migrate(ctx); err != nil {
-		writeDB.Close()
-		return nil, fmt.Errorf("running migrations: %w", err)
-	}
-
-	// --- Read pool: multiple connections for concurrent reads ---
-	// Open after migrations so mode=ro works on first startup.
-	readDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", dbPath)
-	readDB, err := sql.Open("sqlite", readDSN)
-	if err != nil {
-		writeDB.Close()
-		return nil, fmt.Errorf("opening read database: %w", err)
-	}
-	readDB.SetMaxOpenConns(8)
-	readDB.SetMaxIdleConns(8)
-	readDB.SetConnMaxLifetime(0)
-	if err := configureReadDB(ctx, readDB); err != nil {
-		readDB.Close()
-		writeDB.Close()
-		return nil, fmt.Errorf("configuring read database: %w", err)
-	}
-
-	if err := readDB.PingContext(ctx); err != nil {
-		readDB.Close()
-		writeDB.Close()
-		return nil, fmt.Errorf("pinging read database: %w", err)
-	}
-	s.readDB = readDB
-
-	logger.Info("SQLite storage initialized",
-		"path", dbPath,
-		"journal_mode", "WAL",
-		"read_conns", 4,
-		"write_conns", 1,
+	logger.Info("SQLite storage initialized (Multi-DB Architecture)",
+		"dir", dir,
 	)
 
 	return s, nil
 }
 
-// migrate executes all schema migrations in a single transaction.
-// ALTER TABLE ADD COLUMN errors are silently ignored (column may already exist).
-func (s *SQLiteStorage) migrate(ctx context.Context) error {
-	tx, err := s.writeDB.BeginTx(ctx, nil)
+// migrate executes schema migrations on a given database.
+func migrateDB(ctx context.Context, db *sql.DB, migrations []string) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning migration transaction: %w", err)
 	}
@@ -173,7 +217,6 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 
 	for i, m := range migrations {
 		if _, err := tx.ExecContext(ctx, m); err != nil {
-			// Tolerate "duplicate column name" errors from ALTER TABLE.
 			if strings.Contains(err.Error(), "duplicate column") {
 				continue
 			}
@@ -192,14 +235,15 @@ func (s *SQLiteStorage) migrate(ctx context.Context) error {
 func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 	var stats CrawlerStats
 
-	// Page & domain counts.
-	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages`).Scan(&stats.TotalPages); err != nil {
+	// Page counts.
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages`).Scan(&stats.TotalPages); err != nil {
 		return nil, fmt.Errorf("counting pages: %w", err)
 	}
-	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains`).Scan(&stats.TotalDomains); err != nil {
+	// Domain counts.
+	if err := s.crawlerDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains`).Scan(&stats.TotalDomains); err != nil {
 		return nil, fmt.Errorf("counting domains: %w", err)
 	}
-	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE is_seed = TRUE`).Scan(&stats.SeedDomains); err != nil {
+	if err := s.crawlerDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE is_seed = TRUE`).Scan(&stats.SeedDomains); err != nil {
 		return nil, fmt.Errorf("counting seed domains: %w", err)
 	}
 
@@ -211,10 +255,14 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 	stats.Queue = *queueStats
 
 	// Database size.
-	info, err := os.Stat(s.dbPath)
-	if err == nil {
-		stats.DatabaseSizeMB = float64(info.Size()) / (1024 * 1024)
+	var totalSize int64
+	for _, file := range []string{"content.db", "crawler.db", "graph.db"} {
+		info, err := os.Stat(filepath.Join(s.dataDir, file))
+		if err == nil {
+			totalSize += info.Size()
+		}
 	}
+	stats.DatabaseSizeMB = float64(totalSize) / (1024 * 1024)
 
 	return &stats, nil
 }
@@ -225,7 +273,7 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 
 // PurgeOldPages deletes pages crawled before the given timestamp.
 func (s *SQLiteStorage) PurgeOldPages(ctx context.Context, olderThan time.Time) (int64, error) {
-	result, err := s.writeDB.ExecContext(ctx, `DELETE FROM pages WHERE crawled_at < ?`, olderThan)
+	result, err := s.writeContentDB.ExecContext(ctx, `DELETE FROM pages WHERE crawled_at < ?`, olderThan)
 	if err != nil {
 		return 0, fmt.Errorf("purging old pages: %w", err)
 	}
@@ -235,7 +283,7 @@ func (s *SQLiteStorage) PurgeOldPages(ctx context.Context, olderThan time.Time) 
 // ResetStalledJobs resets jobs stuck in in_progress back to pending.
 func (s *SQLiteStorage) ResetStalledJobs(ctx context.Context, stalledAfter time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-stalledAfter)
-	result, err := s.writeDB.ExecContext(ctx, `
+	result, err := s.crawlerDB.ExecContext(ctx, `
 		UPDATE crawl_queue
 		SET status = ?, locked_at = NULL
 		WHERE status = ? AND locked_at < ?
@@ -246,44 +294,62 @@ func (s *SQLiteStorage) ResetStalledJobs(ctx context.Context, stalledAfter time.
 	return result.RowsAffected()
 }
 
-// Vacuum reclaims unused disk space in the database.
+// Vacuum reclaims unused disk space in all databases.
 func (s *SQLiteStorage) Vacuum(ctx context.Context) error {
-	_, err := s.writeDB.ExecContext(ctx, "VACUUM")
-	if err != nil {
-		return fmt.Errorf("vacuuming database: %w", err)
+	if _, err := s.writeContentDB.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuuming content database: %w", err)
 	}
-	s.logger.Info("database vacuumed successfully")
+	if _, err := s.crawlerDB.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuuming crawler database: %w", err)
+	}
+	if _, err := s.graphDB.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuuming graph database: %w", err)
+	}
+	s.logger.Info("all databases vacuumed successfully")
 	return nil
 }
 
 // UpdatePageRankings recalculates the referring_domains score for pages.
 // It uses a batched approach to avoid locking the database for too long.
-func (s *SQLiteStorage) WriteDB() *sql.DB {
-	return s.writeDB
+// WriteContentDB returns the underlying write connection pool for content.
+func (s *SQLiteStorage) WriteContentDB() *sql.DB {
+	return s.writeContentDB
 }
 
-// Close closes both SQLite connection pools.
+// GraphDB returns the underlying connection pool for the graph database.
+func (s *SQLiteStorage) GraphDB() *sql.DB {
+	return s.graphDB
+}
+
+// Close closes all SQLite connection pools.
 func (s *SQLiteStorage) Close() error {
 	s.logger.Info("closing SQLite storage")
 
-	var writeErr, readErr error
-	if s.writeDB != nil {
-		writeErr = s.writeDB.Close()
+	var errs []error
+	if s.writeContentDB != nil {
+		if err := s.writeContentDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing writeContentDB: %w", err))
+		}
 	}
-	if s.readDB != nil {
-		readErr = s.readDB.Close()
+	if s.readContentDB != nil {
+		if err := s.readContentDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing readContentDB: %w", err))
+		}
+	}
+	if s.crawlerDB != nil {
+		if err := s.crawlerDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing crawlerDB: %w", err))
+		}
+	}
+	if s.graphDB != nil {
+		if err := s.graphDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing graphDB: %w", err))
+		}
 	}
 
-	if writeErr != nil && readErr != nil {
-		return fmt.Errorf("closing write database: %v; closing read database: %w", writeErr, readErr)
+	if len(errs) > 0 {
+		return fmt.Errorf("encountered errors during close: %v", errs)
 	}
-	if writeErr != nil {
-		return fmt.Errorf("closing write database: %w", writeErr)
-	}
-	if readErr != nil {
-		return fmt.Errorf("closing read database: %w", readErr)
-	}
-
 	return nil
 }
 
