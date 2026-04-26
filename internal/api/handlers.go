@@ -110,6 +110,9 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 		results = []storage.SearchResult{}
 	}
 
+	// Allow Cloudflare / reverse proxies to cache identical queries briefly.
+	w.Header().Set("Cache-Control", "public, s-maxage=60, max-age=10, stale-while-revalidate=300")
+
 	writeJSON(w, http.StatusOK, searchResponse{
 		Query:   query,
 		Total:   total,
