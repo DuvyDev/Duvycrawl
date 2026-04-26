@@ -122,12 +122,8 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
-	// --- Domain diversity: interleave results so one domain doesn't
-	//     dominate the first page. First 3 positions = max 1 per domain,
-	//     positions 4-10 = max 2, positions 11+ = max 3.
-	reranked = diversifyByDomain(reranked)
-
 	// --- Optional domain filter ---
+	// Must run BEFORE diversifyByDomain so we don't artificially limit site-specific searches to 3 results.
 	if domain != "" {
 		filtered := make([]searchCandidate, 0, len(reranked))
 		for _, c := range reranked {
@@ -139,6 +135,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	// --- Optional schema type filter ---
+	// Must run BEFORE diversifyByDomain so filtering out schemas doesn't leave empty slots.
 	if schemaType != "" {
 		filtered := make([]searchCandidate, 0, len(reranked))
 		for _, c := range reranked {
@@ -147,6 +144,14 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 			}
 		}
 		reranked = filtered
+	}
+
+	// --- Domain diversity: interleave results so one domain doesn't
+	//     dominate the first page. First 3 positions = max 1 per domain,
+	//     positions 4-10 = max 2, positions 11+ = max 3.
+	// We only run this if we are not explicitly searching within a single domain!
+	if domain == "" {
+		reranked = diversifyByDomain(reranked)
 	}
 
 	if selectedMode == searchModeFuzzy || domain != "" || schemaType != "" {
@@ -717,13 +722,14 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.published_at,
 			p.updated_at,
 			(
-				CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 900.0 ELSE 0 END
-				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 650.0 ELSE 0 END
+				CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 1500.0 ELSE 0 END
+				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 800.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 2000.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.url) LIKE ? THEN 220.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.title) LIKE ? THEN 160.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
-				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 220.0 ELSE 0 END
+				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 500.0 ELSE 0 END
 				+ CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 20.0 ELSE 0 END
 				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
 				+ CASE WHEN ? != '' AND p.language = ? THEN 20.0 ELSE 0 END
@@ -895,10 +901,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	titleNorm := normalizeSearchText(candidate.Title)
 	h1Norm := normalizeSearchText(candidate.H1)
 	h2Norm := normalizeSearchText(candidate.H2)
-	bodyNorm := normalizeSearchText(candidate.BodyPreview)
-	if bodyNorm == "" {
-		bodyNorm = normalizeSearchText(candidate.Description)
-	}
+	descNorm := normalizeSearchText(candidate.Description)
 	urlNorm := normalizeSearchText(candidate.URL)
 	domainNorm := normalizeSearchText(candidate.Domain)
 	urlDomain := candidate.Domain
@@ -913,7 +916,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	titleTokens := uniqueStrings(strings.Fields(titleNorm))
 	h1Tokens := uniqueStrings(strings.Fields(h1Norm))
 	h2Tokens := uniqueStrings(strings.Fields(h2Norm))
-	bodyTokens := uniqueStrings(strings.Fields(bodyNorm))
+	descTokens := uniqueStrings(strings.Fields(descNorm))
 	urlTokens := uniqueStrings(strings.Fields(urlNorm))
 	domainTokens := uniqueStrings(append(strings.Fields(domainNorm), strings.Fields(effectiveDomainNorm)...))
 	domainTokens = uniqueStrings(append(domainTokens, strings.Fields(rootLabelNorm)...))
@@ -921,7 +924,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	titlePhrase := bestFieldPhraseScore(query.normalized, query.tokens, titleNorm, titleTokens)
 	h1Phrase := bestFieldPhraseScore(query.normalized, query.tokens, h1Norm, h1Tokens)
 	h2Phrase := bestFieldPhraseScore(query.normalized, query.tokens, h2Norm, h2Tokens)
-	bodyPhrase := bestFieldPhraseScore(query.normalized, query.tokens, bodyNorm, bodyTokens)
+	descPhrase := bestFieldPhraseScore(query.normalized, query.tokens, descNorm, descTokens)
 	urlPhrase := bestFieldPhraseScore(query.normalized, query.tokens, urlNorm, urlTokens)
 	domainPhrase := max(
 		bestFieldPhraseScore(query.normalized, query.tokens, domainNorm, domainTokens),
@@ -932,13 +935,13 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	titleAvg, titleCoverage, titleExact := searchTokenCoverage(query.tokens, titleTokens)
 	h1Avg, h1Coverage, _ := searchTokenCoverage(query.tokens, h1Tokens)
 	h2Avg, h2Coverage, _ := searchTokenCoverage(query.tokens, h2Tokens)
-	bodyAvg, bodyCoverage, _ := searchTokenCoverage(query.tokens, bodyTokens)
+	descAvg, descCoverage, _ := searchTokenCoverage(query.tokens, descTokens)
 	domainAvg, domainCoverage, _ := searchTokenCoverage(query.tokens, domainTokens)
 	urlAvg, urlCoverage, _ := searchTokenCoverage(query.tokens, urlTokens)
 
-	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + bodyAvg) / 8.0
-	weightedFieldCoverage := (3.0*titleCoverage + 2.0*h1Coverage + 2.0*h2Coverage + bodyCoverage) / 8.0
-	fixedTF := fixedWeightedTermFrequency(query.tokens, query.idfMap, titleNorm, h1Norm, h2Norm, bodyNorm)
+	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + 2.0*descAvg) / 9.0
+	weightedFieldCoverage := (3.0*titleCoverage + 2.0*h1Coverage + 2.0*h2Coverage + 2.0*descCoverage) / 9.0
+	fixedTF := fixedWeightedTermFrequency(query.tokens, query.idfMap, titleNorm, h1Norm, h2Norm, descNorm)
 
 	isHomepage := isSearchHomepage(candidate.URL)
 	domainPhraseWeight := 260.0
@@ -964,7 +967,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 
 	score := candidate.sqlScore * 0.35
 	score += searchModeBonus(candidate.mode)
-	score += 560.0*titlePhrase + 360.0*h1Phrase + 360.0*h2Phrase + 170.0*bodyPhrase
+	score += 560.0*titlePhrase + 360.0*h1Phrase + 360.0*h2Phrase + 240.0*descPhrase
 	score += domainPhraseWeight * domainPhrase
 	score += 90.0 * urlPhrase
 	score += 430.0*weightedFieldAvg + 180.0*weightedFieldCoverage
@@ -1035,7 +1038,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 
 	if candidate.mode == searchModeFuzzy {
-		strongestPhrase := max(max(titlePhrase, h1Phrase), max(max(h2Phrase, bodyPhrase), domainPhrase))
+		strongestPhrase := max(max(titlePhrase, h1Phrase), max(max(h2Phrase, descPhrase), domainPhrase))
 		strongestToken := max(weightedFieldAvg, max(domainAvg, urlAvg))
 		if strongestPhrase < 0.72 && strongestToken < 0.78 {
 			return 0, false
@@ -1173,7 +1176,7 @@ func searchContentLengthScore(contentLen int) float64 {
 	return min(float64(contentLen)/800.0, 25.0)
 }
 
-func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64, titleNorm, h1Norm, h2Norm, bodyNorm string) float64 {
+func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64, titleNorm, h1Norm, h2Norm, descNorm string) float64 {
 	if len(queryTokens) == 0 {
 		return 0
 	}
@@ -1182,12 +1185,12 @@ func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64,
 	titleFreq := tokenFrequencyMap(strings.Fields(titleNorm))
 	h1Freq := tokenFrequencyMap(strings.Fields(h1Norm))
 	h2Freq := tokenFrequencyMap(strings.Fields(h2Norm))
-	bodyFreq := tokenFrequencyMap(strings.Fields(bodyNorm))
+	descFreq := tokenFrequencyMap(strings.Fields(descNorm))
 
 	return weightedTokenFrequency(queryTokens, idfMap, titleFreq, 3.0, 4) +
 		weightedTokenFrequency(queryTokens, idfMap, h1Freq, 2.0, 5) +
 		weightedTokenFrequency(queryTokens, idfMap, h2Freq, 2.0, 5) +
-		weightedTokenFrequency(queryTokens, idfMap, bodyFreq, 1.0, 10)
+		weightedTokenFrequency(queryTokens, idfMap, descFreq, 2.0, 5)
 }
 
 func tokenFrequencyMap(tokens []string) map[string]int {
@@ -1656,7 +1659,6 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	return results
 }
 
-// GetStalePages returns pages crawled before the given time, for re-crawling.
 func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url string) error {
 	normalizedQuery := normalizeSearchText(query)
 	if normalizedQuery == "" || url == "" {
@@ -1671,8 +1673,6 @@ func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url strin
 	return err
 }
 
-// WriteDB returns the underlying write database connection.
-// Used by the BatchWriter to share the same serialized write connection.
 func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, offset int) ([]ImageSearchResult, int, error) {
 	if query == "" {
 		return nil, 0, nil
