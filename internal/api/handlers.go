@@ -553,6 +553,37 @@ func (h *Handlers) GetOutlinks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Interactions ---
+
+type interactRequest struct {
+	Query string `json:"query"`
+	URL   string `json:"url"`
+}
+
+// Interact records a user click on a search result.
+func (h *Handlers) Interact(w http.ResponseWriter, r *http.Request) {
+	var req interactRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Query == "" || req.URL == "" {
+		writeError(w, http.StatusBadRequest, "query and url are required")
+		return
+	}
+
+	if err := h.store.RecordClick(r.Context(), req.Query, req.URL); err != nil {
+		h.logger.Error("failed to record click", "query", req.Query, "url", req.URL, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to record interaction")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"message": "interaction recorded",
+	})
+}
+
 // --- Maintenance ---
 
 // UpdateRankings triggers an asynchronous recalculation of referring domains for all pages.

@@ -133,6 +133,9 @@ type Storage interface {
 	// UpdatePageRankings recalculates the referring_domains score for pages asynchronously.
 	UpdatePageRankings(ctx context.Context) error
 
+	// RecordClick records a user interaction with a search result to improve future rankings.
+	RecordClick(ctx context.Context, query string, url string) error
+
 	// Close gracefully shuts down the storage layer.
 	Close() error
 }

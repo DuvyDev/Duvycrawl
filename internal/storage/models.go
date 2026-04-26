@@ -91,6 +91,7 @@ type SearchResult struct {
 	PublishedAt      *time.Time `json:"published_at,omitempty"`
 	Rank             float64    `json:"rank"` // Composite relevance score, higher = better
 	ReferringDomains int        `json:"referring_domains"`
+	PageRank         float64    `json:"pagerank"`
 	SchemaType       string     `json:"schema_type,omitempty"`
 	SchemaImage      string     `json:"schema_image,omitempty"`
 	SchemaAuthor     string     `json:"schema_author,omitempty"`

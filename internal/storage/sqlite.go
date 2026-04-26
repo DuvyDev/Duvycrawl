@@ -60,6 +60,7 @@ type searchQuery struct {
 	navTerm      string
 	domainLike   string
 	navigational bool
+	idfMap       map[string]float64
 }
 
 type searchCandidate struct {
@@ -332,6 +333,8 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
+
 	candidateLimit := searchCandidateLimit(limit, offset)
 
 	var (
@@ -564,6 +567,51 @@ func searchCandidateLimit(limit, offset int) int {
 	return want
 }
 
+func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (map[string]float64, error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+
+	var totalDocs float64
+	if err := s.readDB.QueryRowContext(ctx, `SELECT MAX(rowid) FROM pages_fts`).Scan(&totalDocs); err != nil {
+		totalDocs = 10000.0
+	}
+	if totalDocs <= 0 {
+		totalDocs = 1.0
+	}
+
+	idfMap := make(map[string]float64, len(tokens))
+	defaultIDF := math.Log(totalDocs / 1.0)
+	for _, t := range tokens {
+		idfMap[t] = defaultIDF
+	}
+
+	placeholders := make([]string, len(tokens))
+	args := make([]any, len(tokens))
+	for i, t := range tokens {
+		placeholders[i] = "?"
+		args[i] = t
+	}
+
+	query := fmt.Sprintf(`SELECT term, doc FROM pages_fts_vocab WHERE term IN (%s)`, strings.Join(placeholders, ","))
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		s.logger.Warn("failed to fetch IDF map", "error", err)
+		return idfMap, nil
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var term string
+		var docCount float64
+		if err := rows.Scan(&term, &docCount); err == nil && docCount > 0 {
+			idfMap[term] = math.Log(totalDocs / docCount)
+		}
+	}
+
+	return idfMap, nil
+}
+
 func (s *SQLiteStorage) countFTSCandidates(ctx context.Context, ftsQuery string) (int, error) {
 	var total int
 	if err := s.readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
@@ -615,6 +663,18 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	}
 
 	searchSQL := fmt.Sprintf(`
+		WITH base_matches AS (
+			SELECT
+				p.id,
+				(%s) AS sql_score,
+				COALESCE(sc.clicks, 0) AS clicks,
+				p.crawled_at
+			FROM pages_fts
+			JOIN pages p ON p.id = pages_fts.rowid
+			LEFT JOIN domains d ON d.domain = p.domain
+			LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
+			WHERE pages_fts MATCH ?
+		)
 		SELECT
 			p.id,
 			p.url,
@@ -629,7 +689,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.crawled_at,
 			p.published_at,
 			p.updated_at,
-			(%s) AS sql_score,
+			m.sql_score,
 			COALESCE(d.is_seed, 0) AS is_seed,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
@@ -637,15 +697,21 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.schema_author,
 			p.schema_keywords,
 			p.schema_rating,
-			p.referring_domains
-		FROM pages_fts
-		JOIN pages p ON p.id = pages_fts.rowid
+			p.referring_domains,
+			COALESCE(p.pagerank, 1.0) AS pagerank,
+			m.clicks
+		FROM (
+			SELECT * FROM base_matches
+			ORDER BY (sql_score + clicks * 150.0) DESC, crawled_at DESC
+			LIMIT ?
+		) m
+		JOIN pages p ON p.id = m.id
+		JOIN pages_fts ON pages_fts.rowid = m.id
 		LEFT JOIN domains d ON d.domain = p.domain
 		WHERE pages_fts MATCH ?
-		ORDER BY sql_score DESC, p.crawled_at DESC
-		LIMIT ?
+		ORDER BY (m.sql_score + m.clicks * 150.0) DESC, m.crawled_at DESC
 	`, scoreExpr)
-	args = append(args, matchQuery, limit)
+	args = append(args, query.raw, matchQuery, limit, matchQuery)
 
 	rows, err := s.readDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
@@ -662,6 +728,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			updatedAtStr   sql.NullString
 			seedFlag       int
 			snippetText    sql.NullString
+			clicksCount    int
 		)
 		var schemaRating sql.NullFloat64
 		if err := rows.Scan(
@@ -687,9 +754,12 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			&candidate.SchemaKeywords,
 			&schemaRating,
 			&candidate.ReferringDomains,
+			&candidate.PageRank,
+			&clicksCount,
 		); err != nil {
 			return nil, fmt.Errorf("scanning FTS candidate: %w", err)
 		}
+		candidate.sqlScore += float64(clicksCount) * 150.0
 
 		candidate.Snippet = snippetText.String
 		if candidate.Snippet == "" {
@@ -802,11 +872,14 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			p.schema_author,
 			p.schema_keywords,
 			p.schema_rating,
-			p.referring_domains
+			p.referring_domains,
+			COALESCE(p.pagerank, 1.0) AS pagerank,
+			COALESCE(sc.clicks, 0) AS clicks
 		FROM pages p
 		LEFT JOIN domains d ON d.domain = p.domain
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE %s
-		ORDER BY sql_score DESC, p.crawled_at DESC
+		ORDER BY (sql_score + COALESCE(sc.clicks, 0) * 150.0) DESC, p.crawled_at DESC
 		LIMIT ?
 	`, strings.Join(scoreParts, " + "), fuzzyLanguageSQL(lang), whereClause)
 
@@ -814,6 +887,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 	if lang != "" {
 		args = append(args, lang)
 	}
+	args = append(args, query.raw)
 	args = append(args, whereArgs...)
 	args = append(args, limit)
 
@@ -833,6 +907,7 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			updatedAtStr   sql.NullString
 			seedFlag       int
 			snippetText    sql.NullString
+			clicksCount    int
 		)
 		var schemaRating sql.NullFloat64
 		if err := rows.Scan(
@@ -859,9 +934,12 @@ func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQ
 			&candidate.SchemaKeywords,
 			&schemaRating,
 			&candidate.ReferringDomains,
+			&candidate.PageRank,
+			&clicksCount,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning fuzzy candidate: %w", err)
 		}
+		candidate.sqlScore += float64(clicksCount) * 150.0
 
 		candidate.Snippet = snippetText.String
 		candidate.mode = searchModeFuzzy
@@ -958,9 +1036,12 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.schema_author,
 			p.schema_keywords,
 			p.schema_rating,
-			p.referring_domains
+			p.referring_domains,
+			COALESCE(p.pagerank, 1.0) AS pagerank,
+			COALESCE(sc.clicks, 0) AS clicks
 		FROM pages p
 		LEFT JOIN domains d ON d.domain = p.domain
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE
 			(? != '' AND LOWER(p.domain) = ?)
 			OR (? != '' AND LOWER(p.domain) LIKE ?)
@@ -968,7 +1049,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			OR LOWER(p.title) LIKE ?
 			OR LOWER(p.h1) LIKE ?
 			OR LOWER(p.h2) LIKE ?
-		ORDER BY sql_score DESC, p.crawled_at DESC
+		ORDER BY (sql_score + COALESCE(sc.clicks, 0) * 150.0) DESC, p.crawled_at DESC
 		LIMIT ?
 	`
 
@@ -983,6 +1064,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		titleLike,
 		lang,
 		lang,
+		query.raw,
 		domainExact,
 		domainExact,
 		navTerm,
@@ -1009,6 +1091,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			updatedAtStr   sql.NullString
 			seedFlag       int
 			snippetText    sql.NullString
+			clicksCount    int
 		)
 		var schemaRating sql.NullFloat64
 		if err := rows.Scan(
@@ -1034,9 +1117,12 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&candidate.SchemaKeywords,
 			&schemaRating,
 			&candidate.ReferringDomains,
+			&candidate.PageRank,
+			&clicksCount,
 		); err != nil {
 			return nil, fmt.Errorf("scanning navigational candidate: %w", err)
 		}
+		candidate.sqlScore += float64(clicksCount) * 150.0
 
 		candidate.Snippet = snippetText.String
 		candidate.mode = searchModeNavigational
@@ -1153,7 +1239,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 
 	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + bodyAvg) / 8.0
 	weightedFieldCoverage := (3.0*titleCoverage + 2.0*h1Coverage + 2.0*h2Coverage + bodyCoverage) / 8.0
-	fixedTF := fixedWeightedTermFrequency(query.tokens, titleNorm, h1Norm, h2Norm, bodyNorm)
+	fixedTF := fixedWeightedTermFrequency(query.tokens, query.idfMap, titleNorm, h1Norm, h2Norm, bodyNorm)
 
 	isHomepage := isSearchHomepage(candidate.URL)
 	domainPhraseWeight := 260.0
@@ -1188,10 +1274,12 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	score += 130.0*urlAvg + 40.0*urlCoverage
 	score += 25.0*schemaKeywordsAvg + 15.0*schemaKeywordsCoverage
 
-	// Referring Domains logarithmic boost
-	// math.Log1p(x) = ln(1 + x). 1 domain = ~0.69, 10 domains = ~2.4, 100 domains = ~4.6
-	// Multiply by a weight that makes a highly linked page rank above a similar content page.
-	if candidate.ReferringDomains > 0 {
+	// PageRank logarithmic boost
+	// math.Log1p(x) = ln(1 + x). 
+	// Multiply by a weight that makes a highly authoritative page rank above a similar content page.
+	if candidate.PageRank > 0 {
+		score += math.Log1p(candidate.PageRank) * 200.0
+	} else if candidate.ReferringDomains > 0 {
 		score += math.Log1p(float64(candidate.ReferringDomains)) * 140.0
 	}
 
@@ -1402,7 +1490,7 @@ func searchContentLengthScore(contentLen int) float64 {
 	return min(float64(contentLen)/800.0, 25.0)
 }
 
-func fixedWeightedTermFrequency(queryTokens []string, titleNorm, h1Norm, h2Norm, bodyNorm string) float64 {
+func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64, titleNorm, h1Norm, h2Norm, bodyNorm string) float64 {
 	if len(queryTokens) == 0 {
 		return 0
 	}
@@ -1413,10 +1501,10 @@ func fixedWeightedTermFrequency(queryTokens []string, titleNorm, h1Norm, h2Norm,
 	h2Freq := tokenFrequencyMap(strings.Fields(h2Norm))
 	bodyFreq := tokenFrequencyMap(strings.Fields(bodyNorm))
 
-	return weightedTokenFrequency(queryTokens, titleFreq, 3.0, 4) +
-		weightedTokenFrequency(queryTokens, h1Freq, 2.0, 5) +
-		weightedTokenFrequency(queryTokens, h2Freq, 2.0, 5) +
-		weightedTokenFrequency(queryTokens, bodyFreq, 1.0, 10)
+	return weightedTokenFrequency(queryTokens, idfMap, titleFreq, 3.0, 4) +
+		weightedTokenFrequency(queryTokens, idfMap, h1Freq, 2.0, 5) +
+		weightedTokenFrequency(queryTokens, idfMap, h2Freq, 2.0, 5) +
+		weightedTokenFrequency(queryTokens, idfMap, bodyFreq, 1.0, 10)
 }
 
 func tokenFrequencyMap(tokens []string) map[string]int {
@@ -1430,7 +1518,7 @@ func tokenFrequencyMap(tokens []string) map[string]int {
 	return freq
 }
 
-func weightedTokenFrequency(queryTokens []string, fieldFreq map[string]int, weight float64, maxPerToken int) float64 {
+func weightedTokenFrequency(queryTokens []string, idfMap map[string]float64, fieldFreq map[string]int, weight float64, maxPerToken int) float64 {
 	if len(queryTokens) == 0 || len(fieldFreq) == 0 {
 		return 0
 	}
@@ -1441,7 +1529,11 @@ func weightedTokenFrequency(queryTokens []string, fieldFreq map[string]int, weig
 		if maxPerToken > 0 && count > maxPerToken {
 			count = maxPerToken
 		}
-		total += float64(count) * weight
+		idf := 1.0
+		if val, ok := idfMap[token]; ok && val > 0 {
+			idf = val
+		}
+		total += float64(count) * weight * idf
 	}
 	return total
 }
@@ -2478,7 +2570,144 @@ func (s *SQLiteStorage) UpdatePageRankings(ctx context.Context) error {
 
 	affected, _ := res.RowsAffected()
 	s.logger.Info("page ranking update completed", "affected", affected, "duration", time.Since(start))
+	
+	// --- Phase 1: Iterative PageRank ---
+	if err := s.computeIterativePageRank(ctx); err != nil {
+		return fmt.Errorf("computing iterative pagerank: %w", err)
+	}
+	
 	return nil
+}
+
+// computeIterativePageRank loads the graph in memory, runs power iteration for PageRank,
+// and updates the pagerank column in the database.
+func (s *SQLiteStorage) computeIterativePageRank(ctx context.Context) error {
+	s.logger.Info("starting iterative PageRank computation")
+	start := time.Now()
+
+	rows, err := s.readDB.QueryContext(ctx, `SELECT id FROM pages`)
+	if err != nil {
+		return err
+	}
+	
+	var pageIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		pageIDs = append(pageIDs, id)
+	}
+	rows.Close()
+	
+	if len(pageIDs) == 0 {
+		return nil
+	}
+
+	idToIndex := make(map[int64]int, len(pageIDs))
+	for i, id := range pageIDs {
+		idToIndex[id] = i
+	}
+
+	N := len(pageIDs)
+	outDegree := make([]int, N)
+	inboundLinks := make([][]int, N)
+
+	edgeRows, err := s.readDB.QueryContext(ctx, `
+		SELECT l.source_id, p.id 
+		FROM links l
+		JOIN pages p ON p.url = l.target_url
+		WHERE l.source_id != p.id
+	`)
+	if err != nil {
+		return err
+	}
+
+	for edgeRows.Next() {
+		var srcID, dstID int64
+		if err := edgeRows.Scan(&srcID, &dstID); err != nil {
+			edgeRows.Close()
+			return err
+		}
+		srcIdx, srcOk := idToIndex[srcID]
+		dstIdx, dstOk := idToIndex[dstID]
+		if srcOk && dstOk {
+			outDegree[srcIdx]++
+			inboundLinks[dstIdx] = append(inboundLinks[dstIdx], srcIdx)
+		}
+	}
+	edgeRows.Close()
+
+	damping := 0.85
+	scores := make([]float64, N)
+	newScores := make([]float64, N)
+	
+	for i := 0; i < N; i++ {
+		scores[i] = 1.0
+	}
+
+	iterations := 15
+	for iter := 0; iter < iterations; iter++ {
+		danglingSum := 0.0
+		for i := 0; i < N; i++ {
+			if outDegree[i] == 0 {
+				danglingSum += scores[i]
+			}
+		}
+		
+		for i := 0; i < N; i++ {
+			sum := 0.0
+			for _, srcIdx := range inboundLinks[i] {
+				sum += scores[srcIdx] / float64(outDegree[srcIdx])
+			}
+			newScores[i] = (1.0 - damping) + damping*(sum + danglingSum/float64(N))
+		}
+		
+		for i := 0; i < N; i++ {
+			scores[i] = newScores[i]
+		}
+	}
+
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `UPDATE pages SET pagerank = ? WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for i, score := range scores {
+		_, err := stmt.ExecContext(ctx, score, pageIDs[i])
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	s.logger.Info("iterative PageRank computation completed", "nodes", N, "duration", time.Since(start))
+	return nil
+}
+
+// RecordClick upserts a search interaction for a query and url, incrementing the click count.
+func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url string) error {
+	normalizedQuery := normalizeSearchText(query)
+	if normalizedQuery == "" || url == "" {
+		return nil
+	}
+
+	_, err := s.writeDB.ExecContext(ctx, `
+		INSERT INTO search_clicks (query, url, clicks)
+		VALUES (?, ?, 1)
+		ON CONFLICT(query, url) DO UPDATE SET clicks = clicks + 1
+	`, normalizedQuery, url)
+	return err
 }
 
 // WriteDB returns the underlying write database connection.

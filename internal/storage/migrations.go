@@ -173,4 +173,21 @@ var migrations = []string{
 	// --- Backlinks Scoring ---
 	`ALTER TABLE pages ADD COLUMN referring_domains INTEGER NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
+
+	// --- Phase 1: Iterative PageRank ---
+	`ALTER TABLE pages ADD COLUMN pagerank REAL NOT NULL DEFAULT 1.0`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_pagerank ON pages(pagerank)`,
+
+	// --- Phase 2: Global IDF (FTS5 Vocab) ---
+	`CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts_vocab USING fts5vocab(pages_fts, row)`,
+
+	// --- Phase 3: User Signals (CTR) ---
+	`CREATE TABLE IF NOT EXISTS search_clicks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		query TEXT NOT NULL,
+		url TEXT NOT NULL,
+		clicks INTEGER NOT NULL DEFAULT 1,
+		UNIQUE(query, url)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_search_clicks_query ON search_clicks(query)`,
 }
