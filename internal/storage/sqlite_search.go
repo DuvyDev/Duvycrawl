@@ -257,9 +257,9 @@ func newSearchQuery(query string) searchQuery {
 }
 
 func searchCandidateLimit(limit, offset int) int {
-	want := limit*8 + 30
-	if want > 200 {
-		want = 200
+	want := offset + (limit * 8) + 30
+	if want > 500 {
+		want = 500
 	}
 	return want
 }
