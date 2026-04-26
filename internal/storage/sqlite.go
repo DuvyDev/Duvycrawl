@@ -630,6 +630,11 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		domainExact = query.navTerm
 	}
 
+	domainPrefix := ""
+	if domainExact != "" {
+		domainPrefix = domainExact + ".%"
+	}
+
 	titleExact := query.lowered
 	titlePrefix := query.lowered + "%"
 	titleContains := "%" + query.lowered + "%"
@@ -638,15 +643,17 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		" + CASE WHEN LOWER(p.title) = ? THEN 500.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.title) LIKE ? THEN 300.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.title) LIKE ? THEN 180.0 ELSE 0 END" +
-		" + CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 800.0 ELSE 0 END" +
+		" + CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 1500.0 ELSE 0 END" +
+		" + CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 800.0 ELSE 0 END" +
+		" + CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 2000.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.url) LIKE ? THEN 100.0 ELSE 0 END" +
-		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 1 THEN 350.0 ELSE 0 END" +
+		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 1 THEN 500.0 ELSE 0 END" +
 		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) BETWEEN 2 AND 3 THEN 150.0 ELSE 0 END" +
 		" + CASE WHEN COALESCE(d.is_seed, 0) = 1 THEN 40.0 ELSE 0 END" +
 		" + MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))"
 
 	urlContains := "%" + query.lowered + "%"
-	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, urlContains}
+	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, domainPrefix, domainPrefix, urlContains}
 
 	for _, token := range query.tokens {
 		if len(token) > 2 {
