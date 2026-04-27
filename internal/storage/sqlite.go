@@ -52,16 +52,17 @@ const (
 )
 
 type searchQuery struct {
-	raw          string
-	lowered      string
-	normalized   string
-	compact      string
-	tokens       []string
-	fragments    []string
-	navTerm      string
-	domainLike   string
-	navigational bool
-	idfMap       map[string]float64
+	raw            string
+	lowered        string
+	normalized     string
+	compact        string
+	tokens         []string
+	fragments      []string
+	navTerm        string
+	domainLike     string
+	navigational   bool
+	siteTypeIntent string // e.g. "wiki", "docs", "blog" — detected from query tokens
+	idfMap         map[string]float64
 }
 
 type searchCandidate struct {

@@ -236,6 +236,23 @@ func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searc
 	return nil
 }
 
+// siteTypes is the set of keywords that indicate the user is looking for a
+// specific kind of site (e.g. "wiki", "docs", "blog"). These tokens are
+// stripped from the search tokens so they don't penalise phrase matching,
+// but are used to boost homepages of domains that contain them.
+var siteTypes = map[string]struct{}{
+	"wiki": {}, "blog": {}, "docs": {}, "forum": {}, "forums": {},
+	"foro": {}, "tienda": {}, "store": {}, "info": {},
+	"guia": {}, "guias": {}, "guide": {}, "guides": {},
+	"noticias": {}, "news": {},
+	"comunidad": {}, "community": {},
+	"api": {},
+	"documentacion": {}, "documentation": {},
+	"soporte": {}, "support": {},
+	"ayuda": {}, "help": {},
+	"portal": {}, "hub": {}, "status": {},
+}
+
 func newSearchQuery(query string) searchQuery {
 	normalized := normalizeSearchText(query)
 	tokens := strings.Fields(normalized)
@@ -248,16 +265,32 @@ func newSearchQuery(query string) searchQuery {
 		navTerm = tokens[0]
 	}
 
+	// Detect site-type intent (e.g. "wiki warframe" → looking for wiki.warframe.com).
+	siteTypeIntent := ""
+	var searchTokens []string
+	for _, tok := range tokens {
+		if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
+			siteTypeIntent = tok
+		} else {
+			searchTokens = append(searchTokens, tok)
+		}
+	}
+	if len(searchTokens) == 0 {
+		// Query was only a site-type word (e.g. "wiki") — keep original tokens.
+		searchTokens = tokens
+	}
+
 	return searchQuery{
-		raw:          query,
-		lowered:      strings.ToLower(strings.TrimSpace(query)),
-		normalized:   normalized,
-		compact:      strings.ReplaceAll(normalized, " ", ""),
-		tokens:       tokens,
-		fragments:    buildSearchFragments(tokens),
-		navTerm:      navTerm,
-		domainLike:   domainLike,
-		navigational: navTerm != "" || domainLike != "",
+		raw:            query,
+		lowered:        strings.ToLower(strings.TrimSpace(query)),
+		normalized:     normalized,
+		compact:        strings.ReplaceAll(normalized, " ", ""),
+		tokens:         searchTokens,
+		fragments:      buildSearchFragments(searchTokens),
+		navTerm:        navTerm,
+		domainLike:     domainLike,
+		navigational:   navTerm != "" || domainLike != "",
+		siteTypeIntent: siteTypeIntent,
 	}
 }
 
@@ -1063,6 +1096,24 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 	if query.navigational && !domainInfo.isRootDomain {
 		score -= 300.0
+	}
+
+	// --- Site-type intent boost (e.g. "wiki warframe", "docs python") ---
+	// When the query contains a site-type keyword, boost the homepage of
+	// domains/subdomains that include that keyword.
+	if query.siteTypeIntent != "" && isHomepage {
+		typeInDomain := strings.Contains(candidate.Domain, query.siteTypeIntent)
+		if !typeInDomain {
+			typeInDomain = strings.Contains(domainInfo.effectiveDomain, query.siteTypeIntent) ||
+				strings.Contains(domainInfo.rootLabel, query.siteTypeIntent)
+		}
+		if typeInDomain {
+			if domainInfo.isRootDomain {
+				score += 8000.0
+			} else {
+				score += 4000.0
+			}
+		}
 	}
 
 	if candidate.mode == searchModeFuzzy {
