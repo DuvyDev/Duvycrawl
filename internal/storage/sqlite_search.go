@@ -124,6 +124,19 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
+	// Debug: log top candidates with their computed scores.
+	if len(reranked) > 0 {
+		debugCount := min(5, len(reranked))
+		for i := 0; i < debugCount; i++ {
+			s.logger.Debug("search candidate",
+				"rank", i+1,
+				"url", reranked[i].URL,
+				"score", reranked[i].Rank,
+				"domain", reranked[i].Domain,
+			)
+		}
+	}
+
 	// --- Optional domain filter ---
 	// Must run BEFORE diversifyByDomain so we don't artificially limit site-specific searches to 3 results.
 	if domain != "" {
@@ -1101,6 +1114,8 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	// --- Site-type intent boost (e.g. "wiki warframe", "docs python") ---
 	// When the query contains a site-type keyword, boost the homepage of
 	// domains/subdomains that include that keyword.
+	// Root domains and subdomains get the SAME massive boost so that
+	// wiki.warframe.com/ can beat any internal wiki page or competitor.
 	if query.siteTypeIntent != "" && isHomepage {
 		typeInDomain := strings.Contains(candidate.Domain, query.siteTypeIntent)
 		if !typeInDomain {
@@ -1108,11 +1123,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 				strings.Contains(domainInfo.rootLabel, query.siteTypeIntent)
 		}
 		if typeInDomain {
-			if domainInfo.isRootDomain {
-				score += 8000.0
-			} else {
-				score += 4000.0
-			}
+			score += 12000.0
 		}
 	}
 
