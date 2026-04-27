@@ -47,9 +47,14 @@ var contentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_is_seed ON pages(is_seed)`,
 
 	// --- Full-text search index ---
+	// Includes title, h1, description, schema_title, schema_description and content
+	// to improve matching on SPAs where visible content may be minimal.
 	`CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
 		title,
+		h1,
 		description,
+		schema_title,
+		schema_description,
 		content,
 		content='pages',
 		content_rowid='id',
@@ -58,20 +63,20 @@ var contentMigrations = []string{
 
 	// FTS5 synchronization triggers
 	`CREATE TRIGGER IF NOT EXISTS pages_fts_insert AFTER INSERT ON pages BEGIN
-		INSERT INTO pages_fts(rowid, title, description, content)
-		VALUES (new.id, new.title, new.description, new.content);
+		INSERT INTO pages_fts(rowid, title, h1, description, schema_title, schema_description, content)
+		VALUES (new.id, new.title, new.h1, new.description, new.schema_title, new.schema_description, new.content);
 	END`,
 
 	`CREATE TRIGGER IF NOT EXISTS pages_fts_delete AFTER DELETE ON pages BEGIN
-		INSERT INTO pages_fts(pages_fts, rowid, title, description, content)
-		VALUES ('delete', old.id, old.title, old.description, old.content);
+		INSERT INTO pages_fts(pages_fts, rowid, title, h1, description, schema_title, schema_description, content)
+		VALUES ('delete', old.id, old.title, old.h1, old.description, old.schema_title, old.schema_description, old.content);
 	END`,
 
 	`CREATE TRIGGER IF NOT EXISTS pages_fts_update AFTER UPDATE ON pages BEGIN
-		INSERT INTO pages_fts(pages_fts, rowid, title, description, content)
-		VALUES ('delete', old.id, old.title, old.description, old.content);
-		INSERT INTO pages_fts(rowid, title, description, content)
-		VALUES (new.id, new.title, new.description, new.content);
+		INSERT INTO pages_fts(pages_fts, rowid, title, h1, description, schema_title, schema_description, content)
+		VALUES ('delete', old.id, old.title, old.h1, old.description, old.schema_title, old.schema_description, old.content);
+		INSERT INTO pages_fts(rowid, title, h1, description, schema_title, schema_description, content)
+		VALUES (new.id, new.title, new.h1, new.description, new.schema_title, new.schema_description, new.content);
 	END`,
 
 	// --- Phase 2: Global IDF (FTS5 Vocab) ---

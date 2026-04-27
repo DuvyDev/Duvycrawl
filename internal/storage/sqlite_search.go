@@ -1046,6 +1046,18 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 	}
 
+	// --- Absolute homepage boost for navigational queries ---
+	// When the user is clearly looking for a site (navigational query),
+	// the root homepage should always win against any sub-page.
+	// This compensates for SPAs where sub-pages may have richer titles.
+	if query.navigational && isHomepage && domainPhrase >= 0.75 {
+		if domainInfo.isRootDomain {
+			score += 15000.0
+		} else {
+			score += 8000.0
+		}
+	}
+
 	if query.navigational && domainInfo.isRootDomain && isHomepage && domainPhrase >= 0.95 {
 		score += 1200.0
 	}

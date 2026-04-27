@@ -173,6 +173,22 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	result.Content = normalizeWhitespace(contentText)
 
+	// Fallback for SPAs where dynamic content is empty but meta/schema data exists.
+	// Priority: og:description > schema_description > h1 + h2 headings.
+	if result.Content == "" {
+		if result.Description != "" {
+			result.Content = result.Description
+		} else if result.SchemaDescription != "" {
+			result.Content = result.SchemaDescription
+		} else if result.H1 != "" {
+			parts := []string{result.H1}
+			if result.H2 != "" {
+				parts = append(parts, result.H2)
+			}
+			result.Content = strings.Join(parts, " ")
+		}
+	}
+
 	// Truncate content to a reasonable size (100KB of text).
 	if len(result.Content) > 100*1024 {
 		result.Content = result.Content[:100*1024]
