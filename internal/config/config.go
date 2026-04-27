@@ -73,6 +73,12 @@ type CrawlerConfig struct {
 	// AutoStart controls whether the crawler starts automatically on launch.
 	// When false, you must start it via the API: POST /api/v1/crawler/start
 	AutoStart bool `yaml:"auto_start"`
+	// ScoringStrategy selects the frontier scoring algorithm:
+	// "static"  — legacy priority-based behaviour (default)
+	// "adaptive" — A*-like best-first that learns from searches and clicks
+	ScoringStrategy string `yaml:"scoring_strategy"`
+	// Adaptive holds the parameters for the adaptive scorer.
+	Adaptive AdaptiveConfig `yaml:"adaptive"`
 }
 
 // SeedConfig represents a seed domain defined in the configuration file.
@@ -83,6 +89,32 @@ type SeedConfig struct {
 	Priority int `yaml:"priority"`
 	// StartURLs are the initial pages to crawl. If empty, "https://<domain>/" is used.
 	StartURLs []string `yaml:"start_urls"`
+}
+
+// AdaptiveConfig holds tunable parameters for the adaptive (A*-like) scorer.
+type AdaptiveConfig struct {
+	// MinQueriesBeforeBoost is the number of search queries that must be
+	// recorded before the adaptive heuristic is activated. Until then the
+	// scorer behaves almost like the static strategy.
+	MinQueriesBeforeBoost int `yaml:"min_queries_before_boost"`
+	// DepthPenaltyK controls the sub-linear depth penalty:
+	//   penalty = k * ln(1 + depth)
+	DepthPenaltyK float64 `yaml:"depth_penalty_k"`
+	// ProfileRefreshInterval is how often the in-memory interest profile is
+	// reloaded from SQLite.
+	ProfileRefreshInterval time.Duration `yaml:"profile_refresh_interval"`
+	// SeedBonus is added to the score of seed-domain URLs (depth == 0).
+	SeedBonus float64 `yaml:"seed_bonus"`
+	// AnchorWeight is the multiplier for term matches in link anchor text.
+	AnchorWeight float64 `yaml:"anchor_weight"`
+	// URLPathWeight is the multiplier for term matches in the URL path.
+	URLPathWeight float64 `yaml:"url_path_weight"`
+	// SourceTitleWeight is the multiplier for term matches in the parent page title.
+	SourceTitleWeight float64 `yaml:"source_title_weight"`
+	// DomainReputationWeight is the multiplier for the domain's reputation score.
+	DomainReputationWeight float64 `yaml:"domain_reputation_weight"`
+	// LanguageMatchBonus is added when a link's language matches the profile.
+	LanguageMatchBonus float64 `yaml:"language_match_bonus"`
 }
 
 // StorageConfig controls data persistence.
@@ -133,6 +165,18 @@ func DefaultConfig() *Config {
 			MaxFallbackRetries:       1,
 			DomainStatsFlushInterval: 30 * time.Second,
 			AutoStart:                true,
+			ScoringStrategy:          "adaptive",
+			Adaptive: AdaptiveConfig{
+				MinQueriesBeforeBoost:  3,
+				DepthPenaltyK:          5.0,
+				ProfileRefreshInterval: 60 * time.Second,
+				SeedBonus:              50.0,
+				AnchorWeight:           40.0,
+				URLPathWeight:          30.0,
+				SourceTitleWeight:      20.0,
+				DomainReputationWeight: 25.0,
+				LanguageMatchBonus:     15.0,
+			},
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",

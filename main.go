@@ -21,6 +21,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
 	"github.com/DuvyDev/Duvycrawl/internal/scheduler"
+	"github.com/DuvyDev/Duvycrawl/internal/scorer"
 	"github.com/DuvyDev/Duvycrawl/internal/seeds"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
@@ -67,9 +68,26 @@ func run() error {
 	}
 	defer store.Close()
 
+	// --- Initialize Scorer ---
+	var scoringEngine scorer.Scorer
+	if cfg.Crawler.ScoringStrategy == "adaptive" {
+		adaptive := scorer.NewAdaptive(store, cfg.Crawler.Adaptive, logger)
+		adaptive.StartRefreshLoop(ctx)
+		scoringEngine = adaptive
+	} else {
+		scoringEngine = scorer.NewStatic(
+			cfg.Crawler.Adaptive.SeedBonus,
+			storage.PriorityNormal,
+			storage.PriorityRecrawl,
+			cfg.Crawler.Adaptive.DepthPenaltyK,
+			logger,
+		)
+	}
+	logger.Info("scoring strategy", "strategy", scoringEngine.Name())
+
 	// --- Initialize Components ---
 	crawlQueue := queue.New()
-	front := frontier.New(crawlQueue, store, logger)
+	front := frontier.New(crawlQueue, store, scoringEngine, logger)
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
@@ -241,10 +259,10 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 	registered := 0
 	enqueued := 0
 	for _, seed := range seedList {
-		// Apply default priority if not set.
-		priority := seed.Priority
-		if priority <= 0 {
-			priority = 100
+		// Apply default base score if not set.
+		baseScore := float64(seed.Priority)
+		if baseScore <= 0 {
+			baseScore = storage.PrioritySeed
 		}
 
 		// Register the domain as a seed (only if not already registered).
@@ -273,7 +291,7 @@ func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.S
 			startURLs = []string{"https://" + seed.Domain + "/"}
 		}
 
-		if _, err := front.AddBatchDirect(ctx, startURLs, 0, priority); err != nil {
+		if _, err := front.AddBatchDirect(ctx, startURLs, 0, baseScore); err != nil {
 			logger.Warn("failed to enqueue seed URLs",
 				"domain", seed.Domain,
 				"error", err,

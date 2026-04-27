@@ -12,31 +12,44 @@ import (
 	"strings"
 
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
+	"github.com/DuvyDev/Duvycrawl/internal/scorer"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
+
+// LinkContext carries metadata about a discovered link that the scorer can
+// use to estimate relevance *before* the page is crawled.
+type LinkContext struct {
+	URL              string
+	AnchorText       string
+	SourcePageTitle  string
+	SourceSchemaType string
+	SourceLanguage   string
+}
 
 // Frontier manages the URL crawl queue, providing deduplication and
 // priority-based dispatching of URLs to crawler workers.
 type Frontier struct {
 	queue  *queue.Queue
 	store  storage.Storage
+	scorer scorer.Scorer
 	logger *slog.Logger
 }
 
-// New creates a new Frontier backed by the given in-memory queue
-// and storage (used only for checking already-crawled pages).
-func New(q *queue.Queue, store storage.Storage, logger *slog.Logger) *Frontier {
+// New creates a new Frontier backed by the given in-memory queue,
+// storage (used for checking already-crawled pages), and scorer.
+func New(q *queue.Queue, store storage.Storage, sc scorer.Scorer, logger *slog.Logger) *Frontier {
 	return &Frontier{
 		queue:  q,
 		store:  store,
+		scorer: sc,
 		logger: logger.With("component", "frontier"),
 	}
 }
 
-// Add enqueues a single URL for crawling with the given depth and priority.
+// Add enqueues a single URL for crawling with the given depth.
 // The URL is normalized and deduplicated (ignored if already in the queue or
-// already crawled).
-func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) error {
+// already crawled). The score is computed by the scorer.
+func (f *Frontier) Add(ctx context.Context, rawURL string, depth int, baseScore float64) error {
 	normalized, domain, err := CanonicalizeURL(rawURL)
 	if err != nil {
 		return nil // Silently ignore unparseable URLs.
@@ -71,13 +84,15 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 		return nil
 	}
 
-	f.queue.Enqueue(&queue.Job{
+	job := &queue.Job{
 		URL:         normalized,
 		Domain:      domain,
 		Depth:       depth,
-		Priority:    priority,
+		BaseScore:   baseScore,
 		Fingerprint: fingerprint,
-	})
+	}
+	job.Score = f.scorer.Score(job)
+	f.queue.Enqueue(job)
 
 	return nil
 }
@@ -89,8 +104,8 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth, priority int) 
 // Deduplication is performed in two stages:
 //  1. Bloom filter (in-memory, O(1)) — catches ~99.9% of duplicates.
 //  2. SQLite batch lookup — confirms the remainder in 2 queries instead of 2N.
-func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priority int) error {
-	if len(rawURLs) == 0 {
+func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int, baseScore float64) error {
+	if len(links) == 0 {
 		return nil
 	}
 
@@ -98,14 +113,15 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 		normalized  string
 		domain      string
 		fingerprint string
+		ctx         LinkContext
 	}
 
 	var candidates []candidate
 	var urlBatch []string
 	var fingerprintBatch []string
 
-	for _, rawURL := range rawURLs {
-		normalized, domain, err := CanonicalizeURL(rawURL)
+	for _, link := range links {
+		normalized, domain, err := CanonicalizeURL(link.URL)
 		if err != nil {
 			continue
 		}
@@ -117,7 +133,7 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 			continue
 		}
 
-		candidates = append(candidates, candidate{normalized, domain, fingerprint})
+		candidates = append(candidates, candidate{normalized, domain, fingerprint, link})
 		urlBatch = append(urlBatch, normalized)
 		fingerprintBatch = append(fingerprintBatch, fingerprint)
 	}
@@ -150,13 +166,19 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 			continue
 		}
 
-		jobs = append(jobs, &queue.Job{
-			URL:         c.normalized,
-			Domain:      c.domain,
-			Depth:       depth,
-			Priority:    priority,
-			Fingerprint: c.fingerprint,
-		})
+		job := &queue.Job{
+			URL:              c.normalized,
+			Domain:           c.domain,
+			Depth:            depth,
+			BaseScore:        baseScore,
+			Fingerprint:      c.fingerprint,
+			AnchorText:       c.ctx.AnchorText,
+			SourcePageTitle:  c.ctx.SourcePageTitle,
+			SourceSchemaType: c.ctx.SourceSchemaType,
+			SourceLanguage:   c.ctx.SourceLanguage,
+		}
+		job.Score = f.scorer.Score(job)
+		jobs = append(jobs, job)
 	}
 
 	if len(jobs) == 0 {
@@ -169,7 +191,6 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 			"submitted", len(jobs),
 			"added", added,
 			"depth", depth,
-			"priority", priority,
 		)
 	}
 	return nil
@@ -179,7 +200,7 @@ func (f *Frontier) AddBatch(ctx context.Context, rawURLs []string, depth, priori
 // filter. Use this for seed injection (startup), scheduler re-crawls, and
 // API-requested crawls — cases where we explicitly want to (re)crawl.
 // Returns the number of URLs actually enqueued.
-func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, priority int) (int, error) {
+func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth int, baseScore float64) (int, error) {
 	if len(rawURLs) == 0 {
 		return 0, nil
 	}
@@ -192,13 +213,15 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 		}
 
 		fingerprint := FingerprintURL(normalized)
-		jobs = append(jobs, &queue.Job{
+		job := &queue.Job{
 			URL:         normalized,
 			Domain:      domain,
 			Depth:       depth,
-			Priority:    priority,
+			BaseScore:   baseScore,
 			Fingerprint: fingerprint,
-		})
+		}
+		job.Score = f.scorer.Score(job)
+		jobs = append(jobs, job)
 	}
 
 	if len(jobs) == 0 {
@@ -211,7 +234,6 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth, 
 			"submitted", len(jobs),
 			"added", added,
 			"depth", depth,
-			"priority", priority,
 		)
 	}
 	return added, nil

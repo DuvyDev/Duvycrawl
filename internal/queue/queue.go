@@ -31,13 +31,20 @@ const bloomFPP float64 = 0.001
 
 // Job represents a URL queued for crawling.
 type Job struct {
-	ID          int64
-	URL         string
-	Domain      string
-	Depth       int
-	Priority    int    // Higher = more urgent.
-	Fingerprint string // Structural fingerprint for deduplication.
-	Retries     int    // Number of times this job has been retried.
+	ID               int64
+	URL              string
+	Domain           string
+	Depth            int
+	Score            float64 // Computed by the scorer; higher = crawled sooner.
+	BaseScore        float64 // Legacy static bonus (seed, recrawl, etc.).
+	Fingerprint      string  // Structural fingerprint for deduplication.
+	Retries          int     // Number of times this job has been retried.
+
+	// Context signals for the adaptive scorer (cheap, pre-crawl).
+	AnchorText       string
+	SourcePageTitle  string
+	SourceSchemaType string
+	SourceLanguage   string
 }
 
 // Stats provides a snapshot of the queue state.
@@ -63,7 +70,7 @@ type DomainReadyFunc func(domain string) bool
 type Queue struct {
 	mu      sync.Mutex
 	cond    *sync.Cond         // wakes ALL waiting workers on new jobs
-	domains map[string][]*Job  // domain → jobs sorted by priority desc
+	domains map[string][]*Job  // domain → jobs sorted by score desc
 	bloom   *bloom.BloomFilter // URL deduplication via Bloom filter
 	nextID  atomic.Int64       // auto-increment job ID
 	round   atomic.Uint64      // dequeue round counter for random offset
@@ -115,7 +122,7 @@ func (q *Queue) Enqueue(job *Job) bool {
 	job.ID = q.nextID.Add(1)
 	q.bloom.AddString(key)
 
-	// Insert into the domain's queue, maintaining priority order (desc).
+	// Insert into the domain's queue, maintaining score order (desc).
 	q.domains[job.Domain] = insertSorted(q.domains[job.Domain], job)
 	q.enqueued.Add(1)
 
@@ -199,7 +206,7 @@ func (q *Queue) EnqueueBatchDirect(jobs []*Job) int {
 }
 
 // Dequeue finds the highest-priority job from any domain where
-// readyFn returns true. It sorts candidates by priority first, then
+// readyFn returns true. It sorts candidates by score first, then
 // checks readiness in order — calling readyFn only once (on the first
 // ready domain) to avoid wasting rate limit reservations.
 //
@@ -264,16 +271,16 @@ func (q *Queue) DequeueWithWait(ctx context.Context, readyFn DomainReadyFunc) *J
 //
 // Instead of sorting all domains (O(n log n) under lock), it uses a
 // two-pass approach:
-//  1. Scan all domains to find the max priority.
-//  2. Iterate from a random offset, trying only domains at max priority.
+//  1. Scan all domains to find the max score.
+//  2. Iterate from a random offset, trying only domains at max score.
 //     If none are ready, try any domain.
 //
 // The random offset prevents thundering herd where all 300 workers
-// compete for the same high-priority domain.
+// compete for the same high-score domain.
 // candidate represents a domain with at least one pending job.
 type candidate struct {
-	domain   string
-	priority int
+	domain string
+	score  float64
 }
 
 func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
@@ -285,13 +292,13 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 	// Reuse the internal buffer to avoid allocating a new slice on every
 	// dequeue call (significant GC savings with hundreds of workers).
 	q.candidateBuf = q.candidateBuf[:0]
-	maxPriority := -1
+	maxScore := -1.0
 	for domain, jobs := range q.domains {
 		if len(jobs) > 0 {
-			p := jobs[0].Priority
-			q.candidateBuf = append(q.candidateBuf, candidate{domain, p})
-			if p > maxPriority {
-				maxPriority = p
+			s := jobs[0].Score
+			q.candidateBuf = append(q.candidateBuf, candidate{domain, s})
+			if s > maxScore {
+				maxScore = s
 			}
 		}
 	}
@@ -304,10 +311,10 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 	// start scanning from different positions, spreading load across domains.
 	offset := int(q.round.Add(1)) % len(q.candidateBuf)
 
-	// Pass 1: try domains at max priority (from random offset).
+	// Pass 1: try domains at max score (from random offset).
 	for i := 0; i < len(q.candidateBuf); i++ {
 		c := q.candidateBuf[(offset+i)%len(q.candidateBuf)]
-		if c.priority != maxPriority {
+		if c.score != maxScore {
 			continue
 		}
 		if readyFn(c.domain) {
@@ -315,11 +322,11 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 		}
 	}
 
-	// Pass 2: try any domain (from random offset) — lower priority is
+	// Pass 2: try any domain (from random offset) — lower score is
 	// better than no work at all.
 	for i := 0; i < len(q.candidateBuf); i++ {
 		c := q.candidateBuf[(offset+i)%len(q.candidateBuf)]
-		if c.priority == maxPriority {
+		if c.score == maxScore {
 			continue // already tried in pass 1
 		}
 		if readyFn(c.domain) {
@@ -392,10 +399,10 @@ func (q *Queue) Stats() Stats {
 	}
 }
 
-// insertSorted inserts a job into a slice maintaining descending priority order.
+// insertSorted inserts a job into a slice maintaining descending score order.
 func insertSorted(jobs []*Job, job *Job) []*Job {
 	i := sort.Search(len(jobs), func(i int) bool {
-		return jobs[i].Priority < job.Priority
+		return jobs[i].Score < job.Score
 	})
 	// Insert at position i.
 	jobs = append(jobs, nil)

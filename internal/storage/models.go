@@ -40,7 +40,7 @@ type CrawlJob struct {
 	URL      string    `json:"url"`
 	Domain   string    `json:"domain"`
 	Depth    int       `json:"depth"`
-	Priority int       `json:"priority"` // Higher = more urgent
+	Score    float64   `json:"score"` // Higher = more urgent (was Priority int)
 	Status   string    `json:"status"`   // pending, in_progress, done, failed
 	Retries  int       `json:"retries"`
 	ErrorMsg string    `json:"error_msg,omitempty"`
@@ -56,12 +56,12 @@ const (
 	JobStatusFailed     = "failed"
 )
 
-// Priority levels for the URL frontier.
+// Priority levels for the URL frontier (used as BaseScore in adaptive mode).
 const (
-	PrioritySeed      = 100 // Manually specified seed domains
-	PriorityDiscovery = 50  // Domains with few pages
-	PriorityNormal    = 10  // Standard discovered URLs
-	PriorityRecrawl   = 5   // Re-crawl of existing pages
+	PrioritySeed      = 100.0 // Manually specified seed domains
+	PriorityDiscovery = 50.0  // Domains with few pages
+	PriorityNormal    = 10.0  // Standard discovered URLs
+	PriorityRecrawl   = 5.0   // Re-crawl of existing pages
 )
 
 // Domain represents a known domain with crawl metadata and statistics.

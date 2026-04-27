@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/crawler"
@@ -108,6 +109,18 @@ func (h *Handlers) Search(w http.ResponseWriter, r *http.Request) {
 
 	if results == nil {
 		results = []storage.SearchResult{}
+	}
+
+	// Record the query for adaptive scoring (fire-and-forget).
+	normalizedQuery := strings.ToLower(strings.TrimSpace(query))
+	if normalizedQuery != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.store.RecordSearchQuery(ctx, query, normalizedQuery, lang); err != nil {
+				h.logger.Warn("failed to record search query", "error", err)
+			}
+		}()
 	}
 
 	// Allow Cloudflare / reverse proxies to cache identical queries briefly.
@@ -225,9 +238,9 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	priority := req.Priority
-	if priority <= 0 {
-		priority = storage.PriorityNormal
+	baseScore := float64(req.Priority)
+	if baseScore <= 0 {
+		baseScore = storage.PriorityNormal
 	}
 
 	urlsToEnqueue := req.URLs
@@ -255,7 +268,7 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 	var queued int
 	if len(urlsToEnqueue) > 0 {
 		var err error
-		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, 0, priority)
+		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, 0, baseScore)
 		if err != nil {
 			h.logger.Error("failed to enqueue URLs", "error", err, "count", len(urlsToEnqueue))
 			writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
@@ -380,13 +393,13 @@ func (h *Handlers) AddSeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Also enqueue the domain's home page.
-	priority := req.Priority
-	if priority <= 0 {
-		priority = storage.PrioritySeed
+	baseScore := float64(req.Priority)
+	if baseScore <= 0 {
+		baseScore = storage.PrioritySeed
 	}
 
 	homeURL := "https://" + req.Domain + "/"
-	if err := h.frontier.Add(r.Context(), homeURL, 0, priority); err != nil {
+	if err := h.frontier.Add(r.Context(), homeURL, 0, baseScore); err != nil {
 		h.logger.Warn("failed to enqueue seed home page", "url", homeURL, "error", err)
 	}
 
@@ -563,7 +576,8 @@ type interactRequest struct {
 	URL   string `json:"url"`
 }
 
-// Interact records a user click on a search result.
+// Interact records a user click on a search result and boosts the adaptive
+// profile with terms from the clicked page.
 func (h *Handlers) Interact(w http.ResponseWriter, r *http.Request) {
 	var req interactRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -581,6 +595,15 @@ func (h *Handlers) Interact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to record interaction")
 		return
 	}
+
+	// Boost terms from the clicked page in the background.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := h.store.BoostTermsFromClick(ctx, req.Query, req.URL, 3.0); err != nil {
+			h.logger.Warn("failed to boost terms from click", "error", err)
+		}
+	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"message": "interaction recorded",

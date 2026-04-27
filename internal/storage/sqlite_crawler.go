@@ -224,10 +224,10 @@ func (s *SQLiteStorage) GetFreshURLs(ctx context.Context, urls []string, newerTh
 // If the URL already exists in the queue, it is silently ignored.
 func (s *SQLiteStorage) EnqueueURL(ctx context.Context, job *CrawlJob) error {
 	query := `
-		INSERT OR IGNORE INTO crawl_queue (url, domain, depth, priority, status)
+		INSERT OR IGNORE INTO crawl_queue (url, domain, depth, score, status)
 		VALUES (?, ?, ?, ?, ?)
 	`
-	_, err := s.crawlerDB.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending)
+	_, err := s.crawlerDB.ExecContext(ctx, query, job.URL, job.Domain, job.Depth, job.Score, JobStatusPending)
 	if err != nil {
 		return fmt.Errorf("enqueuing URL %q: %w", job.URL, err)
 	}
@@ -246,14 +246,14 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO crawl_queue (url, domain, depth, priority, status) VALUES (?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO crawl_queue (url, domain, depth, score, status) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("preparing enqueue statement: %w", err)
 	}
 	defer stmt.Close()
 
 	for _, job := range jobs {
-		if _, err := stmt.ExecContext(ctx, job.URL, job.Domain, job.Depth, job.Priority, JobStatusPending); err != nil {
+		if _, err := stmt.ExecContext(ctx, job.URL, job.Domain, job.Depth, job.Score, JobStatusPending); err != nil {
 			return fmt.Errorf("enqueuing URL %q: %w", job.URL, err)
 		}
 	}
@@ -275,10 +275,10 @@ func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob
 
 	// Select and lock pending jobs.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, url, domain, depth, priority, retries
+		SELECT id, url, domain, depth, score, retries
 		FROM crawl_queue
 		WHERE status = ?
-		ORDER BY priority DESC, added_at ASC
+		ORDER BY score DESC, added_at ASC
 		LIMIT ?
 	`, JobStatusPending, limit)
 	if err != nil {
@@ -288,7 +288,7 @@ func (s *SQLiteStorage) DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob
 	var jobs []*CrawlJob
 	for rows.Next() {
 		var j CrawlJob
-		if err := rows.Scan(&j.ID, &j.URL, &j.Domain, &j.Depth, &j.Priority, &j.Retries); err != nil {
+		if err := rows.Scan(&j.ID, &j.URL, &j.Domain, &j.Depth, &j.Score, &j.Retries); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scanning job: %w", err)
 		}
@@ -367,10 +367,10 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 	args = append(args, limit)
 
 	query := fmt.Sprintf(`
-		SELECT id, url, domain, depth, priority, retries
+		SELECT id, url, domain, depth, score, retries
 		FROM crawl_queue
 		WHERE status = ? AND domain NOT IN (%s)
-		ORDER BY priority DESC, added_at ASC
+		ORDER BY score DESC, added_at ASC
 		LIMIT ?
 	`, strings.Join(placeholders, ","))
 
@@ -382,7 +382,7 @@ func (s *SQLiteStorage) DequeueURLsExcluding(ctx context.Context, limit int, exc
 	var jobs []*CrawlJob
 	for rows.Next() {
 		var j CrawlJob
-		if err := rows.Scan(&j.ID, &j.URL, &j.Domain, &j.Depth, &j.Priority, &j.Retries); err != nil {
+		if err := rows.Scan(&j.ID, &j.URL, &j.Domain, &j.Depth, &j.Score, &j.Retries); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scanning job: %w", err)
 		}

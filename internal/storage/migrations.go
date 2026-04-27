@@ -131,6 +131,32 @@ var contentMigrations = []string{
 		UNIQUE(query, url)
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_search_clicks_query ON search_clicks(query)`,
+
+	// --- Phase 4: Adaptive Interest Profile ---
+	`CREATE TABLE IF NOT EXISTS search_queries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		query TEXT NOT NULL,
+		normalized_query TEXT NOT NULL,
+		lang TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_search_queries_normalized ON search_queries(normalized_query)`,
+
+	`CREATE TABLE IF NOT EXISTS interest_terms (
+		term TEXT NOT NULL,
+		weight REAL NOT NULL DEFAULT 1.0,
+		source TEXT NOT NULL DEFAULT 'query',
+		lang TEXT,
+		last_seen DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY(term, source)
+	)`,
+
+	`CREATE TABLE IF NOT EXISTS domain_relevance (
+		domain TEXT NOT NULL PRIMARY KEY,
+		score REAL NOT NULL DEFAULT 0.0,
+		pages_count INTEGER NOT NULL DEFAULT 0,
+		last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`,
 }
 
 var crawlerMigrations = []string{
@@ -140,14 +166,14 @@ var crawlerMigrations = []string{
 		url       TEXT    NOT NULL UNIQUE,
 		domain    TEXT    NOT NULL DEFAULT '',
 		depth     INTEGER NOT NULL DEFAULT 0,
-		priority  INTEGER NOT NULL DEFAULT 0,
+		score     REAL    NOT NULL DEFAULT 0,
 		status    TEXT    NOT NULL DEFAULT 'pending',
 		retries   INTEGER NOT NULL DEFAULT 0,
 		error_msg TEXT    NOT NULL DEFAULT '',
 		added_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		locked_at DATETIME
 	)`,
-	`CREATE INDEX IF NOT EXISTS idx_queue_status_priority ON crawl_queue(status, priority DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_queue_status_score ON crawl_queue(status, score DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_queue_domain ON crawl_queue(domain)`,
 
 	// --- Domains table ---

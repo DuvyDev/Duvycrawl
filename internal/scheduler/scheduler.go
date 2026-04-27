@@ -105,7 +105,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 }
 
 // requeueStalePages finds pages older than the cutoff and re-adds them to the frontier.
-func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, priority, limit int) {
+func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, baseScore float64, limit int) {
 	pages, err := s.store.GetStalePages(ctx, olderThan, limit)
 	if err != nil {
 		s.logger.Error("failed to get stale pages", "error", err)
@@ -121,7 +121,7 @@ func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, 
 		urls = append(urls, p.URL)
 	}
 
-	if _, err := s.frontier.AddBatchDirect(ctx, urls, 0, priority); err != nil {
+	if _, err := s.frontier.AddBatchDirect(ctx, urls, 0, baseScore); err != nil {
 		s.logger.Error("failed to re-enqueue stale pages",
 			"error", err,
 			"count", len(urls),
@@ -131,7 +131,7 @@ func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, 
 
 	s.logger.Info("re-enqueued stale pages for re-crawl",
 		"count", len(urls),
-		"priority", priority,
+		"base_score", baseScore,
 		"older_than", olderThan.Format(time.RFC3339),
 	)
 }

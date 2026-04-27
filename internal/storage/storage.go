@@ -136,6 +136,26 @@ type Storage interface {
 	// RecordClick records a user interaction with a search result to improve future rankings.
 	RecordClick(ctx context.Context, query string, url string) error
 
+	// --- Adaptive Scoring / Interest Profile ---
+
+	// RecordSearchQuery stores a normalized search query and updates interest term weights.
+	RecordSearchQuery(ctx context.Context, query, normalizedQuery, lang string) error
+
+	// GetInterestProfile returns the accumulated term weights for adaptive scoring.
+	GetInterestProfile(ctx context.Context) (map[string]float64, error)
+
+	// GetDomainReputations returns the reputation score per domain.
+	GetDomainReputations(ctx context.Context) (map[string]float64, error)
+
+	// GetSearchQueryCount returns the total number of recorded queries.
+	GetSearchQueryCount(ctx context.Context) (int, error)
+
+	// UpdateDomainReputation adjusts the relevance score for a domain.
+	UpdateDomainReputation(ctx context.Context, domain string, relevanceDelta float64) error
+
+	// BoostTermsFromClick increases term weights based on a clicked result's content.
+	BoostTermsFromClick(ctx context.Context, query string, pageURL string, clickWeight float64) error
+
 	// Close gracefully shuts down the storage layer.
 	Close() error
 }

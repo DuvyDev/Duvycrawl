@@ -405,8 +405,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	}
 
 	// Enqueue discovered links if we haven't exceeded max depth.
-	if job.Depth < e.cfg.MaxDepth && len(parsed.Links) > 0 {
-		e.enqueueDiscoveredLinks(ctx, logger, parsed.Links, job.Depth+1)
+	if job.Depth < e.cfg.MaxDepth && len(parsed.Anchors) > 0 {
+		e.enqueueDiscoveredLinks(ctx, logger, parsed.Anchors, job.Depth+1, page)
 	}
 
 	// Update domain stats (async, in-memory accumulator).
@@ -415,14 +415,26 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.
 // When SeedDomainsOnly is enabled, links to non-seed domains are discarded.
-func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger, links []string, depth int) {
-	priority := storage.PriorityNormal
+func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger, anchors []LinkAnchor, depth int, page *storage.Page) {
+	baseScore := storage.PriorityNormal
+
+	// Build LinkContext for each anchor.
+	var links []frontier.LinkContext
+	for _, a := range anchors {
+		links = append(links, frontier.LinkContext{
+			URL:              a.URL,
+			AnchorText:       a.Anchor,
+			SourcePageTitle:  page.Title,
+			SourceSchemaType: page.SchemaType,
+			SourceLanguage:   page.Language,
+		})
+	}
 
 	// Filter by seed domains if configured.
 	if e.cfg.SeedDomainsOnly && len(e.seedDomains) > 0 {
-		filtered := make([]string, 0, len(links))
+		filtered := make([]frontier.LinkContext, 0, len(links))
 		for _, link := range links {
-			domain := frontier.ExtractDomain(link)
+			domain := frontier.ExtractDomain(link.URL)
 			if e.seedDomains[domain] {
 				filtered = append(filtered, link)
 			}
@@ -447,7 +459,7 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 		return
 	}
 
-	if err := e.frontier.AddBatch(ctx, links, depth, priority); err != nil {
+	if err := e.frontier.AddBatch(ctx, links, depth, baseScore); err != nil {
 		logger.Warn("failed to enqueue discovered links", "error", err, "count", len(links))
 	}
 }
