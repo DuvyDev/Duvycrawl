@@ -614,12 +614,12 @@ func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog
 	if job.description != "" {
 		text += " " + job.description
 	}
-	content := job.content
-	if len(content) > 2000 {
-		content = content[:2000]
-	}
-	if content != "" {
-		text += " " + content
+	if len(job.content) > 1500 {
+		// Truncate content conservatively to stay within all-minilm's
+		// 512-token context window (~1500 chars is a safe ceiling).
+		text += " " + job.content[:1500]
+	} else if job.content != "" {
+		text += " " + job.content
 	}
 	if text == "" {
 		return
