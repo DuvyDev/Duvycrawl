@@ -609,39 +609,94 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 }
 
 func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog.Logger) {
-	// Build a clean, concise representation for embedding.
-	text := sanitizeEmbedText(job.title)
-	if job.description != "" {
-		text += " " + sanitizeEmbedText(job.description)
-	}
-	if job.content != "" {
-		text += " " + sanitizeEmbedText(job.content)
-	}
+	// Build a clean representation prioritising title and description over raw
+	// content. Title is the strongest semantic signal, description next; content
+	// is used only if budget remains.
+	title := sanitizeEmbedText(job.title)
+	desc := sanitizeEmbedText(job.description)
+	content := sanitizeEmbedText(job.content)
+
+	text := buildEmbedText(title, desc, content, 768)
 	if text == "" {
 		return
 	}
 
 	// Try with progressively shorter text if Ollama rejects for context length.
-	// This handles edge cases where tokenization is unexpectedly inefficient.
 	maxLengths := []int{768, 512, 256}
 	for _, maxLen := range maxLengths {
-		candidate := text
-		if len(candidate) > maxLen {
-			candidate = candidate[:maxLen]
-		}
+		candidate := buildEmbedText(title, desc, content, maxLen)
 
 		vec, err := e.embedder.GenerateEmbedding(candidate)
 		if err == nil {
 			e.saveEmbedding(ctx, job.pageURL, vec, logger)
 			return
 		}
-		// If it's a 500, retry with shorter text. Otherwise give up.
 		if !isContextLengthError(err) {
 			logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
 			return
 		}
 		logger.Debug("embedding context exceeded, retrying shorter", "url", job.pageURL, "len", maxLen)
 	}
+}
+
+// buildEmbedText assembles title + description + content, always keeping the
+// title intact, then fitting as much description as possible, and finally
+// padding with content up to maxLen. Never cuts mid-word.
+func buildEmbedText(title, desc, content string, maxLen int) string {
+	if title == "" && desc == "" && content == "" {
+		return ""
+	}
+
+	parts := []string{}
+	remaining := maxLen
+
+	// Title always goes in full (it's the strongest signal).
+	if title != "" {
+		parts = append(parts, title)
+		remaining -= len(title)
+	}
+
+	// Fit description next, truncated at last full word if needed.
+	if desc != "" && remaining > 1 {
+		descPart := desc
+		if len(descPart) >= remaining {
+			descPart = truncateAtWordBoundary(desc, remaining-1) // -1 for space
+		}
+		if descPart != "" {
+			parts = append(parts, descPart)
+			remaining -= len(descPart) + 1
+		}
+	}
+
+	// Whatever space is left goes to content.
+	if content != "" && remaining > 1 {
+		contentPart := content
+		if len(contentPart) >= remaining {
+			contentPart = truncateAtWordBoundary(content, remaining-1)
+		}
+		if contentPart != "" {
+			parts = append(parts, contentPart)
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// truncateAtWordBoundary cuts s to fit within maxLen bytes without breaking
+// a word. If the first word is longer than maxLen, it falls back to a hard
+// truncation.
+func truncateAtWordBoundary(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	// Walk backwards from maxLen to find a space.
+	for i := maxLen; i > 0; i-- {
+		if s[i] == ' ' {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	// No space found — hard truncate.
+	return s[:maxLen]
 }
 
 // isContextLengthError detects if an error is due to exceeding the model's context window.
