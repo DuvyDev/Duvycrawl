@@ -17,6 +17,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/api"
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/crawler"
+	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
@@ -97,7 +98,11 @@ func run() error {
 	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)
 	defer domainStats.Stop()
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, proxyURL, logger)
+	// Initialize Ollama embedder for semantic search (optional — falls back to lexical-only if unavailable).
+	embedClient := embedder.NewClient()
+	store.WithEmbedder(embedClient)
+
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, proxyURL, logger)
 
 	sched := scheduler.New(store, front, scheduler.DefaultPolicy(), logger)
 

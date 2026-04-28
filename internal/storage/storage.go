@@ -136,6 +136,17 @@ type Storage interface {
 	// RecordClick records a user interaction with a search result to improve future rankings.
 	RecordClick(ctx context.Context, query string, url string) error
 
+	// --- Embeddings ---
+
+	// SavePageEmbedding stores a vector embedding for a crawled page.
+	SavePageEmbedding(ctx context.Context, emb *PageEmbedding) error
+
+	// GetPageEmbeddings returns embeddings for the given page IDs.
+	GetPageEmbeddings(ctx context.Context, pageIDs []int64) (map[int64]*PageEmbedding, error)
+
+	// GetEmbeddingStats returns statistics about the embedding index.
+	GetEmbeddingStats(ctx context.Context) (totalPages, embeddedPages, avgDimensions int, model string, err error)
+
 	// --- Adaptive Scoring / Interest Profile ---
 
 	// RecordSearchQuery stores a normalized search query and updates interest term weights.

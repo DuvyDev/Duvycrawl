@@ -55,6 +55,7 @@ func NewServer(
 
 	// Stats
 	mux.HandleFunc("GET /api/v1/stats", handlers.GetStats)
+	mux.HandleFunc("GET /api/v1/stats/embeddings", handlers.GetEmbeddingStats)
 
 	// Crawl
 	mux.HandleFunc("POST /api/v1/crawl", handlers.CrawlURLs)

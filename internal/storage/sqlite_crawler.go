@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -1002,4 +1004,119 @@ func (s *SQLiteStorage) GetBacklinkCount(ctx context.Context, targetURL string) 
 		return 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
 	}
 	return count, nil
+}
+
+// --------------------------------------------------------------------------
+// Embeddings
+// --------------------------------------------------------------------------
+
+// float32SliceToBytes converts a []float32 to a little-endian byte slice for SQLite BLOB storage.
+func float32SliceToBytes(f []float32) []byte {
+	buf := new(bytes.Buffer)
+	for _, v := range f {
+		_ = binary.Write(buf, binary.LittleEndian, v)
+	}
+	return buf.Bytes()
+}
+
+// bytesToFloat32Slice converts a little-endian byte slice back to []float32.
+func bytesToFloat32Slice(b []byte) []float32 {
+	if len(b)%4 != 0 {
+		return nil
+	}
+	count := len(b) / 4
+	f := make([]float32, count)
+	buf := bytes.NewReader(b)
+	for i := 0; i < count; i++ {
+		_ = binary.Read(buf, binary.LittleEndian, &f[i])
+	}
+	return f
+}
+
+// SavePageEmbedding stores or replaces a vector embedding for a page.
+func (s *SQLiteStorage) SavePageEmbedding(ctx context.Context, emb *PageEmbedding) error {
+	if emb == nil || len(emb.Embedding) == 0 {
+		return nil
+	}
+	blob := float32SliceToBytes(emb.Embedding)
+	_, err := s.writeContentDB.ExecContext(ctx, `
+		INSERT INTO page_embeddings (page_id, model, dimensions, embedding, created_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(page_id) DO UPDATE SET
+			model = excluded.model,
+			dimensions = excluded.dimensions,
+			embedding = excluded.embedding,
+			created_at = CURRENT_TIMESTAMP
+	`, emb.PageID, emb.Model, emb.Dimensions, blob)
+	if err != nil {
+		return fmt.Errorf("saving page embedding for page %d: %w", emb.PageID, err)
+	}
+	return nil
+}
+
+// GetEmbeddingStats returns statistics about the embedding index.
+func (s *SQLiteStorage) GetEmbeddingStats(ctx context.Context) (totalPages, embeddedPages, avgDimensions int, model string, err error) {
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages`).Scan(&totalPages); err != nil {
+		return 0, 0, 0, "", fmt.Errorf("counting total pages: %w", err)
+	}
+
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM page_embeddings`).Scan(&embeddedPages); err != nil {
+		return totalPages, 0, 0, "", fmt.Errorf("counting embedded pages: %w", err)
+	}
+
+	var avgDim sql.NullFloat64
+	var modelName sql.NullString
+	if err := s.readContentDB.QueryRowContext(ctx, `
+		SELECT AVG(dimensions), MAX(model) FROM page_embeddings
+	`).Scan(&avgDim, &modelName); err != nil {
+		return totalPages, embeddedPages, 0, "", fmt.Errorf("computing embedding stats: %w", err)
+	}
+
+	if avgDim.Valid {
+		avgDimensions = int(avgDim.Float64)
+	}
+	if modelName.Valid {
+		model = modelName.String
+	}
+	return totalPages, embeddedPages, avgDimensions, model, nil
+}
+
+// GetPageEmbeddings returns embeddings for the given page IDs.
+func (s *SQLiteStorage) GetPageEmbeddings(ctx context.Context, pageIDs []int64) (map[int64]*PageEmbedding, error) {
+	if len(pageIDs) == 0 {
+		return map[int64]*PageEmbedding{}, nil
+	}
+
+	placeholders := make([]string, len(pageIDs))
+	args := make([]any, len(pageIDs))
+	for i, id := range pageIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(
+		"SELECT page_id, model, dimensions, embedding, created_at FROM page_embeddings WHERE page_id IN (%s)",
+		strings.Join(placeholders, ","),
+	)
+	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("querying page embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[int64]*PageEmbedding, len(pageIDs))
+	for rows.Next() {
+		var emb PageEmbedding
+		var blob []byte
+		var createdAt sql.NullTime
+		if err := rows.Scan(&emb.PageID, &emb.Model, &emb.Dimensions, &blob, &createdAt); err != nil {
+			continue
+		}
+		emb.Embedding = bytesToFloat32Slice(blob)
+		if createdAt.Valid {
+			emb.CreatedAt = createdAt.Time
+		}
+		result[emb.PageID] = &emb
+	}
+	return result, rows.Err()
 }

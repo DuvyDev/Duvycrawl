@@ -120,6 +120,40 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	reranked := rerankSearchCandidates(candidates, q, lang)
+
+	// --- Semantic re-ranking via embeddings (if Ollama is available) ---
+	if len(reranked) > 0 && s.embedder != nil {
+		queryEmbedding, err := s.embedder.GenerateEmbedding(q.raw)
+		if err == nil && len(queryEmbedding) > 0 {
+			// Collect page IDs for the top candidates.
+			topN := min(len(reranked), 100) // Only re-rank top 100 for speed.
+			pageIDs := make([]int64, 0, topN)
+			for i := 0; i < topN; i++ {
+				pageIDs = append(pageIDs, reranked[i].ID)
+			}
+
+			embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
+			if err == nil && len(embs) > 0 {
+				semanticBoostWeight := 0.25 // 25% semantic, 75% lexical
+				for i := 0; i < topN; i++ {
+					emb, ok := embs[reranked[i].ID]
+					if !ok || len(emb.Embedding) == 0 {
+						continue
+					}
+					sim := cosineSimilarity(queryEmbedding, emb.Embedding)
+					// Scale similarity (0..1) to the same magnitude as lexical scores.
+					semanticScore := sim * 10000.0
+					oldRank := reranked[i].Rank
+					reranked[i].Rank = oldRank*(1.0-semanticBoostWeight) + semanticScore*semanticBoostWeight
+				}
+				// Re-sort after blending.
+				sort.SliceStable(reranked, func(i, j int) bool {
+					return reranked[i].Rank > reranked[j].Rank
+				})
+			}
+		}
+	}
+
 	if len(reranked) == 0 {
 		return nil, 0, nil
 	}
@@ -1900,6 +1934,32 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	}
 
 	return results, total, nil
+}
+
+// --------------------------------------------------------------------------
+// Semantic Similarity
+// --------------------------------------------------------------------------
+
+// cosineSimilarity returns the cosine similarity between two vectors (range: -1..1).
+// For normalized embeddings (e.g. from Ollama) the result is typically 0..1.
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) == 0 || len(b) == 0 || len(a) != len(b) {
+		return 0
+	}
+
+	var dot, normA, normB float64
+	for i := range a {
+		va := float64(a[i])
+		vb := float64(b[i])
+		dot += va * vb
+		normA += va * va
+		normB += vb * vb
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 // --------------------------------------------------------------------------

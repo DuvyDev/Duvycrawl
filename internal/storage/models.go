@@ -147,6 +147,15 @@ type CrawlerStats struct {
 	DatabaseSizeMB float64    `json:"database_size_mb"`
 }
 
+// PageEmbedding stores a dense vector embedding for semantic search.
+type PageEmbedding struct {
+	PageID     int64     `json:"page_id"`
+	Model      string    `json:"model"`
+	Dimensions int       `json:"dimensions"`
+	Embedding  []float32 `json:"embedding"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // OutgoingLink represents a link from a source page to a target URL with anchor text.
 type OutgoingLink struct {
 	TargetURL  string

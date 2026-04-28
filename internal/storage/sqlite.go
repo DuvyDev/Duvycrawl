@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -33,6 +34,7 @@ type SQLiteStorage struct {
 	graphDB        *sql.DB
 	logger         *slog.Logger
 	dataDir        string
+	embedder       *embedder.Client
 }
 
 // ... skipped types, keeping them below ...
@@ -320,6 +322,12 @@ func (s *SQLiteStorage) WriteContentDB() *sql.DB {
 // GraphDB returns the underlying connection pool for the graph database.
 func (s *SQLiteStorage) GraphDB() *sql.DB {
 	return s.graphDB
+}
+
+// WithEmbedder attaches an Ollama embedding client for semantic search.
+func (s *SQLiteStorage) WithEmbedder(client *embedder.Client) *SQLiteStorage {
+	s.embedder = client
+	return s
 }
 
 // Close closes all SQLite connection pools.

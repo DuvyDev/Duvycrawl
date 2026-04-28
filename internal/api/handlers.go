@@ -610,6 +610,40 @@ func (h *Handlers) Interact(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Embeddings ---
+
+// GetEmbeddingStats returns statistics about the semantic embedding index.
+func (h *Handlers) GetEmbeddingStats(w http.ResponseWriter, r *http.Request) {
+	totalPages, embeddedPages, avgDimensions, model, err := h.store.GetEmbeddingStats(r.Context())
+	if err != nil {
+		h.logger.Error("failed to get embedding stats", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get embedding stats")
+		return
+	}
+
+	coverage := 0.0
+	if totalPages > 0 {
+		coverage = float64(embeddedPages) / float64(totalPages) * 100.0
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_pages":    totalPages,
+		"embedded_pages": embeddedPages,
+		"coverage_pct":   roundFloat(coverage, 2),
+		"avg_dimensions": avgDimensions,
+		"model":          model,
+	})
+}
+
+// roundFloat rounds a float64 to the given decimal places.
+func roundFloat(val float64, decimals int) float64 {
+	pow := 1.0
+	for i := 0; i < decimals; i++ {
+		pow *= 10.0
+	}
+	return float64(int(val*pow+0.5)) / pow
+}
+
 // --- Maintenance ---
 
 // UpdateRankings triggers an asynchronous recalculation of referring domains for all pages.

@@ -104,6 +104,29 @@ No hay tests unitarios formales todavía. La verificación se hace vía:
 4. Search: `GET /api/v1/search?q=golang`
 5. Verificar que el crawler procesa URLs y las almacena en SQLite.
 
+## Semantic Search (Embeddings)
+
+Desde la integración con `internal/embedder`, el crawler genera embeddings vectoriales para cada página usando la API de Ollama (`/api/embeddings`). Esto habilita re-ranking semántico en las búsquedas.
+
+### Configuración
+
+Variables de entorno:
+- `OLLAMA_EMBED_URL`: URL base de Ollama (default: `http://localhost:11434`)
+- `OLLAMA_EMBED_MODEL`: Modelo de embeddings (default: `all-minilm`)
+
+### Cómo funciona
+
+1. **Crawl time**: `engine.go` genera el embedding de cada página en una goroutine background y lo encola en el `BatchWriter`.
+2. **Storage**: Los vectores se guardan en la tabla `page_embeddings` como BLOB little-endian de `[]float32`.
+3. **Search time**: `sqlite_search.go` genera el embedding de la query, calcula similitud coseno con los top 100 candidatos FTS5, y blendea: `final_score = 0.75 * lexical_score + 0.25 * semantic_score`.
+
+### Consideraciones
+
+- Si Ollama no está disponible, el crawler y el buscador funcionan normalmente en modo léxico puro.
+- Páginas sin embedding simplemente no reciben boost semántico.
+- `all-minilm` produce vectores de 384 dimensiones. Cualquier modelo compatible con Ollama `/api/embeddings` funciona.
+- El embedding se computa sobre `title + description + content[:2000]`.
+
 ## Notas para futuros cambios
 
 - Si se modifica `internal/crawler/fetcher.go`, verificar que no se añade `Accept-Encoding` manualmente.

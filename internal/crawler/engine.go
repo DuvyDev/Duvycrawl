@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
+	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
@@ -55,6 +56,7 @@ type Engine struct {
 	robots      *RobotsCache
 	limiter     *ratelimit.DomainLimiter
 	domainStats *DomainStatsCollector
+	embedder    *embedder.Client
 	logger      *slog.Logger
 
 	status atomic.Value // EngineStatus
@@ -80,6 +82,7 @@ func NewEngine(
 	front *frontier.Frontier,
 	limiter *ratelimit.DomainLimiter,
 	domainStats *DomainStatsCollector,
+	embedClient *embedder.Client,
 	proxyURL string,
 	logger *slog.Logger,
 ) *Engine {
@@ -93,6 +96,7 @@ func NewEngine(
 		robots:      NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:     limiter,
 		domainStats: domainStats,
+		embedder:    embedClient,
 		logger:      logger.With("component", "engine"),
 	}
 	e.status.Store(StatusIdle)
@@ -363,6 +367,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	e.batchWriter.WritePage(page)
 
+	// Generate semantic embedding in the background so crawling throughput
+	// is not blocked by the Ollama API call.
+	if e.embedder != nil {
+		go e.generateAndSaveEmbedding(pageURL, page.Title, page.Description, parsed.Content)
+	}
+
 	e.pagesCrawled.Add(1)
 	logger.Info("page crawled successfully",
 		"title", page.Title,
@@ -539,6 +549,38 @@ func (e *Engine) loadSeedDomains(ctx context.Context) error {
 // Call this after adding/removing seeds via the API.
 func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
 	return e.loadSeedDomains(ctx)
+}
+
+// generateAndSaveEmbedding creates a vector embedding for a crawled page
+// and queues it into the batch writer. Runs in its own goroutine.
+func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content string) {
+	// Build a concise representation for embedding.
+	text := title
+	if description != "" {
+		text += " " + description
+	}
+	if len(content) > 2000 {
+		content = content[:2000]
+	}
+	if content != "" {
+		text += " " + content
+	}
+	if text == "" {
+		return
+	}
+
+	vec, err := e.embedder.GenerateEmbedding(text)
+	if err != nil {
+		e.logger.Debug("embedding generation failed", "url", pageURL, "error", err)
+		return
+	}
+
+	emb := &storage.PageEmbedding{
+		Model:      e.embedder.Model(),
+		Dimensions: len(vec),
+		Embedding:  vec,
+	}
+	e.batchWriter.WriteEmbedding(pageURL, emb)
 }
 
 // inferRegion extracts a country/region code from a domain's TLD.
