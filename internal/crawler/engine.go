@@ -610,19 +610,19 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 
 func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog.Logger) {
 	// Build a concise representation for embedding.
+	// all-minilm has a 512-token context window (~1800 chars is a safe ceiling).
 	text := job.title
 	if job.description != "" {
 		text += " " + job.description
 	}
-	if len(job.content) > 1500 {
-		// Truncate content conservatively to stay within all-minilm's
-		// 512-token context window (~1500 chars is a safe ceiling).
-		text += " " + job.content[:1500]
-	} else if job.content != "" {
+	if job.content != "" {
 		text += " " + job.content
 	}
 	if text == "" {
 		return
+	}
+	if len(text) > 1800 {
+		text = text[:1800]
 	}
 
 	vec, err := e.embedder.GenerateEmbedding(text)
