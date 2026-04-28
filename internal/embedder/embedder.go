@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultBaseURL = "http://localhost:11434"
-	defaultModel   = "all-minilm"
+	defaultModel   = "all-minilm:l6-v2"
 	timeout        = 30 * time.Second
 )
 
