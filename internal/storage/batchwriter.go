@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// BatchWriter accumulates write operations (pages, links, images, embeddings) and flushes
+// BatchWriter accumulates write operations (pages, links, images) and flushes
 // them to SQLite in periodic transactions. This dramatically reduces the
 // per-page transaction overhead from ~3 separate transactions to 1 transaction
 // per batch.
@@ -22,12 +22,11 @@ type BatchWriter struct {
 	graphDB        *sql.DB
 	logger         *slog.Logger
 
-	mu         sync.Mutex
-	pages      []*Page
-	links      map[string][]OutgoingLink // sourceURL → links
-	images     []ImageRecord
-	embeddings map[string]*PageEmbedding // sourceURL → embedding (resolved to page_id at flush)
-	flushErr   error                     // last flush error, cleared on successful flush
+	mu       sync.Mutex
+	pages    []*Page
+	links    map[string][]OutgoingLink // sourceURL → links
+	images   []ImageRecord
+	flushErr error // last flush error, cleared on successful flush
 
 	maxPages      int
 	maxLinks      int
@@ -46,7 +45,6 @@ func NewBatchWriter(writeContentDB, graphDB *sql.DB, logger *slog.Logger) *Batch
 		graphDB:        graphDB,
 		logger:         logger.With("component", "batch_writer"),
 		links:          make(map[string][]OutgoingLink),
-		embeddings:     make(map[string]*PageEmbedding),
 		maxPages:       100,
 		maxLinks:       500,
 		maxImages:      500,
@@ -90,17 +88,6 @@ func (bw *BatchWriter) WriteLinks(sourceURL string, links []OutgoingLink) {
 			bw.logger.Warn("inline links flush failed", "error", err)
 		}
 	}
-}
-
-// WriteEmbedding buffers a page embedding for batch insert.
-// The URL is resolved to a page_id during flush.
-func (bw *BatchWriter) WriteEmbedding(url string, emb *PageEmbedding) {
-	if emb == nil || len(emb.Embedding) == 0 {
-		return
-	}
-	bw.mu.Lock()
-	bw.embeddings[url] = emb
-	bw.mu.Unlock()
 }
 
 // WriteImages buffers image records for batch upsert.
@@ -307,42 +294,7 @@ func (bw *BatchWriter) flushLocked() error {
 	}
 
 	// -----------------------------------------------------------------
-	// 4. Upsert embeddings
-	// -----------------------------------------------------------------
-	if len(bw.embeddings) > 0 {
-		embStmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO page_embeddings (page_id, model, dimensions, embedding, created_at)
-			VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-			ON CONFLICT(page_id) DO UPDATE SET
-				model = excluded.model,
-				dimensions = excluded.dimensions,
-				embedding = excluded.embedding,
-				created_at = CURRENT_TIMESTAMP
-		`)
-		if err != nil {
-			return fmt.Errorf("prepare embedding upsert: %w", err)
-		}
-		defer embStmt.Close()
-
-		for url, emb := range bw.embeddings {
-			pageID, ok := urlToID[url]
-			if !ok {
-				// Fallback: query DB directly.
-				if err := tx.QueryRowContext(ctx, "SELECT id FROM pages WHERE url = ?", url).Scan(&pageID); err != nil {
-					bw.logger.Warn("cannot resolve page_id for embedding", "url", url, "error", err)
-					continue
-				}
-			}
-			blob := float32SliceToBytes(emb.Embedding)
-			_, err := embStmt.ExecContext(ctx, pageID, emb.Model, emb.Dimensions, blob)
-			if err != nil {
-				bw.logger.Warn("batch embedding upsert failed", "url", url, "error", err)
-			}
-		}
-	}
-
-	// -----------------------------------------------------------------
-	// 5. Upsert images
+	// 4. Upsert images
 	// -----------------------------------------------------------------
 	if len(bw.images) > 0 {
 		imgStmt, err := tx.PrepareContext(ctx, `
@@ -397,9 +349,6 @@ func (bw *BatchWriter) flushLocked() error {
 	bw.pages = bw.pages[:0]
 	for k := range bw.links {
 		delete(bw.links, k)
-	}
-	for k := range bw.embeddings {
-		delete(bw.embeddings, k)
 	}
 	bw.images = bw.images[:0]
 

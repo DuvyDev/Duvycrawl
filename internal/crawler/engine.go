@@ -552,7 +552,7 @@ func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
 }
 
 // generateAndSaveEmbedding creates a vector embedding for a crawled page
-// and queues it into the batch writer. Runs in its own goroutine.
+// and saves it directly to storage. Runs in its own goroutine.
 func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content string) {
 	// Build a concise representation for embedding.
 	text := title
@@ -575,12 +575,36 @@ func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content s
 		return
 	}
 
+	// The page may not be in the DB yet because the batch writer flushes
+	// asynchronously. Poll with timeout until we can resolve the page ID.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var pageID int64
+	for {
+		page, err := e.store.GetPageByURL(ctx, pageURL)
+		if err == nil && page != nil && page.ID > 0 {
+			pageID = page.ID
+			break
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+			continue
+		case <-ctx.Done():
+			e.logger.Debug("embedding save timed out waiting for page ID", "url", pageURL)
+			return
+		}
+	}
+
 	emb := &storage.PageEmbedding{
+		PageID:     pageID,
 		Model:      e.embedder.Model(),
 		Dimensions: len(vec),
 		Embedding:  vec,
 	}
-	e.batchWriter.WriteEmbedding(pageURL, emb)
+	if err := e.store.SavePageEmbedding(ctx, emb); err != nil {
+		e.logger.Debug("embedding save failed", "url", pageURL, "error", err)
+	}
 }
 
 // inferRegion extracts a country/region code from a domain's TLD.
