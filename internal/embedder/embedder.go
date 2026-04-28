@@ -7,8 +7,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -73,6 +75,11 @@ func (c *Client) GenerateEmbedding(text string) ([]float32, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		bodyText := strings.TrimSpace(string(bodyBytes))
+		if bodyText != "" {
+			return nil, fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, bodyText)
+		}
 		return nil, fmt.Errorf("ollama returned status %d", resp.StatusCode)
 	}
 

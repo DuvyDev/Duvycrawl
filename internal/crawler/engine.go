@@ -744,42 +744,69 @@ func buildEmbedText(title, desc, content string, maxLen int) string {
 		return ""
 	}
 
+	maxWords := embedWordBudget(maxLen)
 	parts := []string{}
 	remaining := maxLen
+	usedWords := 0
 
 	// Title always goes in full (it's the strongest signal).
 	if title != "" {
+		title = truncateByWordAndBytes(title, maxWords, remaining)
 		if len(title) > remaining {
 			title = truncateAtWordBoundary(title, remaining)
 		}
 		parts = append(parts, title)
 		remaining -= len(title)
+		usedWords += len(strings.Fields(title))
 	}
 
 	// Fit description next, truncated at last full word if needed.
-	if desc != "" && remaining > 1 {
+	if desc != "" && remaining > 1 && usedWords < maxWords {
 		descPart := desc
-		if len(descPart) >= remaining {
-			descPart = truncateAtWordBoundary(desc, remaining-1) // -1 for space
-		}
+		descPart = truncateByWordAndBytes(descPart, maxWords-usedWords, remaining-1)
 		if descPart != "" {
 			parts = append(parts, descPart)
 			remaining -= len(descPart) + 1
+			usedWords += len(strings.Fields(descPart))
 		}
 	}
 
 	// Whatever space is left goes to content.
-	if content != "" && remaining > 1 {
+	if content != "" && remaining > 1 && usedWords < maxWords {
 		contentPart := content
-		if len(contentPart) >= remaining {
-			contentPart = truncateAtWordBoundary(content, remaining-1)
-		}
+		contentPart = truncateByWordAndBytes(contentPart, maxWords-usedWords, remaining-1)
 		if contentPart != "" {
 			parts = append(parts, contentPart)
 		}
 	}
 
 	return strings.Join(parts, " ")
+}
+
+func embedWordBudget(maxLen int) int {
+	switch {
+	case maxLen >= 768:
+		return 120
+	case maxLen >= 512:
+		return 80
+	default:
+		return 40
+	}
+}
+
+func truncateByWordAndBytes(s string, maxWords, maxBytes int) string {
+	if s == "" || maxWords <= 0 || maxBytes <= 0 {
+		return ""
+	}
+	words := strings.Fields(s)
+	if len(words) > maxWords {
+		words = words[:maxWords]
+	}
+	joined := strings.Join(words, " ")
+	if len(joined) <= maxBytes {
+		return joined
+	}
+	return truncateAtWordBoundary(joined, maxBytes)
 }
 
 // truncateAtWordBoundary cuts s to fit within maxLen bytes without breaking
@@ -835,7 +862,46 @@ func sanitizeEmbedText(s string) string {
 		b.WriteRune(r)
 		lastSpace = false
 	}
-	return strings.TrimSpace(b.String())
+	clean := strings.TrimSpace(b.String())
+	if clean == "" {
+		return ""
+	}
+
+	// Remove pathological tokens that explode into many subword pieces.
+	words := strings.Fields(clean)
+	filtered := make([]string, 0, len(words))
+	for _, w := range words {
+		if shouldSkipEmbedToken(w) {
+			continue
+		}
+		if len(w) > 32 {
+			w = w[:32]
+		}
+		filtered = append(filtered, w)
+	}
+
+	return strings.Join(filtered, " ")
+}
+
+func shouldSkipEmbedToken(token string) bool {
+	lower := strings.ToLower(token)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.") {
+		return true
+	}
+	if len(token) > 96 {
+		return true
+	}
+	letters := 0
+	for _, r := range token {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			letters++
+		}
+	}
+	// Drop long mostly-non-letter blobs like hashes, query strings, base64-ish text.
+	if len(token) > 24 && letters < len(token)/4 {
+		return true
+	}
+	return false
 }
 
 // stripHTMLTags removes simple HTML tags from a string.
