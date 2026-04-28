@@ -609,39 +609,107 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 }
 
 func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog.Logger) {
-	// Build a concise representation for embedding.
-	// all-minilm has a 512-token context window. English averages ~4
-	// chars/token, but Spanish with accents/diacritics can be ~3. We
-	// target 1024 chars total (~250-340 tokens), leaving comfortable
-	// headroom while keeping enough semantic signal.
-	text := job.title
+	// Build a clean, concise representation for embedding.
+	text := sanitizeEmbedText(job.title)
 	if job.description != "" {
-		text += " " + job.description
+		text += " " + sanitizeEmbedText(job.description)
 	}
 	if job.content != "" {
-		text += " " + job.content
+		text += " " + sanitizeEmbedText(job.content)
 	}
 	if text == "" {
 		return
 	}
-	if len(text) > 1024 {
-		text = text[:1024]
-	}
 
-	vec, err := e.embedder.GenerateEmbedding(text)
-	if err != nil {
-		logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
-		return
-	}
+	// Try with progressively shorter text if Ollama rejects for context length.
+	// This handles edge cases where tokenization is unexpectedly inefficient.
+	maxLengths := []int{768, 512, 256}
+	for _, maxLen := range maxLengths {
+		candidate := text
+		if len(candidate) > maxLen {
+			candidate = candidate[:maxLen]
+		}
 
-	// The page may not be in the DB yet because the batch writer flushes
-	// asynchronously. Poll with timeout until we can resolve the page ID.
+		vec, err := e.embedder.GenerateEmbedding(candidate)
+		if err == nil {
+			e.saveEmbedding(ctx, job.pageURL, vec, logger)
+			return
+		}
+		// If it's a 500, retry with shorter text. Otherwise give up.
+		if !isContextLengthError(err) {
+			logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
+			return
+		}
+		logger.Debug("embedding context exceeded, retrying shorter", "url", job.pageURL, "len", maxLen)
+	}
+}
+
+// isContextLengthError detects if an error is due to exceeding the model's context window.
+func isContextLengthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "context length") ||
+		strings.Contains(errStr, "input length")
+}
+
+// sanitizeEmbedText removes problematic characters and normalizes whitespace
+// to prevent tokenizer issues.
+func sanitizeEmbedText(s string) string {
+	if s == "" {
+		return ""
+	}
+	// Strip HTML tags if any slipped through.
+	s = stripHTMLTags(s)
+	// Replace control chars and excessive whitespace with single spaces.
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' {
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+			continue
+		}
+		// Skip null bytes and other control characters.
+		if r < 32 {
+			continue
+		}
+		b.WriteRune(r)
+		lastSpace = false
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// stripHTMLTags removes simple HTML tags from a string.
+func stripHTMLTags(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func (e *Engine) saveEmbedding(ctx context.Context, pageURL string, vec []float32, logger *slog.Logger) {
 	ctxPoll, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	var pageID int64
 	for {
-		page, err := e.store.GetPageByURL(ctxPoll, job.pageURL)
+		page, err := e.store.GetPageByURL(ctxPoll, pageURL)
 		if err == nil && page != nil && page.ID > 0 {
 			pageID = page.ID
 			break
@@ -650,7 +718,7 @@ func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog
 		case <-time.After(2 * time.Second):
 			continue
 		case <-ctxPoll.Done():
-			logger.Debug("embedding save timed out waiting for page ID", "url", job.pageURL)
+			logger.Debug("embedding save timed out waiting for page ID", "url", pageURL)
 			return
 		}
 	}
@@ -662,7 +730,7 @@ func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog
 		Embedding:  vec,
 	}
 	if err := e.store.SavePageEmbedding(ctxPoll, emb); err != nil {
-		logger.Debug("embedding save failed", "url", job.pageURL, "error", err)
+		logger.Debug("embedding save failed", "url", pageURL, "error", err)
 	}
 }
 
