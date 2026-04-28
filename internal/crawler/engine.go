@@ -44,6 +44,14 @@ var botBlockKeywords = []string{
 	"verify you are human", "access denied", "bot detected",
 }
 
+// embedJob carries the data needed to generate an embedding for a page.
+type embedJob struct {
+	pageURL     string
+	title       string
+	description string
+	content     string
+}
+
 // Engine is the main crawler orchestrator. It manages a pool of worker
 // goroutines that fetch, parse, and store web pages.
 type Engine struct {
@@ -68,6 +76,9 @@ type Engine struct {
 
 	// fallbackStates tracks per-domain UA-fallback decisions.
 	fallbackStates sync.Map // string domain -> fallbackState
+
+	// embedQueue feeds the background embedding workers.
+	embedQueue chan embedJob
 
 	// Metrics
 	pagesCrawled atomic.Int64
@@ -98,6 +109,7 @@ func NewEngine(
 		domainStats: domainStats,
 		embedder:    embedClient,
 		logger:      logger.With("component", "engine"),
+		embedQueue:  make(chan embedJob, 25000),
 	}
 	e.status.Store(StatusIdle)
 	return e
@@ -137,6 +149,17 @@ func (e *Engine) Start(ctx context.Context) {
 		go e.worker(ctx, i)
 	}
 
+	// Launch background embedding workers (limited concurrency to avoid
+	// overwhelming the Ollama API).
+	if e.embedder != nil {
+		embedWorkers := 1
+		for i := 0; i < embedWorkers; i++ {
+			e.wg.Add(1)
+			go e.embedWorker(ctx, i)
+		}
+		e.logger.Info("embedding workers started", "count", embedWorkers)
+	}
+
 	e.logger.Info("all workers started")
 }
 
@@ -153,6 +176,9 @@ func (e *Engine) Stop() {
 	if e.cancel != nil {
 		e.cancel()
 	}
+
+	// Signal embedding workers to stop once the queue is drained.
+	close(e.embedQueue)
 
 	e.wg.Wait()
 
@@ -367,10 +393,19 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	e.batchWriter.WritePage(page)
 
-	// Generate semantic embedding in the background so crawling throughput
-	// is not blocked by the Ollama API call.
+	// Queue semantic embedding for background processing.
 	if e.embedder != nil {
-		go e.generateAndSaveEmbedding(pageURL, page.Title, page.Description, parsed.Content)
+		select {
+		case e.embedQueue <- embedJob{
+			pageURL:     pageURL,
+			title:       page.Title,
+			description: page.Description,
+			content:     parsed.Content,
+		}:
+		default:
+			// Queue full (very unlikely with 10k buffer). Drop silently.
+			e.logger.Debug("embedding queue full, dropping", "url", pageURL)
+		}
 	}
 
 	e.pagesCrawled.Add(1)
@@ -551,14 +586,35 @@ func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
 	return e.loadSeedDomains(ctx)
 }
 
-// generateAndSaveEmbedding creates a vector embedding for a crawled page
-// and saves it directly to storage. Runs in its own goroutine.
-func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content string) {
-	// Build a concise representation for embedding.
-	text := title
-	if description != "" {
-		text += " " + description
+// embedWorker consumes embedding jobs from the queue and persists them.
+// Limited concurrency protects the Ollama API from being overwhelmed.
+func (e *Engine) embedWorker(ctx context.Context, id int) {
+	defer e.wg.Done()
+	logger := e.logger.With("embed_worker", id)
+	logger.Debug("embedding worker started")
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Debug("embedding worker shutting down (context)")
+			return
+		case job, ok := <-e.embedQueue:
+			if !ok {
+				logger.Debug("embedding worker shutting down (queue closed)")
+				return
+			}
+			e.processEmbedJob(ctx, job, logger)
+		}
 	}
+}
+
+func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog.Logger) {
+	// Build a concise representation for embedding.
+	text := job.title
+	if job.description != "" {
+		text += " " + job.description
+	}
+	content := job.content
 	if len(content) > 2000 {
 		content = content[:2000]
 	}
@@ -571,27 +627,27 @@ func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content s
 
 	vec, err := e.embedder.GenerateEmbedding(text)
 	if err != nil {
-		e.logger.Debug("embedding generation failed", "url", pageURL, "error", err)
+		logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
 		return
 	}
 
 	// The page may not be in the DB yet because the batch writer flushes
 	// asynchronously. Poll with timeout until we can resolve the page ID.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctxPoll, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	var pageID int64
 	for {
-		page, err := e.store.GetPageByURL(ctx, pageURL)
+		page, err := e.store.GetPageByURL(ctxPoll, job.pageURL)
 		if err == nil && page != nil && page.ID > 0 {
 			pageID = page.ID
 			break
 		}
 		select {
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(2 * time.Second):
 			continue
-		case <-ctx.Done():
-			e.logger.Debug("embedding save timed out waiting for page ID", "url", pageURL)
+		case <-ctxPoll.Done():
+			logger.Debug("embedding save timed out waiting for page ID", "url", job.pageURL)
 			return
 		}
 	}
@@ -602,8 +658,8 @@ func (e *Engine) generateAndSaveEmbedding(pageURL, title, description, content s
 		Dimensions: len(vec),
 		Embedding:  vec,
 	}
-	if err := e.store.SavePageEmbedding(ctx, emb); err != nil {
-		e.logger.Debug("embedding save failed", "url", pageURL, "error", err)
+	if err := e.store.SavePageEmbedding(ctxPoll, emb); err != nil {
+		logger.Debug("embedding save failed", "url", job.pageURL, "error", err)
 	}
 }
 
