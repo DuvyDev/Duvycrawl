@@ -46,6 +46,7 @@ var botBlockKeywords = []string{
 
 // embedJob carries the data needed to generate an embedding for a page.
 type embedJob struct {
+	pageID      int64
 	pageURL     string
 	title       string
 	description string
@@ -69,7 +70,8 @@ type Engine struct {
 
 	status atomic.Value // EngineStatus
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	crawlWG sync.WaitGroup
+	embedWG sync.WaitGroup
 
 	// seedDomains holds the set of seed domain names for SeedDomainsOnly filtering.
 	seedDomains map[string]bool
@@ -77,8 +79,11 @@ type Engine struct {
 	// fallbackStates tracks per-domain UA-fallback decisions.
 	fallbackStates sync.Map // string domain -> fallbackState
 
-	// embedQueue feeds the background embedding workers.
-	embedQueue chan embedJob
+	// High-priority jobs are freshly persisted pages; low-priority jobs are
+	// backfill of older pages missing embeddings.
+	highEmbedQueue chan embedJob
+	lowEmbedQueue  chan embedJob
+	embedQueued    sync.Map // pageID -> struct{}{}
 
 	// Metrics
 	pagesCrawled atomic.Int64
@@ -109,7 +114,11 @@ func NewEngine(
 		domainStats: domainStats,
 		embedder:    embedClient,
 		logger:      logger.With("component", "engine"),
-		embedQueue:  make(chan embedJob, 25000),
+		highEmbedQueue: make(chan embedJob, 25000),
+		lowEmbedQueue:  make(chan embedJob, 5000),
+	}
+	if batchWriter != nil {
+		batchWriter.SetPagesPersistedHook(e.onPagesPersisted)
 	}
 	e.status.Store(StatusIdle)
 	return e
@@ -145,7 +154,7 @@ func (e *Engine) Start(ctx context.Context) {
 
 	// Launch workers.
 	for i := range e.cfg.Workers {
-		e.wg.Add(1)
+		e.crawlWG.Add(1)
 		go e.worker(ctx, i)
 	}
 
@@ -154,9 +163,11 @@ func (e *Engine) Start(ctx context.Context) {
 	if e.embedder != nil {
 		embedWorkers := 1
 		for i := 0; i < embedWorkers; i++ {
-			e.wg.Add(1)
+			e.embedWG.Add(1)
 			go e.embedWorker(ctx, i)
 		}
+		e.crawlWG.Add(1)
+		go e.backfillEmbeddings(ctx)
 		e.logger.Info("embedding workers started", "count", embedWorkers)
 	}
 
@@ -177,17 +188,19 @@ func (e *Engine) Stop() {
 		e.cancel()
 	}
 
-	// Signal embedding workers to stop once the queue is drained.
-	close(e.embedQueue)
+	e.crawlWG.Wait()
 
-	e.wg.Wait()
-
-	// Flush any remaining batched writes before marking as stopped.
 	if e.batchWriter != nil {
 		if err := e.batchWriter.Flush(); err != nil {
 			e.logger.Warn("final batch flush failed", "error", err)
 		}
 	}
+
+	// Signal embedding workers to stop once the queue is drained.
+	close(e.highEmbedQueue)
+	close(e.lowEmbedQueue)
+
+	e.embedWG.Wait()
 
 	e.status.Store(StatusIdle)
 
@@ -211,7 +224,7 @@ func (e *Engine) Stats() (crawled, errored int64) {
 // The entire domain-selection logic happens in memory via the queue's
 // Dequeue method — no database round-trips in the scheduling hot path.
 func (e *Engine) worker(ctx context.Context, id int) {
-	defer e.wg.Done()
+	defer e.crawlWG.Done()
 
 	logger := e.logger.With("worker", id)
 	logger.Debug("worker started")
@@ -393,21 +406,6 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	e.batchWriter.WritePage(page)
 
-	// Queue semantic embedding for background processing.
-	if e.embedder != nil {
-		select {
-		case e.embedQueue <- embedJob{
-			pageURL:     pageURL,
-			title:       page.Title,
-			description: page.Description,
-			content:     parsed.Content,
-		}:
-		default:
-			// Queue full (very unlikely with 10k buffer). Drop silently.
-			e.logger.Debug("embedding queue full, dropping", "url", pageURL)
-		}
-	}
-
 	e.pagesCrawled.Add(1)
 	logger.Info("page crawled successfully",
 		"title", page.Title,
@@ -586,29 +584,128 @@ func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
 	return e.loadSeedDomains(ctx)
 }
 
-// embedWorker consumes embedding jobs from the queue and persists them.
-// Limited concurrency protects the Ollama API from being overwhelmed.
-func (e *Engine) embedWorker(ctx context.Context, id int) {
-	defer e.wg.Done()
-	logger := e.logger.With("embed_worker", id)
-	logger.Debug("embedding worker started")
+func (e *Engine) onPagesPersisted(pages []*storage.Page) {
+	for _, page := range pages {
+		e.enqueueEmbedJob(embedJob{
+			pageID:      page.ID,
+			pageURL:     page.URL,
+			title:       page.Title,
+			description: page.Description,
+			content:     truncateString(page.Content, 2048),
+		}, true)
+	}
+}
 
+func (e *Engine) enqueueEmbedJob(job embedJob, highPriority bool) {
+	if job.pageID <= 0 {
+		return
+	}
+	if _, loaded := e.embedQueued.LoadOrStore(job.pageID, struct{}{}); loaded {
+		return
+	}
+
+	queue := e.lowEmbedQueue
+	queueName := "low"
+	if highPriority {
+		queue = e.highEmbedQueue
+		queueName = "high"
+	}
+
+	select {
+	case queue <- job:
+	default:
+		e.embedQueued.Delete(job.pageID)
+		e.logger.Debug("embedding queue full, dropping job", "page_id", job.pageID, "queue", queueName)
+	}
+}
+
+func (e *Engine) backfillEmbeddings(ctx context.Context) {
+	defer e.crawlWG.Done()
+	logger := e.logger.With("component", "embed_backfill")
+
+	const batchSize = 250
 	for {
-		select {
-		case <-ctx.Done():
-			logger.Debug("embedding worker shutting down (context)")
-			return
-		case job, ok := <-e.embedQueue:
-			if !ok {
-				logger.Debug("embedding worker shutting down (queue closed)")
+		afterID := int64(0)
+		for {
+			if ctx.Err() != nil {
 				return
 			}
-			e.processEmbedJob(ctx, job, logger)
+
+			pages, err := e.store.ListPagesWithoutEmbeddings(ctx, afterID, batchSize)
+			if err != nil {
+				logger.Warn("failed to load pages without embeddings", "error", err)
+				break
+			}
+			if len(pages) == 0 {
+				break
+			}
+
+			for _, page := range pages {
+				e.enqueueEmbedJob(embedJob{
+					pageID:      page.ID,
+					pageURL:     page.URL,
+					title:       page.Title,
+					description: page.Description,
+					content:     page.Content,
+				}, false)
+				afterID = page.ID
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
 		}
 	}
 }
 
-func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog.Logger) {
+// embedWorker consumes embedding jobs from the queue and persists them.
+// Limited concurrency protects the Ollama API from being overwhelmed.
+func (e *Engine) embedWorker(ctx context.Context, id int) {
+	defer e.embedWG.Done()
+	logger := e.logger.With("embed_worker", id)
+	logger.Debug("embedding worker started")
+	highQueue := e.highEmbedQueue
+	lowQueue := e.lowEmbedQueue
+
+	for {
+		if highQueue == nil && lowQueue == nil {
+			logger.Debug("embedding worker shutting down (queues drained)")
+			return
+		}
+
+		select {
+		case job, ok := <-highQueue:
+			if !ok {
+				highQueue = nil
+				continue
+			}
+			e.processEmbedJob(job, logger)
+			continue
+		default:
+		}
+
+		select {
+		case job, ok := <-highQueue:
+			if !ok {
+				highQueue = nil
+				continue
+			}
+			e.processEmbedJob(job, logger)
+		case job, ok := <-lowQueue:
+			if !ok {
+				lowQueue = nil
+				continue
+			}
+			e.processEmbedJob(job, logger)
+		}
+	}
+}
+
+func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
+	defer e.embedQueued.Delete(job.pageID)
+
 	// Build a clean representation prioritising title and description over raw
 	// content. Title is the strongest semantic signal, description next; content
 	// is used only if budget remains.
@@ -628,7 +725,7 @@ func (e *Engine) processEmbedJob(ctx context.Context, job embedJob, logger *slog
 
 		vec, err := e.embedder.GenerateEmbedding(candidate)
 		if err == nil {
-			e.saveEmbedding(ctx, job.pageURL, vec, logger)
+			e.saveEmbedding(job, vec, logger)
 			return
 		}
 		if !isContextLengthError(err) {
@@ -652,6 +749,9 @@ func buildEmbedText(title, desc, content string, maxLen int) string {
 
 	// Title always goes in full (it's the strongest signal).
 	if title != "" {
+		if len(title) > remaining {
+			title = truncateAtWordBoundary(title, remaining)
+		}
 		parts = append(parts, title)
 		remaining -= len(title)
 	}
@@ -758,34 +858,18 @@ func stripHTMLTags(s string) string {
 	return b.String()
 }
 
-func (e *Engine) saveEmbedding(ctx context.Context, pageURL string, vec []float32, logger *slog.Logger) {
-	ctxPoll, cancel := context.WithTimeout(ctx, 5*time.Minute)
+func (e *Engine) saveEmbedding(job embedJob, vec []float32, logger *slog.Logger) {
+	ctxSave, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var pageID int64
-	for {
-		page, err := e.store.GetPageByURL(ctxPoll, pageURL)
-		if err == nil && page != nil && page.ID > 0 {
-			pageID = page.ID
-			break
-		}
-		select {
-		case <-time.After(2 * time.Second):
-			continue
-		case <-ctxPoll.Done():
-			logger.Debug("embedding save timed out waiting for page ID", "url", pageURL)
-			return
-		}
-	}
-
 	emb := &storage.PageEmbedding{
-		PageID:     pageID,
+		PageID:     job.pageID,
 		Model:      e.embedder.Model(),
 		Dimensions: len(vec),
 		Embedding:  vec,
 	}
-	if err := e.store.SavePageEmbedding(ctxPoll, emb); err != nil {
-		logger.Debug("embedding save failed", "url", pageURL, "error", err)
+	if err := e.store.SavePageEmbedding(ctxSave, emb); err != nil {
+		logger.Debug("embedding save failed", "url", job.pageURL, "page_id", job.pageID, "error", err)
 	}
 }
 

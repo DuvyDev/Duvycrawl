@@ -218,6 +218,41 @@ func (s *SQLiteStorage) GetFreshURLs(ctx context.Context, urls []string, newerTh
 	return fresh, rows.Err()
 }
 
+// ListPagesWithoutEmbeddings returns pages missing embeddings in ascending ID order.
+func (s *SQLiteStorage) ListPagesWithoutEmbeddings(ctx context.Context, afterID int64, limit int) ([]Page, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.readContentDB.QueryContext(ctx, `
+		SELECT p.id, p.url, p.title, p.description, SUBSTR(p.content, 1, 2048)
+		FROM pages p
+		LEFT JOIN page_embeddings pe ON pe.page_id = p.id
+		WHERE pe.page_id IS NULL AND p.id > ?
+		ORDER BY p.id ASC
+		LIMIT ?
+	`, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying pages without embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	pages := make([]Page, 0, limit)
+	for rows.Next() {
+		var page Page
+		if err := rows.Scan(&page.ID, &page.URL, &page.Title, &page.Description, &page.Content); err != nil {
+			return nil, fmt.Errorf("scanning page without embedding: %w", err)
+		}
+		pages = append(pages, page)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating pages without embeddings: %w", err)
+	}
+
+	return pages, nil
+}
+
 // --------------------------------------------------------------------------
 // Crawl Queue Operations
 // --------------------------------------------------------------------------

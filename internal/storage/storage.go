@@ -63,6 +63,10 @@ type Storage interface {
 	// more recently than the given TTL. Used to skip recently-indexed URLs.
 	GetFreshURLs(ctx context.Context, urls []string, newerThan time.Time) (map[string]struct{}, error)
 
+	// ListPagesWithoutEmbeddings returns pages that do not yet have a stored
+	// embedding, ordered by ID for incremental backfill.
+	ListPagesWithoutEmbeddings(ctx context.Context, afterID int64, limit int) ([]Page, error)
+
 	// --- Crawl Queue Operations ---
 
 	// EnqueueURL adds a single URL to the crawl queue if it doesn't already exist.

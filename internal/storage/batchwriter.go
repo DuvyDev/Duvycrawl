@@ -22,11 +22,12 @@ type BatchWriter struct {
 	graphDB        *sql.DB
 	logger         *slog.Logger
 
-	mu       sync.Mutex
-	pages    []*Page
-	links    map[string][]OutgoingLink // sourceURL → links
-	images   []ImageRecord
-	flushErr error // last flush error, cleared on successful flush
+	mu               sync.Mutex
+	pages            []*Page
+	links            map[string][]OutgoingLink // sourceURL → links
+	images           []ImageRecord
+	onPagesPersisted func([]*Page)
+	flushErr         error // last flush error, cleared on successful flush
 
 	maxPages      int
 	maxLinks      int
@@ -54,6 +55,14 @@ func NewBatchWriter(writeContentDB, graphDB *sql.DB, logger *slog.Logger) *Batch
 	bw.wg.Add(1)
 	go bw.loop()
 	return bw
+}
+
+// SetPagesPersistedHook registers a callback invoked after a successful page
+// flush, once page IDs are known.
+func (bw *BatchWriter) SetPagesPersistedHook(hook func([]*Page)) {
+	bw.mu.Lock()
+	defer bw.mu.Unlock()
+	bw.onPagesPersisted = hook
 }
 
 // WritePage buffers a page for batch upsert.
@@ -244,6 +253,12 @@ func (bw *BatchWriter) flushLocked() error {
 			}
 			rows.Close()
 		}
+
+		for _, page := range bw.pages {
+			if id, ok := urlToID[page.URL]; ok {
+				page.ID = id
+			}
+		}
 	}
 
 	// -----------------------------------------------------------------
@@ -343,6 +358,14 @@ func (bw *BatchWriter) flushLocked() error {
 		return fmt.Errorf("commit batch transaction: %w", err)
 	}
 
+	persistedPages := make([]*Page, 0, len(bw.pages))
+	for _, page := range bw.pages {
+		if page.ID > 0 {
+			persistedPages = append(persistedPages, page)
+		}
+	}
+	persistHook := bw.onPagesPersisted
+
 	// Only clear buffers on successful commit so a retry on the next cycle
 	// can recover from transient SQLite errors (writes are idempotent thanks
 	// to ON CONFLICT clauses).
@@ -351,6 +374,10 @@ func (bw *BatchWriter) flushLocked() error {
 		delete(bw.links, k)
 	}
 	bw.images = bw.images[:0]
+
+	if persistHook != nil && len(persistedPages) > 0 {
+		persistHook(persistedPages)
+	}
 
 	return nil
 }
