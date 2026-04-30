@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // --------------------------------------------------------------------------
@@ -86,7 +88,11 @@ func (s *SQLiteStorage) refreshPageCountCache(ctx context.Context) {
 		var domain string
 		var cnt int
 		if err := rows.Scan(&domain, &cnt); err == nil {
-			m[domain] = cnt
+			m[domain] += cnt
+			// Also accumulate the count for the root domain (eTLD+1)
+			if root, err := publicsuffix.EffectiveTLDPlusOne(domain); err == nil && root != domain {
+				m[root] += cnt
+			}
 		}
 	}
 
@@ -108,6 +114,16 @@ func (s *SQLiteStorage) GetTrancoRank(domain string) int {
 	s.authority.trancoMu.RLock()
 	rank := s.authority.trancoRank[domain]
 	s.authority.trancoMu.RUnlock()
+
+	// If the exact subdomain isn't found, fallback to the root domain (e.g. es.wikipedia.org -> wikipedia.org)
+	if rank == 0 {
+		if root, err := publicsuffix.EffectiveTLDPlusOne(domain); err == nil && root != domain {
+			s.authority.trancoMu.RLock()
+			rank = s.authority.trancoRank[root]
+			s.authority.trancoMu.RUnlock()
+		}
+	}
+
 	return rank
 }
 
@@ -119,6 +135,17 @@ func (s *SQLiteStorage) GetCorpusPageCount(domain string) int {
 	s.authority.pageCntMu.RLock()
 	cnt := s.authority.pageCnt[domain]
 	s.authority.pageCntMu.RUnlock()
+
+	// If the exact subdomain has no pages, fallback to the root domain's aggregate count.
+	// Note: refreshPageCountCache already accumulates subdomain counts into the root domain.
+	if cnt == 0 {
+		if root, err := publicsuffix.EffectiveTLDPlusOne(domain); err == nil && root != domain {
+			s.authority.pageCntMu.RLock()
+			cnt = s.authority.pageCnt[root]
+			s.authority.pageCntMu.RUnlock()
+		}
+	}
+
 	return cnt
 }
 
