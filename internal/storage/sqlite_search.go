@@ -119,7 +119,18 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		}
 	}
 
-	reranked := rerankSearchCandidates(candidates, q, lang)
+	// --- Enrich candidates with domain authority signals ---
+	s.enrichAuthorityCandidates(candidates)
+
+	aw := authorityWeights{}
+	if s.authority != nil {
+		aw = authorityWeights{
+			trancoWeight:      s.authority.trancoWeight,
+			corpusCountWeight: s.authority.corpusCountWeight,
+		}
+	}
+
+	reranked := rerankSearchCandidates(candidates, q, lang, aw)
 
 	// --- Semantic re-ranking via embeddings (if Ollama is available) ---
 	if len(reranked) > 0 && s.embedder != nil {
@@ -977,10 +988,10 @@ func fuzzyLanguageSQL(lang string) string {
 	return " + CASE WHEN p.language = ? THEN 20.0 ELSE 0 END"
 }
 
-func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string) []searchCandidate {
+func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string, aw authorityWeights) []searchCandidate {
 	reranked := make([]searchCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		score, keep := scoreSearchCandidate(candidate, query, lang)
+		score, keep := scoreSearchCandidate(candidate, query, lang, aw)
 		if !keep {
 			continue
 		}
@@ -1006,7 +1017,7 @@ func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lan
 	return reranked
 }
 
-func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string) (float64, bool) {
+func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string, aw authorityWeights) (float64, bool) {
 	titleNorm := normalizeSearchText(candidate.Title)
 	h1Norm := normalizeSearchText(candidate.H1)
 	h2Norm := normalizeSearchText(candidate.H2)
@@ -1092,6 +1103,18 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		score += math.Log1p(candidate.PageRank) * 200.0
 	} else if candidate.ReferringDomains > 0 {
 		score += math.Log1p(float64(candidate.ReferringDomains)) * 140.0
+	}
+
+	// --- External domain authority boost (Tranco global ranking) ---
+	// log(1M / rank) scales from ~13.8 (rank 1) to ~0 (rank 1M).
+	if candidate.trancoRank > 0 && aw.trancoWeight > 0 {
+		score += math.Log(1_000_000.0/float64(candidate.trancoRank)) * aw.trancoWeight
+	}
+
+	// --- Corpus breadth boost ---
+	// Domains with many indexed pages are likely large, authoritative sites.
+	if candidate.corpusPages > 1 && aw.corpusCountWeight > 0 {
+		score += math.Log1p(float64(candidate.corpusPages)) * aw.corpusCountWeight
 	}
 
 	if len(query.tokens) > 0 && titleExact == len(query.tokens) {

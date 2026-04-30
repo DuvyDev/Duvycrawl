@@ -165,7 +165,14 @@ var contentMigrations = []string{
         last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
 
-    // --- Phase 5: Semantic Embeddings for AI Re-ranking ---
+    // --- Phase 5: External Domain Authority (Tranco) ---
+    `CREATE TABLE IF NOT EXISTS domain_authority (
+        domain TEXT PRIMARY KEY,
+        tranco_rank INTEGER NOT NULL DEFAULT 0,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+
+    // --- Phase 6: Semantic Embeddings for AI Re-ranking ---
     `CREATE TABLE IF NOT EXISTS page_embeddings (
         page_id INTEGER PRIMARY KEY,
         model TEXT NOT NULL DEFAULT 'all-minilm',

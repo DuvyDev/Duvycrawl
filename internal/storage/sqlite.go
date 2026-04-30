@@ -35,6 +35,7 @@ type SQLiteStorage struct {
 	logger         *slog.Logger
 	dataDir        string
 	embedder       *embedder.Client
+	authority      *authorityCache
 }
 
 // ... skipped types, keeping them below ...
@@ -77,6 +78,15 @@ type searchCandidate struct {
 	contentLen      int
 	mode            searchMode
 	publishedAtTime time.Time
+	trancoRank      int // Tranco global domain rank (1 = best, 0 = unknown)
+	corpusPages     int // Number of pages indexed for this domain
+}
+
+// authorityWeights holds the configurable multipliers for domain authority
+// boosts, passed through the scoring pipeline.
+type authorityWeights struct {
+	trancoWeight      float64
+	corpusCountWeight float64
 }
 
 type searchDomainInfo struct {
@@ -202,6 +212,9 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		logger:         logger.With("component", "storage"),
 		dataDir:        dir,
 	}
+
+	// Pre-load authority caches (Tranco + page counts) for search scoring.
+	s.initAuthorityCache(ctx)
 
 	logger.Info("SQLite storage initialized (Multi-DB Architecture)",
 		"dir", dir,
