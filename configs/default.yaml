@@ -58,14 +58,14 @@ crawler:
   # Parameters for the adaptive scorer.
   adaptive:
     min_queries_before_boost: 3
-    depth_penalty_k: 5.0
+    depth_penalty_k: 12.0
     profile_refresh_interval: 60s
     seed_bonus: 50.0
     anchor_weight: 40.0
     url_path_weight: 30.0
     source_title_weight: 20.0
-    domain_reputation_weight: 25.0
-    language_match_bonus: 15.0
+    domain_reputation_weight: 15.0
+    language_match_bonus: 35.0
 
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)

@@ -168,14 +168,14 @@ func DefaultConfig() *Config {
 			ScoringStrategy:          "adaptive",
 			Adaptive: AdaptiveConfig{
 				MinQueriesBeforeBoost:  3,
-				DepthPenaltyK:          5.0,
+				DepthPenaltyK:          12.0,
 				ProfileRefreshInterval: 60 * time.Second,
 				SeedBonus:              50.0,
 				AnchorWeight:           40.0,
 				URLPathWeight:          30.0,
 				SourceTitleWeight:      20.0,
-				DomainReputationWeight: 25.0,
-				LanguageMatchBonus:     15.0,
+				DomainReputationWeight: 15.0,
+				LanguageMatchBonus:     35.0,
 			},
 		},
 		Storage: StorageConfig{
