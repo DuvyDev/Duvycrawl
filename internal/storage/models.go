@@ -9,6 +9,7 @@ import (
 type Page struct {
 	ID                int64     `json:"id"`
 	URL               string    `json:"url"`
+	URLHash           int64     `json:"url_hash"`
 	Domain            string    `json:"domain"`
 	Title             string    `json:"title"`
 	H1                string    `json:"h1,omitempty"`
@@ -159,15 +160,14 @@ type PageEmbedding struct {
 // OutgoingLink represents a link from a source page to a target URL with anchor text.
 type OutgoingLink struct {
 	TargetURL  string
+	TargetHash int64
 	AnchorText string
 }
 
 // LinkRecord represents an outgoing link from one page to another.
 type LinkRecord struct {
-	ID         int64     `json:"id"`
 	SourceID   int64     `json:"source_id"`
-	SourceURL  string    `json:"source_url"`
-	TargetURL  string    `json:"target_url"`
+	TargetHash int64     `json:"target_hash"`
 	AnchorText string    `json:"anchor_text"`
 	CreatedAt  time.Time `json:"created_at"`
 }

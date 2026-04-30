@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/DuvyDev/Duvycrawl/internal/utils"
 )
 
 // BatchWriter accumulates write operations (pages, links, images) and flushes
@@ -166,9 +168,10 @@ func (bw *BatchWriter) flushLocked() error {
 	// 1. Upsert all buffered pages
 	// -----------------------------------------------------------------
 	pageStmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pages (url, url_hash, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
+			url_hash         = excluded.url_hash,
 			domain           = excluded.domain,
 			title            = excluded.title,
 			h1               = excluded.h1,
@@ -205,8 +208,11 @@ func (bw *BatchWriter) flushLocked() error {
 		if page.SchemaRating > 0 {
 			schemaRating = page.SchemaRating
 		}
+		
+		page.URLHash = utils.HashURL(page.URL)
+		
 		_, err := pageStmt.ExecContext(ctx,
-			page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
+			page.URL, page.URLHash, page.Domain, page.Title, page.H1, page.H2, page.Description,
 			page.Content, page.Language, page.Region,
 			page.StatusCode, page.ContentHash, page.URLFingerprint,
 			publishedAt, page.CrawledAt,
@@ -272,8 +278,8 @@ func (bw *BatchWriter) flushLocked() error {
 		defer graphTx.Rollback()
 
 		linkStmt, err := graphTx.PrepareContext(ctx, `
-			INSERT OR IGNORE INTO links (source_id, source_url, target_url, anchor_text)
-			VALUES (?, ?, ?, ?)
+			INSERT OR IGNORE INTO links (source_id, target_hash, anchor_text)
+			VALUES (?, ?, ?)
 		`)
 		if err != nil {
 			return fmt.Errorf("prepare link insert: %w", err)
@@ -297,8 +303,11 @@ func (bw *BatchWriter) flushLocked() error {
 			}
 
 			for _, link := range links {
-				if _, err := linkStmt.ExecContext(ctx, sourceID, sourceURL, link.TargetURL, link.AnchorText); err != nil {
-					bw.logger.Warn("batch link insert failed", "source", sourceURL, "target", link.TargetURL, "error", err)
+				if link.TargetHash == 0 {
+					link.TargetHash = utils.HashURL(link.TargetURL)
+				}
+				if _, err := linkStmt.ExecContext(ctx, sourceID, link.TargetHash, link.AnchorText); err != nil {
+					bw.logger.Warn("batch link insert failed", "source", sourceURL, "target_hash", link.TargetHash, "error", err)
 				}
 			}
 		}

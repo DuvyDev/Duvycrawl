@@ -7,6 +7,7 @@ var contentMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS pages (
 		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
 		url                TEXT    NOT NULL UNIQUE,
+		url_hash           INTEGER NOT NULL DEFAULT 0,
 		domain             TEXT    NOT NULL DEFAULT '',
 		title              TEXT    NOT NULL DEFAULT '',
 		h1                 TEXT    NOT NULL DEFAULT '',
@@ -45,6 +46,7 @@ var contentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_pagerank ON pages(pagerank)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_is_seed ON pages(is_seed)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_url_hash ON pages(url_hash)`,
 
 	// --- Full-text search index ---
 	// Includes title, h1, description, schema_title, schema_description and content
@@ -209,16 +211,13 @@ var crawlerMigrations = []string{
 }
 
 var graphMigrations = []string{
-	// --- Links table (for backlink analysis) ---
+	// --- Links table (for backlink analysis using hashes) ---
 	`CREATE TABLE IF NOT EXISTS links (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		source_id INTEGER NOT NULL,
-		source_url TEXT NOT NULL,
-		target_url TEXT NOT NULL,
+		target_hash INTEGER NOT NULL,
 		anchor_text TEXT NOT NULL DEFAULT '',
-		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (source_id, target_hash)
 	)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_links_source_target ON links(source_id, target_url)`,
-	`CREATE INDEX IF NOT EXISTS idx_links_target_url ON links(target_url)`,
-	`CREATE INDEX IF NOT EXISTS idx_links_source_id ON links(source_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_links_target_hash ON links(target_hash)`,
 }

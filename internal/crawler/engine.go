@@ -419,6 +419,11 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	if len(parsed.Anchors) > 0 {
 		outgoing := make([]storage.OutgoingLink, 0, len(parsed.Anchors))
 		for _, a := range parsed.Anchors {
+			// Skip intra-domain links to prevent massive graph.db bloat
+			targetDomain := frontier.ExtractDomain(a.URL)
+			if targetDomain == job.Domain {
+				continue
+			}
 			outgoing = append(outgoing, storage.OutgoingLink{
 				TargetURL:  a.URL,
 				AnchorText: a.Anchor,

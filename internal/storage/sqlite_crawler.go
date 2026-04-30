@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+	"github.com/DuvyDev/Duvycrawl/internal/utils"
 )
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
@@ -689,18 +690,18 @@ func (s *SQLiteStorage) UpdatePageRankings(ctx context.Context) error {
 	query := `
 		WITH domain_counts AS (
 			SELECT
-				l.target_url,
+				l.target_hash,
 				COUNT(DISTINCT p_source.domain) as unique_domains
 			FROM graph.links l
 			JOIN pages p_source ON p_source.id = l.source_id
-			JOIN pages p_target ON p_target.url = l.target_url
+			JOIN pages p_target ON p_target.url_hash = l.target_hash
 			WHERE p_source.domain != p_target.domain
-			GROUP BY l.target_url
+			GROUP BY l.target_hash
 		)
 		UPDATE pages
 		SET referring_domains = domain_counts.unique_domains
 		FROM domain_counts
-		WHERE pages.url = domain_counts.target_url;
+		WHERE pages.url_hash = domain_counts.target_hash;
 	`
 
 	res, err := s.writeContentDB.ExecContext(ctx, query)
@@ -758,7 +759,7 @@ func (s *SQLiteStorage) computeIterativePageRank(ctx context.Context) error {
 	edgeRows, err := s.writeContentDB.QueryContext(ctx, `
 		SELECT l.source_id, p.id 
 		FROM graph.links l
-		JOIN pages p ON p.url = l.target_url
+		JOIN pages p ON p.url_hash = l.target_hash
 		WHERE l.source_id != p.id
 	`)
 	if err != nil {
@@ -895,8 +896,8 @@ func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceUR
 	}
 
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO links (source_id, source_url, target_url, anchor_text)
-		VALUES (?, ?, ?, ?)
+		INSERT OR IGNORE INTO links (source_id, target_hash, anchor_text)
+		VALUES (?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("preparing link insert: %w", err)
@@ -904,8 +905,11 @@ func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceUR
 	defer stmt.Close()
 
 	for _, link := range links {
-		if _, err := stmt.ExecContext(ctx, sourceID, sourceURL, link.TargetURL, link.AnchorText); err != nil {
-			s.logger.Warn("failed to insert link", "source", sourceURL, "target", link.TargetURL, "error", err)
+		if link.TargetHash == 0 {
+			link.TargetHash = utils.HashURL(link.TargetURL)
+		}
+		if _, err := stmt.ExecContext(ctx, sourceID, link.TargetHash, link.AnchorText); err != nil {
+			s.logger.Warn("failed to insert link", "source_id", sourceID, "target_hash", link.TargetHash, "error", err)
 			continue
 		}
 	}
@@ -915,8 +919,9 @@ func (s *SQLiteStorage) StoreLinks(ctx context.Context, sourceID int64, sourceUR
 
 func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limit, offset int) ([]BacklinkResult, int, error) {
 	var total int
+	targetHash := utils.HashURL(targetURL)
 	if err := s.graphDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
+		`SELECT COUNT(*) FROM links WHERE target_hash = ?`, targetHash,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
 	}
@@ -926,12 +931,12 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 	}
 
 	rows, err := s.graphDB.QueryContext(ctx, `
-		SELECT source_id, source_url, anchor_text, created_at
+		SELECT source_id, anchor_text, created_at
 		FROM links
-		WHERE target_url = ?
+		WHERE target_hash = ?
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
-	`, targetURL, limit, offset)
+	`, targetHash, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("querying backlinks for %q: %w", targetURL, err)
 	}
@@ -942,7 +947,7 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 	for rows.Next() {
 		var r BacklinkResult
 		var createdAt sql.NullTime
-		if err := rows.Scan(&r.SourceID, &r.SourceURL, &r.AnchorText, &createdAt); err != nil {
+		if err := rows.Scan(&r.SourceID, &r.AnchorText, &createdAt); err != nil {
 			return nil, 0, fmt.Errorf("scanning backlink: %w", err)
 		}
 		if createdAt.Valid {
@@ -964,21 +969,27 @@ func (s *SQLiteStorage) GetBacklinks(ctx context.Context, targetURL string, limi
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		query := fmt.Sprintf("SELECT id, title FROM pages WHERE id IN (%s)", strings.Join(placeholders, ","))
+		query := fmt.Sprintf("SELECT id, url, title FROM pages WHERE id IN (%s)", strings.Join(placeholders, ","))
 		titleRows, err := s.readContentDB.QueryContext(ctx, query, args...)
 		if err == nil {
 			defer titleRows.Close()
 			titleMap := make(map[int64]string)
+			urlMap := make(map[int64]string)
 			for titleRows.Next() {
 				var id int64
+				var url string
 				var title string
-				if err := titleRows.Scan(&id, &title); err == nil {
+				if err := titleRows.Scan(&id, &url, &title); err == nil {
 					titleMap[id] = title
+					urlMap[id] = url
 				}
 			}
 			for i := range results {
 				if t, ok := titleMap[results[i].SourceID]; ok {
 					results[i].SourceTitle = t
+				}
+				if u, ok := urlMap[results[i].SourceID]; ok {
+					results[i].SourceURL = u
 				}
 			}
 		}
@@ -1000,7 +1011,7 @@ func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, of
 	}
 
 	rows, err := s.graphDB.QueryContext(ctx, `
-		SELECT target_url, anchor_text, created_at
+		SELECT target_hash, anchor_text, created_at
 		FROM links
 		WHERE source_id = ?
 		ORDER BY created_at DESC
@@ -1012,20 +1023,52 @@ func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, of
 	defer rows.Close()
 
 	var results []OutlinkResult
+	var targetHashes []int64
 	for rows.Next() {
 		var r OutlinkResult
+		var targetHash int64
 		var createdAt sql.NullTime
-		if err := rows.Scan(&r.TargetURL, &r.AnchorText, &createdAt); err != nil {
+		if err := rows.Scan(&targetHash, &r.AnchorText, &createdAt); err != nil {
 			return nil, 0, fmt.Errorf("scanning outlink: %w", err)
 		}
 		if createdAt.Valid {
 			r.CreatedAt = createdAt.Time
 		}
+		r.TargetURL = fmt.Sprintf("hash:%d", targetHash)
 		results = append(results, r)
+		targetHashes = append(targetHashes, targetHash)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, 0, fmt.Errorf("iterating outlinks: %w", err)
+	}
+
+	// Fetch target URLs from content.db using target_hashes
+	if len(targetHashes) > 0 {
+		placeholders := make([]string, len(targetHashes))
+		args := make([]any, len(targetHashes))
+		for i, h := range targetHashes {
+			placeholders[i] = "?"
+			args[i] = h
+		}
+		query := fmt.Sprintf("SELECT url_hash, url FROM pages WHERE url_hash IN (%s)", strings.Join(placeholders, ","))
+		urlRows, err := s.readContentDB.QueryContext(ctx, query, args...)
+		if err == nil {
+			defer urlRows.Close()
+			urlMap := make(map[int64]string)
+			for urlRows.Next() {
+				var h int64
+				var url string
+				if err := urlRows.Scan(&h, &url); err == nil {
+					urlMap[h] = url
+				}
+			}
+			for i, h := range targetHashes {
+				if u, ok := urlMap[h]; ok {
+					results[i].TargetURL = u
+				}
+			}
+		}
 	}
 
 	return results, total, nil
@@ -1033,8 +1076,9 @@ func (s *SQLiteStorage) GetOutlinks(ctx context.Context, pageID int64, limit, of
 
 func (s *SQLiteStorage) GetBacklinkCount(ctx context.Context, targetURL string) (int, error) {
 	var count int
+	targetHash := utils.HashURL(targetURL)
 	if err := s.graphDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM links WHERE target_url = ?`, targetURL,
+		`SELECT COUNT(*) FROM links WHERE target_hash = ?`, targetHash,
 	).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting backlinks for %q: %w", targetURL, err)
 	}
