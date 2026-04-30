@@ -304,6 +304,19 @@ func newSearchQuery(query string) searchQuery {
 	normalized := normalizeSearchText(query)
 	tokens := strings.Fields(normalized)
 	domainLike := normalizeDomainLikeQuery(query)
+
+	// Implicit gTLD detection: for 2-token queries like "warframe market",
+	// check if joining with "." forms a valid domain (e.g., warframe.market).
+	// .market, .dev, .app, .blog, etc. are real gTLDs — if publicsuffix
+	// validates the combination, treat the query as navigational so the
+	// homepage gets the massive domain-match boosts it deserves.
+	if domainLike == "" && len(tokens) == 2 {
+		candidate := tokens[0] + "." + tokens[1]
+		if etld, err := publicsuffix.EffectiveTLDPlusOne(candidate); err == nil && etld == candidate {
+			domainLike = candidate
+		}
+	}
+
 	navTerm := ""
 	if domainLike != "" {
 		navTerm = strings.ReplaceAll(normalizeSearchText(classifySearchDomain(domainLike).rootLabel), " ", "")
