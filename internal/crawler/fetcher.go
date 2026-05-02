@@ -274,6 +274,12 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 // Fetch downloads the content at the given URL with automatic retries
 // and adaptive per-host backoff for throttled responses (429, 503).
 func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, error) {
+	return f.FetchWithUserAgent(ctx, targetURL, f.userAgent)
+}
+
+// FetchWithUserAgent is like Fetch but uses the provided User-Agent instead
+// of the default one. This is used for UA fallback (e.g. Googlebot).
+func (f *Fetcher) FetchWithUserAgent(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URL %q: %w", targetURL, err)
@@ -312,7 +318,7 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			}
 		}
 
-		result, err := f.fetchOnce(ctx, targetURL)
+		result, err := f.fetchOnce(ctx, targetURL, userAgent)
 		lastErr = err
 
 		if err == nil {
@@ -339,8 +345,8 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 	return nil, fmt.Errorf("after %d attempts: %w", f.maxRetries+1, lastErr)
 }
 
-// fetchOnce performs a single HTTP GET request.
-func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult, error) {
+// fetchOnce performs a single HTTP GET request with the given User-Agent.
+func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -348,7 +354,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 		return nil, fmt.Errorf("creating request for %q: %w", targetURL, err)
 	}
 
-	req.Header.Set("User-Agent", f.userAgent)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	// NOTE: Do NOT manually set Accept-Encoding. Go's http.Transport with
