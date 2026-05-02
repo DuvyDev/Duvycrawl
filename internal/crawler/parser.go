@@ -155,6 +155,11 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// --- Extract images (before removing elements) ---
 	result.Images = extractImages(doc, base)
 
+	// --- Extract links from tags that will be removed for content extraction ---
+	// These tags are stripped below for text content purposes, but contain
+	// valuable outbound URLs that the crawler should follow.
+	extraLinks := extractAdditionalLinks(doc, base)
+
 	// Extract visible text content.
 	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
 	doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
@@ -243,6 +248,18 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 			})
 		}
 	})
+
+	// Merge links discovered from removed tags (iframe, script, form, etc.)
+	for _, extra := range extraLinks {
+		if !seen[extra] {
+			seen[extra] = true
+			result.Links = append(result.Links, extra)
+			result.Anchors = append(result.Anchors, LinkAnchor{
+				URL:    extra,
+				Anchor: "",
+			})
+		}
+	}
 
 	return result, nil
 }
@@ -396,6 +413,8 @@ func isBlockElement(tag string) bool {
 }
 
 // isBinaryExtension returns true if the URL path ends with a known binary file extension.
+// Note: .js, .css, .json, .xml are NOT considered binary — they are text-based
+// resources that can contain discoverable endpoints.
 func isBinaryExtension(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -409,12 +428,112 @@ func isBinaryExtension(rawURL string) bool {
 		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
 		".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".wav",
 		".exe", ".msi", ".dmg", ".apk", ".deb", ".rpm",
-		".css", ".js", ".json", ".xml", ".rss", ".atom",
 		".woff", ".woff2", ".ttf", ".eot", ".otf",
 		".iso", ".bin", ".img":
 		return true
 	}
 	return false
+}
+
+// extractAdditionalLinks discovers URLs from HTML tags that will be removed
+// during content extraction (scripts, iframes, forms, link tags, etc.).
+// This must be called BEFORE the doc.Find(...).Remove() step.
+// Inspired by Katana's 30+ tag parsers — these are the most impactful ones.
+func extractAdditionalLinks(doc *goquery.Document, base *url.URL) []string {
+	var links []string
+	seen := make(map[string]bool)
+
+	addLink := func(href string) {
+		href = strings.TrimSpace(href)
+		if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") ||
+			strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "mailto:") {
+			return
+		}
+		resolved := resolveURL(base, href)
+		if resolved == "" || seen[resolved] || isBinaryExtension(resolved) {
+			return
+		}
+		seen[resolved] = true
+		links = append(links, resolved)
+	}
+
+	// <iframe src>
+	doc.Find("iframe[src]").Each(func(_ int, s *goquery.Selection) {
+		if src, ok := s.Attr("src"); ok {
+			addLink(src)
+		}
+	})
+
+	// <frame src>
+	doc.Find("frame[src]").Each(func(_ int, s *goquery.Selection) {
+		if src, ok := s.Attr("src"); ok {
+			addLink(src)
+		}
+	})
+
+	// <script src> — external JS files can be entry points for SPA routes
+	doc.Find("script[src]").Each(func(_ int, s *goquery.Selection) {
+		if src, ok := s.Attr("src"); ok {
+			addLink(src)
+		}
+	})
+
+	// <link href> — not just canonical; includes alternate, preload, stylesheet
+	// We skip rel=icon/shortcut/apple-touch (icons are not crawlable pages)
+	doc.Find("link[href]").Each(func(_ int, s *goquery.Selection) {
+		rel, _ := s.Attr("rel")
+		rel = strings.ToLower(rel)
+		if strings.Contains(rel, "icon") || strings.Contains(rel, "apple-touch") {
+			return
+		}
+		if href, ok := s.Attr("href"); ok {
+			addLink(href)
+		}
+	})
+
+	// <form action> — form target URLs are discoverable endpoints
+	doc.Find("form[action]").Each(func(_ int, s *goquery.Selection) {
+		if action, ok := s.Attr("action"); ok {
+			addLink(action)
+		}
+	})
+
+	// <meta content> — extract URLs from http-equiv=refresh, og:url, etc.
+	doc.Find("meta").Each(func(_ int, s *goquery.Selection) {
+		content, exists := s.Attr("content")
+		if !exists || content == "" {
+			return
+		}
+		// http-equiv="refresh" format: "5;url=https://..."
+		httpEquiv, _ := s.Attr("http-equiv")
+		if strings.EqualFold(httpEquiv, "refresh") {
+			if idx := strings.Index(strings.ToLower(content), "url="); idx >= 0 {
+				addLink(strings.TrimSpace(content[idx+4:]))
+			}
+			return
+		}
+		// og:url, og:see_also, etc.
+		prop, _ := s.Attr("property")
+		if strings.HasPrefix(prop, "og:") && strings.Contains(content, "://") {
+			addLink(content)
+		}
+	})
+
+	// <embed src>
+	doc.Find("embed[src]").Each(func(_ int, s *goquery.Selection) {
+		if src, ok := s.Attr("src"); ok {
+			addLink(src)
+		}
+	})
+
+	// <object data>
+	doc.Find("object[data]").Each(func(_ int, s *goquery.Selection) {
+		if data, ok := s.Attr("data"); ok {
+			addLink(data)
+		}
+	})
+
+	return links
 }
 
 // normalizeLanguage extracts a clean 2-letter ISO 639-1 language code

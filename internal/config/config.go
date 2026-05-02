@@ -60,8 +60,9 @@ type CrawlerConfig struct {
 	// crawling the same domains repeatedly.
 	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
 	// FallbackUserAgent is used when the primary User-Agent results in an
-	// empty page or a bot-block response. A Googlebot-style UA is a good
-	// default because some sites serve a simplified static version to bots.
+	// empty page or a bot-block response. Uses a different browser variant
+	// (different OS/version) rather than a bot UA, since sites that block
+	// Chrome are unlikely to welcome declared bots either.
 	FallbackUserAgent string `yaml:"fallback_user_agent"`
 	// MaxFallbackRetries is the maximum number of fallback attempts per URL
 	// when the primary User-Agent is detected to have failed.
@@ -174,7 +175,7 @@ func DefaultConfig() *Config {
 			ParallelismPerDomain:     2,
 			DisableCookies:           false,
 			MaxIdleConnsPerHost:      100,
-			FallbackUserAgent:        "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+			FallbackUserAgent:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 			MaxFallbackRetries:       1,
 			DomainStatsFlushInterval: 30 * time.Second,
 			AutoStart:                true,
