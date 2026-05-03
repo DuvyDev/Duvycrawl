@@ -183,6 +183,9 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
 	doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
 
+	// Remove common content noise: ads, sidebars, comments, widgets, code blocks, etc.
+	doc.Find(".ad, .ads, .advertisement, .ad-container, .google-ad, .sidebar, #sidebar, .comments, .comment-list, .comment-section, .related-posts, .newsletter, .cookie-banner, .popup, .modal, .social-share, .share-buttons, .author-bio, .toc, .table-of-contents, pre, code").Remove()
+
 	// Get the text from the main content area.
 	// Try <main>, <article>, then fall back to <body>.
 	contentRoot := doc.Find("main, article, [role=main]").First()
