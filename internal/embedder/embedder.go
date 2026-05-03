@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultBaseURL = "http://localhost:11434"
-	defaultModel   = "all-minilm:l6-v2"
+	defaultModel   = "embeddinggemma:300m"
 	timeout        = 30 * time.Second
 )
 

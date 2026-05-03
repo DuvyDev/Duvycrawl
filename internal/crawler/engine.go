@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,11 @@ const (
 	StatusIdle     EngineStatus = "idle"
 	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
+
+	// Embedding chunking limits tuned for all-minilm:l6-v2 (~256 token context).
+	maxEmbedChunks    = 4
+	embedChunkSize    = 256
+	embedChunkOverlap = 20
 )
 
 // embedJob carries the data needed to generate an embedding for a page.
@@ -141,7 +147,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// Launch background embedding workers (limited concurrency to avoid
 	// overwhelming the Ollama API).
 	if e.embedder != nil {
-		embedWorkers := 1
+		embedWorkers := 2
 		for i := 0; i < embedWorkers; i++ {
 			e.embedWG.Add(1)
 			go e.embedWorker(ctx, i)
@@ -526,8 +532,17 @@ func (e *Engine) backfillEmbeddings(ctx context.Context) {
 	logger := e.logger.With("component", "embed_backfill")
 
 	const batchSize = 250
+	idleSleep := 5 * time.Second
+	queueFullSleep := 1 * time.Second
+
 	for {
+		if ctx.Err() != nil {
+			return
+		}
+
 		afterID := int64(0)
+		loaded := 0
+
 		for {
 			if ctx.Err() != nil {
 				return
@@ -551,13 +566,27 @@ func (e *Engine) backfillEmbeddings(ctx context.Context) {
 					content:     page.Content,
 				}, false)
 				afterID = page.ID
+				loaded++
+			}
+
+			// If the low queue is full, back off briefly so workers can drain it,
+			// then continue with the next batch instead of sleeping for minutes.
+			if len(e.lowEmbedQueue) == cap(e.lowEmbedQueue) {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(queueFullSleep):
+				}
 			}
 		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(5 * time.Minute):
+		// No more pending pages found — sleep briefly and restart scan from top.
+		if loaded == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(idleSleep):
+			}
 		}
 	}
 }
@@ -608,34 +637,39 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
 	defer e.embedQueued.Delete(job.pageID)
 
-	// Build a clean representation prioritising title and description over raw
-	// content. Title is the strongest semantic signal, description next; content
-	// is used only if budget remains.
 	title := sanitizeEmbedText(job.title)
 	desc := sanitizeEmbedText(job.description)
 	content := sanitizeEmbedText(job.content)
 
-	text := buildEmbedText(title, desc, content, 768)
-	if text == "" {
+	chunks := chunkEmbedText(title, desc, content, embedChunkSize, embedChunkOverlap, maxEmbedChunks)
+	if len(chunks) == 0 {
 		return
 	}
 
-	// Try with progressively shorter text if Ollama rejects for context length.
-	maxLengths := []int{768, 512, 256}
-	for _, maxLen := range maxLengths {
-		candidate := buildEmbedText(title, desc, content, maxLen)
-
-		vec, err := e.embedder.GenerateEmbedding(candidate)
-		if err == nil {
-			e.saveEmbedding(job, vec, logger)
-			return
+	vectors := make([][]float32, 0, len(chunks))
+	for i, chunk := range chunks {
+		vec, err := e.embedder.GenerateEmbedding(chunk)
+		if err != nil {
+			logger.Debug("embedding chunk failed", "url", job.pageURL, "chunk", i, "error", err)
+			continue
 		}
-		if !isContextLengthError(err) {
-			logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
-			return
-		}
-		logger.Debug("embedding context exceeded, retrying shorter", "url", job.pageURL, "len", maxLen)
+		vectors = append(vectors, vec)
 	}
+
+	if len(vectors) == 0 {
+		logger.Debug("all embedding chunks failed", "url", job.pageURL)
+		return
+	}
+
+	var finalVec []float32
+	if len(vectors) == 1 {
+		finalVec = vectors[0]
+	} else {
+		finalVec = averagePoolVectors(vectors)
+		finalVec = l2NormalizeVector(finalVec)
+	}
+
+	e.saveEmbedding(job, finalVec, logger)
 }
 
 // buildEmbedText assembles title + description + content, always keeping the
@@ -726,6 +760,132 @@ func truncateAtWordBoundary(s string, maxLen int) string {
 	}
 	// No space found — hard truncate.
 	return s[:maxLen]
+}
+
+// chunkEmbedText splits the page text into small overlapping chunks safe for
+// embedding models with tight context windows (e.g. all-minilm:l6-v2).
+// Every chunk starts with the title and description (truncated if necessary) so
+// the strongest semantic signal is preserved in each chunk.
+func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks int) []string {
+	prefixParts := []string{}
+	if title != "" {
+		prefixParts = append(prefixParts, title)
+	}
+	if desc != "" {
+		prefixParts = append(prefixParts, desc)
+	}
+	prefix := strings.Join(prefixParts, ". ")
+	if prefix != "" {
+		prefix += ". "
+	}
+
+	prefixLen := len(prefix)
+	available := chunkSize - prefixLen
+	if available < 50 {
+		prefix = truncateAtWordBoundary(prefix, chunkSize-50) + ". "
+		prefixLen = len(prefix)
+		available = chunkSize - prefixLen
+	}
+
+	if content == "" {
+		if prefixLen > 0 {
+			return []string{strings.TrimSpace(prefix)}
+		}
+		return nil
+	}
+
+	rawChunks := chunkText(content, available, overlap)
+	if len(rawChunks) == 0 {
+		if prefixLen > 0 {
+			return []string{strings.TrimSpace(prefix)}
+		}
+		return nil
+	}
+
+	chunks := make([]string, 0, len(rawChunks))
+	for i, rc := range rawChunks {
+		if i >= maxChunks {
+			break
+		}
+		chunks = append(chunks, strings.TrimSpace(prefix+rc))
+	}
+	return chunks
+}
+
+// chunkText splits text into overlapping chunks of maxChunkLen bytes,
+// preferring word boundaries.
+func chunkText(text string, maxChunkLen, overlap int) []string {
+	if maxChunkLen <= 0 {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	if len(text) == 0 {
+		return nil
+	}
+	if len(text) <= maxChunkLen {
+		return []string{text}
+	}
+
+	var chunks []string
+	start := 0
+	for start < len(text) {
+		end := start + maxChunkLen
+		if end >= len(text) {
+			chunks = append(chunks, strings.TrimSpace(text[start:]))
+			break
+		}
+
+		splitAt := end
+		for i := end; i > start+overlap; i-- {
+			if text[i] == ' ' || text[i] == '\n' {
+				splitAt = i
+				break
+			}
+		}
+
+		chunks = append(chunks, strings.TrimSpace(text[start:splitAt]))
+		start = splitAt - overlap
+		if start <= 0 {
+			start = splitAt
+		}
+	}
+	return chunks
+}
+
+// averagePoolVectors averages multiple embedding vectors dimension-wise.
+func averagePoolVectors(vectors [][]float32) []float32 {
+	if len(vectors) == 0 {
+		return nil
+	}
+	dim := len(vectors[0])
+	result := make([]float32, dim)
+	for _, vec := range vectors {
+		for i := 0; i < dim; i++ {
+			result[i] += vec[i]
+		}
+	}
+	n := float32(len(vectors))
+	for i := 0; i < dim; i++ {
+		result[i] /= n
+	}
+	return result
+}
+
+// l2NormalizeVector scales the vector so its Euclidean norm is 1.
+// This keeps cosine similarity valid after averaging.
+func l2NormalizeVector(vec []float32) []float32 {
+	var sum float64
+	for _, v := range vec {
+		sum += float64(v) * float64(v)
+	}
+	if sum == 0 {
+		return vec
+	}
+	norm := float32(math.Sqrt(sum))
+	for i := range vec {
+		vec[i] /= norm
+	}
+	return vec
 }
 
 // isContextLengthError detects if an error is due to exceeding the model's context window.
