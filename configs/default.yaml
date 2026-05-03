@@ -18,13 +18,7 @@ crawler:
   # User-Agent string sent with every request.
   # Must match a real browser UA for anti-bot bypass.
   # DO NOT use bot-like identifiers (Googlebot, crawler, etc.).
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-  # Fallback User-Agent used when the primary UA returns an empty page
-  # or a bot-block response. Uses a different browser variant (macOS Chrome)
-  # rather than a bot UA — sites blocking Chrome won't welcome bots either.
-  fallback_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-  # Max retry attempts when using the fallback UA.
-  max_fallback_retries: 1
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"\r
   # Maximum page size to download (in KB)
   max_page_size_kb: 512
   # Whether to respect robots.txt directives
