@@ -5,12 +5,10 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/embedder"
@@ -28,11 +26,11 @@ const (
 	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
 
-	// Embedding chunking limits tuned for all-minilm:l6-v2 (~256 token context).
-	// 1 token ≈ 3 chars for mixed web text, so 512 runes ≈ 170 tokens (safe margin).
-	maxEmbedChunks    = 4
-	embedChunkSize    = 512
-	embedChunkOverlap = 40
+	// Maximum content length (in runes) to include in a single embedding.
+	// With qwen3-embedding (32K token context), we can embed full pages in
+	// one call. 6000 runes ≈ 2000 tokens — covers virtually all meaningful
+	// page content without sending excessive noise.
+	maxEmbedContentRunes = 6000
 )
 
 // embedJob carries the data needed to generate an embedding for a page.
@@ -501,7 +499,7 @@ func (e *Engine) onPagesPersisted(pages []*storage.Page) {
 			pageURL:     page.URL,
 			title:       page.Title,
 			description: page.Description,
-			content:     truncateString(page.Content, 2048),
+			content:     truncateString(page.Content, 8000),
 		}, true)
 	}
 }
@@ -643,280 +641,50 @@ func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
 	desc := sanitizeEmbedText(job.description)
 	content := sanitizeEmbedText(job.content)
 
-	chunks := chunkEmbedText(title, desc, content, embedChunkSize, embedChunkOverlap, maxEmbedChunks)
-	if len(chunks) == 0 {
+	text := buildSingleEmbedText(title, desc, content, maxEmbedContentRunes)
+	if text == "" {
 		return
 	}
 
-	vectors := make([][]float32, 0, len(chunks))
-	for i, chunk := range chunks {
-		vec, err := e.embedder.GenerateEmbedding(chunk)
-		if err != nil {
-			logger.Debug("embedding chunk failed", "url", job.pageURL, "chunk", i, "error", err)
-			continue
-		}
-		vectors = append(vectors, vec)
-	}
-
-	if len(vectors) == 0 {
-		logger.Debug("all embedding chunks failed", "url", job.pageURL)
+	vec, err := e.embedder.GenerateEmbedding(text)
+	if err != nil {
+		logger.Debug("embedding failed", "url", job.pageURL, "error", err)
 		return
 	}
 
-	var finalVec []float32
-	if len(vectors) == 1 {
-		finalVec = vectors[0]
-	} else {
-		finalVec = averagePoolVectors(vectors)
-		finalVec = l2NormalizeVector(finalVec)
-	}
-
-	e.saveEmbedding(job, finalVec, logger)
+	e.saveEmbedding(job, vec, logger)
 }
 
-// buildEmbedText assembles title + description + content, always keeping the
-// title intact, then fitting as much description as possible, and finally
-// padding with content up to maxLen. Never cuts mid-word.
-func buildEmbedText(title, desc, content string, maxLen int) string {
-	if title == "" && desc == "" && content == "" {
-		return ""
-	}
-
-	maxWords := embedWordBudget(maxLen)
-	parts := []string{}
-	remaining := maxLen
-	usedWords := 0
-
-	// Title always goes in full (it's the strongest signal).
+// buildSingleEmbedText concatenates title, description, and content into a
+// single string for embedding. With large-context models (e.g. qwen3-embedding,
+// 32K tokens) there is no need to split into chunks — one clean vector per page
+// gives a stronger, undiluted semantic signal.
+func buildSingleEmbedText(title, desc, content string, maxRunes int) string {
+	parts := make([]string, 0, 3)
 	if title != "" {
-		title = truncateByWordAndBytes(title, maxWords, remaining)
-		if len(title) > remaining {
-			title = truncateAtWordBoundary(title, remaining)
-		}
 		parts = append(parts, title)
-		remaining -= len(title)
-		usedWords += len(strings.Fields(title))
-	}
-
-	// Fit description next, truncated at last full word if needed.
-	if desc != "" && remaining > 1 && usedWords < maxWords {
-		descPart := desc
-		descPart = truncateByWordAndBytes(descPart, maxWords-usedWords, remaining-1)
-		if descPart != "" {
-			parts = append(parts, descPart)
-			remaining -= len(descPart) + 1
-			usedWords += len(strings.Fields(descPart))
-		}
-	}
-
-	// Whatever space is left goes to content.
-	if content != "" && remaining > 1 && usedWords < maxWords {
-		contentPart := content
-		contentPart = truncateByWordAndBytes(contentPart, maxWords-usedWords, remaining-1)
-		if contentPart != "" {
-			parts = append(parts, contentPart)
-		}
-	}
-
-	return strings.Join(parts, " ")
-}
-
-func embedWordBudget(maxLen int) int {
-	switch {
-	case maxLen >= 768:
-		return 120
-	case maxLen >= 512:
-		return 80
-	default:
-		return 40
-	}
-}
-
-func truncateByWordAndBytes(s string, maxWords, maxBytes int) string {
-	if s == "" || maxWords <= 0 || maxBytes <= 0 {
-		return ""
-	}
-	words := strings.Fields(s)
-	if len(words) > maxWords {
-		words = words[:maxWords]
-	}
-	joined := strings.Join(words, " ")
-	if len(joined) <= maxBytes {
-		return joined
-	}
-	return truncateAtWordBoundary(joined, maxBytes)
-}
-
-// truncateAtWordBoundary cuts s to fit within maxLen bytes without breaking
-// a word. If the first word is longer than maxLen, it falls back to a hard
-// truncation.
-func truncateAtWordBoundary(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	// Walk backwards from maxLen to find a space.
-	for i := maxLen; i > 0; i-- {
-		if s[i] == ' ' {
-			return strings.TrimSpace(s[:i])
-		}
-	}
-	// No space found — hard truncate.
-	return s[:maxLen]
-}
-
-// chunkEmbedText splits the page text into small overlapping chunks safe for
-// embedding models with tight context windows (e.g. all-minilm:l6-v2).
-// Every chunk starts with the title and description (truncated if necessary) so
-// the strongest semantic signal is preserved in each chunk.
-// All limits are measured in runes (visible Unicode characters), not bytes.
-func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks int) []string {
-	prefixParts := []string{}
-	if title != "" {
-		prefixParts = append(prefixParts, title)
 	}
 	if desc != "" {
-		prefixParts = append(prefixParts, desc)
+		parts = append(parts, desc)
 	}
-	prefix := strings.Join(prefixParts, ". ")
-	if prefix != "" {
-		prefix += ". "
+	if content != "" {
+		parts = append(parts, content)
 	}
-
-	prefixLen := utf8.RuneCountInString(prefix)
-	available := chunkSize - prefixLen
-	if available < 20 {
-		prefix = truncateAtRuneBoundary(prefix, chunkSize-20) + ". "
-		prefixLen = utf8.RuneCountInString(prefix)
-		available = chunkSize - prefixLen
+	if len(parts) == 0 {
+		return ""
 	}
-
-	if content == "" {
-		if prefixLen > 0 {
-			return []string{strings.TrimSpace(prefix)}
-		}
-		return nil
+	joined := strings.Join(parts, ". ")
+	runes := []rune(joined)
+	if len(runes) <= maxRunes {
+		return joined
 	}
-
-	rawChunks := chunkTextRunes(content, available, overlap)
-	if len(rawChunks) == 0 {
-		if prefixLen > 0 {
-			return []string{strings.TrimSpace(prefix)}
-		}
-		return nil
-	}
-
-	chunks := make([]string, 0, len(rawChunks))
-	for i, rc := range rawChunks {
-		if i >= maxChunks {
-			break
-		}
-		chunks = append(chunks, strings.TrimSpace(prefix+rc))
-	}
-	return chunks
-}
-
-// chunkTextRunes splits text into overlapping chunks of maxChunkLen runes,
-// preferring word boundaries. It works on Unicode runes, not raw bytes.
-func chunkTextRunes(text string, maxChunkLen, overlap int) []string {
-	if maxChunkLen <= 0 {
-		return nil
-	}
-	text = strings.TrimSpace(text)
-	runes := []rune(text)
-	if len(runes) == 0 {
-		return nil
-	}
-	if len(runes) <= maxChunkLen {
-		return []string{text}
-	}
-
-	var chunks []string
-	start := 0
-	for start < len(runes) {
-		end := start + maxChunkLen
-		if end >= len(runes) {
-			chunks = append(chunks, strings.TrimSpace(string(runes[start:])))
-			break
-		}
-
-		splitAt := end
-		for i := end; i > start+overlap; i-- {
-			if runes[i] == ' ' || runes[i] == '\n' {
-				splitAt = i
-				break
-			}
-		}
-
-		chunks = append(chunks, strings.TrimSpace(string(runes[start:splitAt])))
-		start = splitAt - overlap
-		if start <= 0 {
-			start = splitAt
-		}
-	}
-	return chunks
-}
-
-// truncateAtRuneBoundary truncates s to fit within maxLen runes without
-// breaking a word. Falls back to a hard rune truncation if necessary.
-func truncateAtRuneBoundary(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	// Walk backwards from maxLen to find a space.
-	for i := maxLen; i > 0; i-- {
+	// Truncate at a word boundary near the limit.
+	for i := maxRunes; i > maxRunes-100 && i > 0; i-- {
 		if runes[i] == ' ' {
 			return strings.TrimSpace(string(runes[:i]))
 		}
 	}
-	// No space found — hard truncate at rune boundary.
-	return string(runes[:maxLen])
-}
-
-// averagePoolVectors averages multiple embedding vectors dimension-wise.
-func averagePoolVectors(vectors [][]float32) []float32 {
-	if len(vectors) == 0 {
-		return nil
-	}
-	dim := len(vectors[0])
-	result := make([]float32, dim)
-	for _, vec := range vectors {
-		for i := 0; i < dim; i++ {
-			result[i] += vec[i]
-		}
-	}
-	n := float32(len(vectors))
-	for i := 0; i < dim; i++ {
-		result[i] /= n
-	}
-	return result
-}
-
-// l2NormalizeVector scales the vector so its Euclidean norm is 1.
-// This keeps cosine similarity valid after averaging.
-func l2NormalizeVector(vec []float32) []float32 {
-	var sum float64
-	for _, v := range vec {
-		sum += float64(v) * float64(v)
-	}
-	if sum == 0 {
-		return vec
-	}
-	norm := float32(math.Sqrt(sum))
-	for i := range vec {
-		vec[i] /= norm
-	}
-	return vec
-}
-
-// isContextLengthError detects if an error is due to exceeding the model's context window.
-func isContextLengthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "context length") ||
-		strings.Contains(errStr, "input length")
+	return string(runes[:maxRunes])
 }
 
 // sanitizeEmbedText removes problematic characters and normalizes whitespace
