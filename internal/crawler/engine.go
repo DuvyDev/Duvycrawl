@@ -10,7 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/embedder"
@@ -29,10 +28,9 @@ const (
 	StatusStopping EngineStatus = "stopping"
 
 	// Embedding chunking limits tuned for all-minilm:l6-v2 (~256 token context).
-	// 1 token ≈ 3 chars for mixed web text, so 512 runes ≈ 170 tokens (safe margin).
 	maxEmbedChunks    = 4
-	embedChunkSize    = 512
-	embedChunkOverlap = 40
+	embedChunkSize    = 256
+	embedChunkOverlap = 20
 )
 
 // embedJob carries the data needed to generate an embedding for a page.
@@ -768,7 +766,6 @@ func truncateAtWordBoundary(s string, maxLen int) string {
 // embedding models with tight context windows (e.g. all-minilm:l6-v2).
 // Every chunk starts with the title and description (truncated if necessary) so
 // the strongest semantic signal is preserved in each chunk.
-// All limits are measured in runes (visible Unicode characters), not bytes.
 func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks int) []string {
 	prefixParts := []string{}
 	if title != "" {
@@ -782,11 +779,11 @@ func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks i
 		prefix += ". "
 	}
 
-	prefixLen := utf8.RuneCountInString(prefix)
+	prefixLen := len(prefix)
 	available := chunkSize - prefixLen
-	if available < 20 {
-		prefix = truncateAtRuneBoundary(prefix, chunkSize-20) + ". "
-		prefixLen = utf8.RuneCountInString(prefix)
+	if available < 50 {
+		prefix = truncateAtWordBoundary(prefix, chunkSize-50) + ". "
+		prefixLen = len(prefix)
 		available = chunkSize - prefixLen
 	}
 
@@ -797,7 +794,7 @@ func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks i
 		return nil
 	}
 
-	rawChunks := chunkTextRunes(content, available, overlap)
+	rawChunks := chunkText(content, available, overlap)
 	if len(rawChunks) == 0 {
 		if prefixLen > 0 {
 			return []string{strings.TrimSpace(prefix)}
@@ -815,62 +812,44 @@ func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks i
 	return chunks
 }
 
-// chunkTextRunes splits text into overlapping chunks of maxChunkLen runes,
-// preferring word boundaries. It works on Unicode runes, not raw bytes.
-func chunkTextRunes(text string, maxChunkLen, overlap int) []string {
+// chunkText splits text into overlapping chunks of maxChunkLen bytes,
+// preferring word boundaries.
+func chunkText(text string, maxChunkLen, overlap int) []string {
 	if maxChunkLen <= 0 {
 		return nil
 	}
 	text = strings.TrimSpace(text)
-	runes := []rune(text)
-	if len(runes) == 0 {
+	if len(text) == 0 {
 		return nil
 	}
-	if len(runes) <= maxChunkLen {
+	if len(text) <= maxChunkLen {
 		return []string{text}
 	}
 
 	var chunks []string
 	start := 0
-	for start < len(runes) {
+	for start < len(text) {
 		end := start + maxChunkLen
-		if end >= len(runes) {
-			chunks = append(chunks, strings.TrimSpace(string(runes[start:])))
+		if end >= len(text) {
+			chunks = append(chunks, strings.TrimSpace(text[start:]))
 			break
 		}
 
 		splitAt := end
 		for i := end; i > start+overlap; i-- {
-			if runes[i] == ' ' || runes[i] == '\n' {
+			if text[i] == ' ' || text[i] == '\n' {
 				splitAt = i
 				break
 			}
 		}
 
-		chunks = append(chunks, strings.TrimSpace(string(runes[start:splitAt])))
+		chunks = append(chunks, strings.TrimSpace(text[start:splitAt]))
 		start = splitAt - overlap
 		if start <= 0 {
 			start = splitAt
 		}
 	}
 	return chunks
-}
-
-// truncateAtRuneBoundary truncates s to fit within maxLen runes without
-// breaking a word. Falls back to a hard rune truncation if necessary.
-func truncateAtRuneBoundary(s string, maxLen int) string {
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	// Walk backwards from maxLen to find a space.
-	for i := maxLen; i > 0; i-- {
-		if runes[i] == ' ' {
-			return strings.TrimSpace(string(runes[:i]))
-		}
-	}
-	// No space found — hard truncate at rune boundary.
-	return string(runes[:maxLen])
 }
 
 // averagePoolVectors averages multiple embedding vectors dimension-wise.
