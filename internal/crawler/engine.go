@@ -29,9 +29,10 @@ const (
 	StatusStopping EngineStatus = "stopping"
 
 	// Embedding chunking limits tuned for all-minilm:l6-v2 (~256 token context).
-	// 1 token ≈ 3 chars for mixed web text, so 512 runes ≈ 170 tokens (safe margin).
+	// 1 token ≈ 3 chars for mixed web text, but dense strings (URLs, base64) can
+	// map 1:1. 384 runes is a much safer margin than 512 to avoid context length errors.
 	maxEmbedChunks    = 4
-	embedChunkSize    = 512
+	embedChunkSize    = 384
 	embedChunkOverlap = 40
 )
 
@@ -665,13 +666,13 @@ func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
 		vectors = append(vectors, vec)
 	}
 
-	if len(vectors) == 0 {
-		logger.Debug("all embedding chunks failed", "url", job.pageURL)
-		return
-	}
-
 	var finalVec []float32
-	if len(vectors) == 1 {
+	if len(vectors) == 0 {
+		logger.Debug("all embedding chunks failed, saving dummy vector to prevent infinite retries", "url", job.pageURL)
+		// Save a 1D dummy vector. cosineSimilarity will safely return 0.0 since
+		// dimensions won't match the query vector, correctly falling back to pure lexical search.
+		finalVec = []float32{0}
+	} else if len(vectors) == 1 {
 		finalVec = vectors[0]
 	} else {
 		finalVec = averagePoolVectors(vectors)
