@@ -349,11 +349,13 @@ func newSearchQuery(query string) searchQuery {
 	for _, tok := range tokens {
 		if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
 			siteTypeIntent = tok
+		} else {
+			searchTokens = append(searchTokens, tok)
 		}
-		// Do not strip the intent word from the FTS5 search query. 
-		// If the user searches for "noticias uruguay", we must ensure FTS5 
-		// still searches for the word "noticias" in titles and text!
-		searchTokens = append(searchTokens, tok)
+	}
+	if len(searchTokens) == 0 {
+		// Query was only a site-type word (e.g. "wiki") — keep original tokens.
+		searchTokens = tokens
 	}
 
 	return searchQuery{
