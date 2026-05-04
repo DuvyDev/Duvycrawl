@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,6 +18,8 @@ import (
 const (
 	defaultBaseURL = "http://localhost:11434"
 	defaultModel   = "all-minilm:l6-v2"
+	defaultWorkers = 2
+	maxWorkers     = 16
 	timeout        = 30 * time.Second
 )
 
@@ -24,12 +27,14 @@ const (
 type Client struct {
 	baseURL string
 	model   string
+	workers int
 	client  *http.Client
 }
 
 // NewClient creates an embedder client using environment variables:
 //   - OLLAMA_EMBED_URL (default: http://localhost:11434)
 //   - OLLAMA_EMBED_MODEL (default: all-minilm)
+//   - OLLAMA_EMBED_WORKERS (default: 2, max: 16)
 func NewClient() *Client {
 	baseURL := os.Getenv("OLLAMA_EMBED_URL")
 	if baseURL == "" {
@@ -39,10 +44,36 @@ func NewClient() *Client {
 	if model == "" {
 		model = defaultModel
 	}
+
+	workers := defaultWorkers
+	if wStr := os.Getenv("OLLAMA_EMBED_WORKERS"); wStr != "" {
+		if w, err := strconv.Atoi(wStr); err == nil {
+			if w < 1 {
+				workers = 1
+			} else if w > maxWorkers {
+				workers = maxWorkers
+			} else {
+				workers = w
+			}
+		}
+	}
+
+	// Reuse TCP connections aggressively — critical when Ollama is remote.
+	transport := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  false,
+	}
+	if strings.HasPrefix(baseURL, "https://") {
+		transport.ForceAttemptHTTP2 = true
+	}
+
 	return &Client{
 		baseURL: baseURL,
 		model:   model,
-		client:  &http.Client{Timeout: timeout},
+		workers: workers,
+		client:  &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 
@@ -105,4 +136,9 @@ func (c *Client) GenerateEmbedding(text string) ([]float32, error) {
 // Model returns the configured embedding model name.
 func (c *Client) Model() string {
 	return c.model
+}
+
+// Workers returns the number of concurrent embedding workers to launch.
+func (c *Client) Workers() int {
+	return c.workers
 }

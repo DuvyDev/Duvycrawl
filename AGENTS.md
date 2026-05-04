@@ -113,6 +113,7 @@ Desde la integración con `internal/embedder`, el crawler genera embeddings vect
 Variables de entorno:
 - `OLLAMA_EMBED_URL`: URL base de Ollama (default: `http://localhost:11434`)
 - `OLLAMA_EMBED_MODEL`: Modelo de embeddings (default: `all-minilm`)
+- `OLLAMA_EMBED_WORKERS`: Número de goroutines concurrentes que envían embeddings a Ollama (default: `2`, max: `16`). Aumenta este valor si usas un Ollama remoto con GPU para mejorar throughput.
 
 ### Cómo funciona
 

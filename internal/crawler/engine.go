@@ -141,7 +141,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// Launch background embedding workers (limited concurrency to avoid
 	// overwhelming the Ollama API).
 	if e.embedder != nil {
-		embedWorkers := 1
+		embedWorkers := e.embedder.Workers()
 		for i := 0; i < embedWorkers; i++ {
 			e.embedWG.Add(1)
 			go e.embedWorker(ctx, i)
