@@ -64,6 +64,7 @@ type searchQuery struct {
 	domainLike     string
 	navigational   bool
 	siteTypeIntent string // e.g. "wiki", "docs", "blog" — detected from query tokens
+	platformIntent string // e.g. "reddit", "youtube" — detected from query tokens
 	idfMap         map[string]float64
 }
 

@@ -112,10 +112,15 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	// --- Navigational boost when FTS/fuzzy gave few results ---
-	if q.navigational && len(candidates) < 30 && searchCtx.Err() == nil {
-		navigationCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
-		if err == nil {
-			candidates = mergeSearchCandidates(candidates, navigationCandidates)
+	// For platform intents (e.g. "reddit", "youtube") we always run this so
+	// results from that domain are surfaced even if the platform name does not
+	// appear in the indexed page content.
+	if q.navigational && searchCtx.Err() == nil {
+		if len(candidates) < 30 || q.platformIntent != "" {
+			navigationCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
+			if err == nil {
+				candidates = mergeSearchCandidates(candidates, navigationCandidates)
+			}
 		}
 	}
 
@@ -300,6 +305,32 @@ var siteTypes = map[string]struct{}{
 	"portal": {}, "hub": {}, "status": {},
 }
 
+// platformDomains maps common platform names to domain-like search intent.
+// When a query contains one of these (e.g. "warframe reddit"), the token is
+// stripped from the FTS query and used as a navigational/domain filter so
+// results from that platform are included even though the word itself rarely
+// appears in page content.
+var platformDomains = map[string]struct{}{
+	"reddit": {}, "youtube": {}, "github": {}, "twitter": {}, "x": {},
+	"facebook": {}, "instagram": {}, "tiktok": {}, "linkedin": {},
+	"pinterest": {}, "twitch": {}, "discord": {}, "netflix": {},
+	"spotify": {}, "steam": {}, "epicgames": {}, "medium": {},
+	"substack": {}, "patreon": {}, "kickstarter": {}, "indiegogo": {},
+	"vimeo": {}, "dailymotion": {}, "tumblr": {}, "quora": {},
+	"stackexchange": {}, "stackoverflow": {}, "gitlab": {},
+	"bitbucket": {}, "sourceforge": {}, "itchio": {},
+	"deviantart": {}, "artstation": {}, "behance": {}, "dribbble": {},
+	"soundcloud": {}, "bandcamp": {}, "mixcloud": {}, "audiomack": {},
+	"goodreads": {}, "wattpad": {}, "fanfiction": {}, "ao3": {},
+	"imgur": {}, "gfycat": {}, "tenor": {}, "giphy": {},
+	"pastebin": {}, "hastebin": {}, "jsfiddle": {}, "codepen": {},
+	"replit": {}, "glitch": {}, "heroku": {}, "vercel": {},
+	"netlify": {}, "wordpress": {}, "blogger": {}, "wix": {},
+	"squarespace": {}, "weebly": {}, "shopify": {}, "etsy": {},
+	"amazon": {}, "aliexpress": {}, "ebay": {}, "mercadolibre": {},
+	"newegg": {}, "bestbuy": {}, "walmart": {}, "target": {},
+}
+
 func newSearchQuery(query string) searchQuery {
 	normalized := normalizeSearchText(query)
 	tokens := strings.Fields(normalized)
@@ -325,19 +356,37 @@ func newSearchQuery(query string) searchQuery {
 		navTerm = tokens[0]
 	}
 
-	// Detect site-type intent (e.g. "wiki warframe" → looking for wiki.warframe.com).
+	// Detect site-type intent (e.g. "wiki warframe" → looking for wiki.warframe.com)
+	// and platform intent (e.g. "warframe reddit" → looking for reddit.com results).
 	siteTypeIntent := ""
+	platformIntent := ""
 	var searchTokens []string
 	for _, tok := range tokens {
-		if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
+		if _, ok := platformDomains[tok]; ok && platformIntent == "" {
+			platformIntent = tok
+		} else if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
 			siteTypeIntent = tok
 		} else {
 			searchTokens = append(searchTokens, tok)
 		}
 	}
 	if len(searchTokens) == 0 {
-		// Query was only a site-type word (e.g. "wiki") — keep original tokens.
+		// Query was only a site-type or platform word (e.g. "wiki" or "reddit") — keep original tokens.
 		searchTokens = tokens
+	}
+
+	// Platform names act as navigational terms so domain filtering kicks in.
+	// When a platform name is detected, it overrides any gTLD-based navTerm
+	// because the user intent is clearly to filter by that platform's domain
+	// (e.g. "warframe reddit" → find reddit.com results, NOT warframe.reddit).
+	if platformIntent != "" {
+		navTerm = platformIntent
+		// If the gTLD detection produced a false domainLike using the platform
+		// name as a TLD (e.g. "warframe.reddit"), discard it — it's not a real
+		// domain the user is looking for.
+		if domainLike != "" && strings.HasSuffix(domainLike, "."+platformIntent) {
+			domainLike = ""
+		}
 	}
 
 	return searchQuery{
@@ -351,6 +400,7 @@ func newSearchQuery(query string) searchQuery {
 		domainLike:     domainLike,
 		navigational:   navTerm != "" || domainLike != "",
 		siteTypeIntent: siteTypeIntent,
+		platformIntent: platformIntent,
 	}
 }
 
@@ -1174,11 +1224,23 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 	}
 
-	// --- Reddit intent boost ---
-	// If the user query clearly implies a Reddit search, strongly boost reddit.com results.
-	if strings.Contains(query.normalized, "reddit") || strings.Contains(query.normalized, "subreddit") {
-		if domainInfo.effectiveDomain == "reddit.com" {
-			score += 10000.0
+	// --- Platform intent boost ---
+	// When the query contains a platform name (e.g. "reddit", "youtube"),
+	// strongly boost results from that platform's domain. This generalizes
+	// the old hardcoded Reddit boost to work for any platform and ensures
+	// the boost is strong enough to surface platform results above
+	// high-scoring domain matches (e.g. wiki.warframe.com).
+	if query.platformIntent != "" {
+		if domainInfo.rootLabel == query.platformIntent {
+			score += 16000.0
+			if isHomepage {
+				score += 4000.0
+			}
+			// Extra boost when the remaining search tokens appear in the URL
+			// (e.g. "warframe reddit" → /r/Warframe/... contains "warframe").
+			if len(query.tokens) > 0 && urlAvg > 0 {
+				score += 3000.0 * urlAvg
+			}
 		}
 	}
 
