@@ -229,7 +229,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	// Truncate content to a reasonable size (100KB of text).
 	if len(result.Content) > 100*1024 {
-		result.Content = strings.Clone(result.Content[:100*1024])
+		result.Content = result.Content[:100*1024]
 	}
 
 	// Extract links.
@@ -272,7 +272,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 			seen[resolved] = true
 			anchorText := strings.TrimSpace(s.Text())
 			if len(anchorText) > 500 {
-				anchorText = strings.Clone(anchorText[:500])
+				anchorText = anchorText[:500]
 			}
 			result.Links = append(result.Links, resolved)
 			result.Anchors = append(result.Anchors, LinkAnchor{
@@ -427,7 +427,7 @@ func extractHeadingText(root *goquery.Selection, selector string, maxLen int) st
 
 	joined := strings.Join(parts, " ")
 	if maxLen > 0 && len(joined) > maxLen {
-		joined = strings.Clone(joined[:maxLen])
+		joined = joined[:maxLen]
 	}
 	return joined
 }
@@ -650,7 +650,7 @@ func extractImages(doc *goquery.Document, base *url.URL) []ImageMeta {
 		if parent.Length() > 0 {
 			context = normalizeWhitespace(parent.Text())
 			if len(context) > 200 {
-				context = strings.Clone(context[:200])
+				context = context[:200]
 			}
 		}
 

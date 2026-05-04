@@ -463,12 +463,11 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 }
 
 // truncateString truncates a string to the given maximum length.
-// Uses strings.Clone to prevent leaking memory of large backing arrays.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return strings.Clone(s[:maxLen])
+	return s[:maxLen]
 }
 
 // loadSeedDomains populates the seedDomains set from the database.
