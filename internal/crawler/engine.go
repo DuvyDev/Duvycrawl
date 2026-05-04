@@ -610,9 +610,6 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 		}
 
 		select {
-		case <-ctx.Done():
-			logger.Debug("embedding worker shutting down (context cancelled)")
-			return
 		case job, ok := <-highQueue:
 			if !ok {
 				highQueue = nil
@@ -624,9 +621,6 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 		}
 
 		select {
-		case <-ctx.Done():
-			logger.Debug("embedding worker shutting down (context cancelled)")
-			return
 		case job, ok := <-highQueue:
 			if !ok {
 				highQueue = nil
@@ -835,14 +829,6 @@ func chunkTextRunes(text string, maxChunkLen, overlap int) []string {
 	}
 	if len(runes) <= maxChunkLen {
 		return []string{text}
-	}
-
-	// Prevent infinite loop by capping overlap to be strictly less than maxChunkLen
-	if overlap >= maxChunkLen {
-		overlap = maxChunkLen - 1
-		if overlap < 0 {
-			overlap = 0
-		}
 	}
 
 	var chunks []string
