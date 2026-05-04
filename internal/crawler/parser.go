@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -74,6 +75,13 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// 2. chardet heuristic fallback
 	// 3. Return as-is if everything fails
 	htmlBody = toUTF8(htmlBody, contentType)
+
+	// FAST PATH: If the content is not HTML (e.g. JS, CSS, JSON), do not pass it
+	// to goquery. The HTML tokenizer will explode in memory trying to parse
+	// minified JS/JSON as HTML. Instead, we use simple regex to find endpoints.
+	if !isHTMLContentType(contentType) {
+		return p.parseNonHTML(htmlBody, baseURL)
+	}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(htmlBody))
 	if err != nil {
@@ -291,6 +299,48 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 				URL:    extra,
 				Anchor: "",
 			})
+		}
+	}
+
+	return result, nil
+}
+
+var (
+	// absURLRegex matches absolute HTTP(S) URLs
+	absURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]+`)
+	// relURLRegex matches relative paths in quotes
+	relURLRegex = regexp.MustCompile(`(["'` + "`" + `])(/[-a-zA-Z0-9_@:%_+.~#?&/=]+)\1`)
+)
+
+// parseNonHTML extracts URLs from text files (JS, CSS, JSON) using regular expressions
+// instead of a full DOM parser. This prevents massive memory leaks when parsing minified code.
+func (p *Parser) parseNonHTML(body []byte, baseURL string) (*ParseResult, error) {
+	result := &ParseResult{}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return result, nil // Return empty if base is invalid
+	}
+
+	seen := make(map[string]bool)
+	addLink := func(href string) {
+		resolved := resolveURL(base, href)
+		if resolved == "" || seen[resolved] || isBinaryExtension(resolved) {
+			return
+		}
+		seen[resolved] = true
+		result.Links = append(result.Links, resolved)
+		result.Anchors = append(result.Anchors, LinkAnchor{URL: resolved})
+	}
+
+	// Find absolute URLs
+	for _, match := range absURLRegex.FindAll(body, -1) {
+		addLink(string(match))
+	}
+
+	// Find relative paths in quotes
+	for _, match := range relURLRegex.FindAllSubmatch(body, -1) {
+		if len(match) > 2 {
+			addLink(string(match[2]))
 		}
 	}
 
