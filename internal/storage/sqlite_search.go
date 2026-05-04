@@ -87,7 +87,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		total += count
 
 		// If we've collected a decent number of solid candidates, stop evaluating relaxed modes.
-		if len(candidates) >= candidateLimit {
+		if len(candidates) >= candidateLimit/2 {
 			break
 		}
 	}
@@ -145,15 +145,15 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 
 			embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
 			if err == nil && len(embs) > 0 {
-				semanticBoostWeight := 0.60 // 60% semantic, 40% lexical to overcome exact match stemming issues
+				semanticBoostWeight := 0.25 // 25% semantic, 75% lexical
 				for i := 0; i < topN; i++ {
 					emb, ok := embs[reranked[i].ID]
 					if !ok || len(emb.Embedding) == 0 {
 						continue
 					}
 					sim := cosineSimilarity(queryEmbedding, emb.Embedding)
-					// Scale similarity aggressively so high semantic similarity overrides poor lexical scores.
-					semanticScore := sim * 12000.0
+					// Scale similarity (0..1) to the same magnitude as lexical scores.
+					semanticScore := sim * 10000.0
 					oldRank := reranked[i].Rank
 					reranked[i].Rank = oldRank*(1.0-semanticBoostWeight) + semanticScore*semanticBoostWeight
 				}
@@ -1194,14 +1194,6 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 		if typeInDomain {
 			score += 12000.0
-		}
-	}
-
-	// --- Reddit intent boost ---
-	// If the user query clearly implies a Reddit search, strongly boost reddit.com results.
-	if strings.Contains(query.normalized, "reddit") || strings.Contains(query.normalized, "subreddit") {
-		if domainInfo.effectiveDomain == "reddit.com" {
-			score += 10000.0
 		}
 	}
 

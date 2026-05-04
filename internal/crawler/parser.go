@@ -110,25 +110,6 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// Extract <title>.
 	result.Title = strings.TrimSpace(doc.Find("title").First().Text())
 
-	// Fallback/override for generic titles (e.g., Reddit SPA "Reddit - ...")
-	if result.Title == "" || strings.HasPrefix(result.Title, "Reddit -") {
-		shredditTitle := doc.Find("shreddit-title").AttrOr("title", "")
-		if shredditTitle == "" {
-			shredditTitle = doc.Find("shreddit-post").AttrOr("post-title", "")
-		}
-		
-		if shredditTitle != "" {
-			result.Title = strings.TrimSpace(shredditTitle)
-		} else {
-			// Try og:title
-			doc.Find(`meta[property="og:title"]`).Each(func(_ int, s *goquery.Selection) {
-				if content, exists := s.Attr("content"); exists {
-					result.Title = strings.TrimSpace(content)
-				}
-			})
-		}
-	}
-
 	// Extract <meta name="description">.
 	doc.Find(`meta[name="description"]`).Each(func(_ int, s *goquery.Selection) {
 		if content, exists := s.Attr("content"); exists {
@@ -193,18 +174,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	result.H1 = extractHeadingText(contentRoot, "h1", 1200)
 	result.H2 = extractHeadingText(contentRoot, "h2", 2000)
 
-	var contentText string
-	shredditPost := doc.Find("shreddit-post").First()
-	if shredditPost.Length() > 0 {
-		textBody := shredditPost.Find("[slot='text-body']")
-		if textBody.Length() > 0 {
-			contentText = extractText(textBody)
-		} else {
-			contentText = extractText(shredditPost)
-		}
-	} else {
-		contentText = extractText(contentRoot)
-	}
+	contentText := extractText(contentRoot)
 
 	result.Content = normalizeWhitespace(contentText)
 
