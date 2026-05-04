@@ -309,7 +309,7 @@ var (
 	// absURLRegex matches absolute HTTP(S) URLs
 	absURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]+`)
 	// relURLRegex matches relative paths in quotes
-	relURLRegex = regexp.MustCompile(`(["'` + "`" + `])(/[-a-zA-Z0-9_@:%_+.~#?&/=]+)\1`)
+	relURLRegex = regexp.MustCompile(`["'` + "`" + `](/[a-zA-Z0-9_@:%_+.~#?&/=]+)["'` + "`" + `]`)
 )
 
 // parseNonHTML extracts URLs from text files (JS, CSS, JSON) using regular expressions
@@ -339,8 +339,8 @@ func (p *Parser) parseNonHTML(body []byte, baseURL string) (*ParseResult, error)
 
 	// Find relative paths in quotes
 	for _, match := range relURLRegex.FindAllSubmatch(body, -1) {
-		if len(match) > 2 {
-			addLink(string(match[2]))
+		if len(match) > 1 {
+			addLink(string(match[1]))
 		}
 	}
 
