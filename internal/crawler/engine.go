@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/embedder"
@@ -25,6 +27,13 @@ const (
 	StatusIdle     EngineStatus = "idle"
 	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
+
+	// Embedding chunking limits tuned for all-minilm:l6-v2 (~256 token context).
+	// 1 token ≈ 3 chars for mixed web text, but dense strings (URLs, base64) can
+	// map 1:1. 384 runes is a much safer margin than 512 to avoid context length errors.
+	maxEmbedChunks    = 4
+	embedChunkSize    = 384
+	embedChunkOverlap = 40
 )
 
 // embedJob carries the data needed to generate an embedding for a page.
@@ -642,27 +651,35 @@ func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
 	desc := sanitizeEmbedText(job.description)
 	content := sanitizeEmbedText(job.content)
 
-	text := buildEmbedText(title, desc, content, 768)
-	if text == "" {
+	chunks := chunkEmbedText(title, desc, content, embedChunkSize, embedChunkOverlap, maxEmbedChunks)
+	if len(chunks) == 0 {
 		return
 	}
 
-	// Try with progressively shorter text if Ollama rejects for context length.
-	maxLengths := []int{768, 512, 256}
-	for _, maxLen := range maxLengths {
-		candidate := buildEmbedText(title, desc, content, maxLen)
-
-		vec, err := e.embedder.GenerateEmbedding(candidate)
-		if err == nil {
-			e.saveEmbedding(job, vec, logger)
-			return
+	vectors := make([][]float32, 0, len(chunks))
+	for i, chunk := range chunks {
+		vec, err := e.embedder.GenerateEmbedding(chunk)
+		if err != nil {
+			logger.Debug("embedding chunk failed", "url", job.pageURL, "chunk", i, "error", err)
+			continue
 		}
-		if !isContextLengthError(err) {
-			logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
-			return
-		}
-		logger.Debug("embedding context exceeded, retrying shorter", "url", job.pageURL, "len", maxLen)
+		vectors = append(vectors, vec)
 	}
+
+	var finalVec []float32
+	if len(vectors) == 0 {
+		logger.Debug("all embedding chunks failed, saving dummy vector to prevent infinite retries", "url", job.pageURL)
+		// Save a 1D dummy vector. cosineSimilarity will safely return 0.0 since
+		// dimensions won't match the query vector, correctly falling back to pure lexical search.
+		finalVec = []float32{0}
+	} else if len(vectors) == 1 {
+		finalVec = vectors[0]
+	} else {
+		finalVec = averagePoolVectors(vectors)
+		finalVec = l2NormalizeVector(finalVec)
+	}
+
+	e.saveEmbedding(job, finalVec, logger)
 }
 
 // buildEmbedText assembles title + description + content, always keeping the
@@ -753,6 +770,159 @@ func truncateAtWordBoundary(s string, maxLen int) string {
 	}
 	// No space found — hard truncate.
 	return s[:maxLen]
+}
+
+// chunkEmbedText splits the page text into small overlapping chunks safe for
+// embedding models with tight context windows (e.g. all-minilm:l6-v2).
+// Every chunk starts with the title and description (truncated if necessary) so
+// the strongest semantic signal is preserved in each chunk.
+// All limits are measured in runes (visible Unicode characters), not bytes.
+func chunkEmbedText(title, desc, content string, chunkSize, overlap, maxChunks int) []string {
+	prefixParts := []string{}
+	if title != "" {
+		prefixParts = append(prefixParts, title)
+	}
+	if desc != "" {
+		prefixParts = append(prefixParts, desc)
+	}
+	prefix := strings.Join(prefixParts, ". ")
+	if prefix != "" {
+		prefix += ". "
+	}
+
+	prefixLen := utf8.RuneCountInString(prefix)
+	available := chunkSize - prefixLen
+	if available < 20 {
+		prefix = truncateAtRuneBoundary(prefix, chunkSize-20) + ". "
+		prefixLen = utf8.RuneCountInString(prefix)
+		available = chunkSize - prefixLen
+	}
+
+	if content == "" {
+		if prefixLen > 0 {
+			return []string{strings.TrimSpace(prefix)}
+		}
+		return nil
+	}
+
+	rawChunks := chunkTextRunes(content, available, overlap)
+	if len(rawChunks) == 0 {
+		if prefixLen > 0 {
+			return []string{strings.TrimSpace(prefix)}
+		}
+		return nil
+	}
+
+	chunks := make([]string, 0, len(rawChunks))
+	for i, rc := range rawChunks {
+		if i >= maxChunks {
+			break
+		}
+		chunks = append(chunks, strings.TrimSpace(prefix+rc))
+	}
+	return chunks
+}
+
+// chunkTextRunes splits text into overlapping chunks of maxChunkLen runes,
+// preferring word boundaries. It works on Unicode runes, not raw bytes.
+func chunkTextRunes(text string, maxChunkLen, overlap int) []string {
+	if maxChunkLen <= 0 {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return nil
+	}
+	if len(runes) <= maxChunkLen {
+		return []string{text}
+	}
+
+	// Prevent infinite loop by capping overlap to be strictly less than maxChunkLen
+	if overlap >= maxChunkLen {
+		overlap = maxChunkLen - 1
+		if overlap < 0 {
+			overlap = 0
+		}
+	}
+
+	var chunks []string
+	start := 0
+	for start < len(runes) {
+		end := start + maxChunkLen
+		if end >= len(runes) {
+			chunks = append(chunks, strings.TrimSpace(string(runes[start:])))
+			break
+		}
+
+		splitAt := end
+		for i := end; i > start+overlap; i-- {
+			if runes[i] == ' ' || runes[i] == '\n' {
+				splitAt = i
+				break
+			}
+		}
+
+		chunks = append(chunks, strings.TrimSpace(string(runes[start:splitAt])))
+		start = splitAt - overlap
+		if start <= 0 {
+			start = splitAt
+		}
+	}
+	return chunks
+}
+
+// truncateAtRuneBoundary truncates s to fit within maxLen runes without
+// breaking a word. Falls back to a hard rune truncation if necessary.
+func truncateAtRuneBoundary(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	// Walk backwards from maxLen to find a space.
+	for i := maxLen; i > 0; i-- {
+		if runes[i] == ' ' {
+			return strings.TrimSpace(string(runes[:i]))
+		}
+	}
+	// No space found — hard truncate at rune boundary.
+	return string(runes[:maxLen])
+}
+
+// averagePoolVectors averages multiple embedding vectors dimension-wise.
+func averagePoolVectors(vectors [][]float32) []float32 {
+	if len(vectors) == 0 {
+		return nil
+	}
+	dim := len(vectors[0])
+	result := make([]float32, dim)
+	for _, vec := range vectors {
+		for i := 0; i < dim; i++ {
+			result[i] += vec[i]
+		}
+	}
+	n := float32(len(vectors))
+	for i := 0; i < dim; i++ {
+		result[i] /= n
+	}
+	return result
+}
+
+// l2NormalizeVector scales the vector so its Euclidean norm is 1.
+// This keeps cosine similarity valid after averaging.
+func l2NormalizeVector(vec []float32) []float32 {
+	var sum float64
+	for _, v := range vec {
+		sum += float64(v) * float64(v)
+	}
+	if sum == 0 {
+		return vec
+	}
+	norm := float32(math.Sqrt(sum))
+	for i := range vec {
+		vec[i] /= norm
+	}
+	return vec
 }
 
 // isContextLengthError detects if an error is due to exceeding the model's context window.

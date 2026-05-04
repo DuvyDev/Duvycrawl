@@ -145,14 +145,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 
 			embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
 			if err == nil && len(embs) > 0 {
-				// Dynamic Semantic Weighting:
-				// Short queries (1-2 words) need exact brand/noun matches (Lexical prioritized).
-				// Long queries (3+ words) need conceptual matches (Semantic prioritized).
-				semanticBoostWeight := 0.60
-				if len(q.tokens) <= 2 {
-					semanticBoostWeight = 0.20
-				}
-				
+				semanticBoostWeight := 0.60 // 60% semantic, 40% lexical to overcome exact match stemming issues
 				for i := 0; i < topN; i++ {
 					emb, ok := embs[reranked[i].ID]
 					if !ok || len(emb.Embedding) == 0 {
@@ -1652,15 +1645,7 @@ func buildFTSExactQuery(tokens []string) string {
 
 	parts := make([]string, 0, len(tokens))
 	for _, token := range tokens {
-		escaped := quoteFTS5Token(token)
-		// For words 4 characters or longer, combine exact and prefix match
-		// e.g. "nuke" becomes ("nuke" OR "nuke*"). This acts as a robust fallback 
-		// when the Porter stemmer fails to associate suffixes like "-er" or "-ers".
-		if len([]rune(token)) >= 4 {
-			parts = append(parts, "(" + escaped + " OR " + escaped + "*)")
-		} else {
-			parts = append(parts, escaped)
-		}
+		parts = append(parts, quoteFTS5Token(token))
 	}
 	return strings.Join(parts, " ")
 }
