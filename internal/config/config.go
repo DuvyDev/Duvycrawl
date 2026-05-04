@@ -14,12 +14,11 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	Crawler   CrawlerConfig   `yaml:"crawler"`
-	Storage   StorageConfig   `yaml:"storage"`
-	API       APIConfig       `yaml:"api"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Authority AuthorityConfig `yaml:"authority"`
-	Seeds     []SeedConfig    `yaml:"seeds"`
+	Crawler CrawlerConfig `yaml:"crawler"`
+	Storage StorageConfig `yaml:"storage"`
+	API     APIConfig     `yaml:"api"`
+	Logging LoggingConfig `yaml:"logging"`
+	Seeds   []SeedConfig  `yaml:"seeds"`
 }
 
 // CrawlerConfig controls the crawling behavior.
@@ -124,18 +123,6 @@ type StorageConfig struct {
 	DBPath string `yaml:"db_path"`
 }
 
-// AuthorityConfig controls external domain authority ranking signals.
-type AuthorityConfig struct {
-	// TrancoWeight is the multiplier for the Tranco-based log boost.
-	// Higher values give more weight to globally popular domains.
-	TrancoWeight float64 `yaml:"tranco_weight"`
-	// CorpusCountWeight is the multiplier for the corpus page-count boost.
-	// Higher values favour domains with many indexed pages.
-	CorpusCountWeight float64 `yaml:"corpus_count_weight"`
-	// TrancoURL is the download URL for the Tranco top-1M list (ZIP).
-	TrancoURL string `yaml:"tranco_url"`
-}
-
 // APIConfig controls the REST API server.
 type APIConfig struct {
 	// Host is the address to bind the HTTP server to.
@@ -193,11 +180,6 @@ func DefaultConfig() *Config {
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",
-		},
-		Authority: AuthorityConfig{
-			TrancoWeight:      45.0,
-			CorpusCountWeight: 25.0,
-			TrancoURL:         "https://tranco-list.eu/top-1m.csv.zip",
 		},
 		API: APIConfig{
 			Host: "0.0.0.0",

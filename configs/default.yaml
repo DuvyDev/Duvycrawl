@@ -71,17 +71,6 @@ storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
   db_path: "./data"
 
-# External domain authority signals to supplement the local link graph.
-authority:
-  # Weight for the Tranco-based logarithmic boost.
-  # Higher values give globally popular domains a bigger advantage.
-  tranco_weight: 45.0
-  # Weight for the corpus page-count boost.
-  # Domains with many indexed pages receive a logarithmic bonus.
-  corpus_count_weight: 25.0
-  # Download URL for the Tranco top-1M domain ranking (ZIP).
-  tranco_url: "https://tranco-list.eu/top-1m.csv.zip"
-
 api:
   # Host to bind the API server
   host: "0.0.0.0"

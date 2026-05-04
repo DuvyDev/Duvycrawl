@@ -108,24 +108,6 @@ func run() error {
 
 	apiServer := api.NewServer(&cfg.API, store, engine, front, logger)
 
-	// --- Domain Authority (Tranco) ---
-	// Download the Tranco top-1M ranking CSV into the data directory if it
-	// doesn't already exist, then import it into the DB on first run.
-	store.SetAuthorityWeights(cfg.Authority.TrancoWeight, cfg.Authority.CorpusCountWeight)
-	go func() {
-		csvPath, downloaded, err := storage.EnsureTrancoFile(ctx, store.DataDir(), cfg.Authority.TrancoURL, logger)
-		if err != nil {
-			logger.Warn("failed to ensure tranco file", "error", err)
-			return
-		}
-		if downloaded {
-			logger.Info("tranco CSV ready", "path", csvPath)
-		}
-		if err := storage.LoadTrancoIntoStorage(ctx, store, csvPath, logger); err != nil {
-			logger.Warn("failed to load tranco into storage", "error", err)
-		}
-	}()
-
 	// --- Seed Bloom filter from existing DB pages ---
 	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {
 		logger.Warn("failed to seed bloom filter", "error", err)
