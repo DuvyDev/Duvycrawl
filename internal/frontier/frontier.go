@@ -354,7 +354,13 @@ func shouldDropQueryParam(key string) bool {
 	case "fbclid", "gclid", "dclid", "msclkid", "yclid", "igshid",
 		"mc_cid", "mc_eid", "zanpid", "_gl",
 		"auth", "sid", "phpsessid", "jsessionid",
-		"expires", "expiry", "exp":
+		"expires", "expiry", "exp",
+		// Sorting, filtering, and view state
+		"f", "filter", "sort", "order", "view", "layout", "theme",
+		// Search queries (often lead to infinite crawler traps)
+		"q", "query", "s", "search",
+		// Referrers and timestamps
+		"ref", "source", "t":
 		return true
 	}
 
