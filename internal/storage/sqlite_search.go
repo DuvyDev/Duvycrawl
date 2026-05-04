@@ -1662,9 +1662,7 @@ func buildFTSExactQuery(tokens []string) string {
 			parts = append(parts, escaped)
 		}
 	}
-	// FTS5 requires explicit AND between parenthesized expressions.
-	// Implicit AND (space) only works between bare strings.
-	return strings.Join(parts, " AND ")
+	return strings.Join(parts, " ")
 }
 
 func buildFTSMajorityQuery(tokens []string) string {
