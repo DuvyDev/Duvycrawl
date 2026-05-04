@@ -16,8 +16,8 @@ import (
 
 const (
 	defaultBaseURL = "http://localhost:11434"
-	defaultModel   = "embeddinggemma:300m"
-	timeout        = 30 * time.Second
+	defaultModel   = "qwen3-embedding:0.6b"
+	timeout        = 60 * time.Second
 )
 
 // Client is a thin HTTP client for Ollama's /api/embeddings endpoint.
@@ -29,7 +29,7 @@ type Client struct {
 
 // NewClient creates an embedder client using environment variables:
 //   - OLLAMA_EMBED_URL (default: http://localhost:11434)
-//   - OLLAMA_EMBED_MODEL (default: all-minilm)
+//   - OLLAMA_EMBED_MODEL (default: qwen3-embedding:0.6b)
 func NewClient() *Client {
 	baseURL := os.Getenv("OLLAMA_EMBED_URL")
 	if baseURL == "" {

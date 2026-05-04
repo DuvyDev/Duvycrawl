@@ -112,20 +112,20 @@ Desde la integración con `internal/embedder`, el crawler genera embeddings vect
 
 Variables de entorno:
 - `OLLAMA_EMBED_URL`: URL base de Ollama (default: `http://localhost:11434`)
-- `OLLAMA_EMBED_MODEL`: Modelo de embeddings (default: `all-minilm`)
+- `OLLAMA_EMBED_MODEL`: Modelo de embeddings (default: `qwen3-embedding:0.6b`)
 
 ### Cómo funciona
 
-1. **Crawl time**: `engine.go` genera el embedding de cada página en una goroutine background y lo encola en el `BatchWriter`.
+1. **Crawl time**: `engine.go` genera un embedding por página concatenando `title + description + content` (hasta 6000 runes ≈ 2000 tokens) y enviándolo en una sola llamada a Ollama. Sin chunking ni average pooling — un vector limpio por página.
 2. **Storage**: Los vectores se guardan en la tabla `page_embeddings` como BLOB little-endian de `[]float32`.
-3. **Search time**: `sqlite_search.go` genera el embedding de la query, calcula similitud coseno con los top 100 candidatos FTS5, y blendea: `final_score = 0.75 * lexical_score + 0.25 * semantic_score`.
+3. **Search time**: `sqlite_search.go` genera el embedding de la query, calcula similitud coseno con los top 100 candidatos FTS5, y blendea: `final_score = 0.40 * lexical_score + 0.60 * semantic_score`.
 
 ### Consideraciones
 
 - Si Ollama no está disponible, el crawler y el buscador funcionan normalmente en modo léxico puro.
 - Páginas sin embedding simplemente no reciben boost semántico.
-- `all-minilm` produce vectores de 384 dimensiones. Cualquier modelo compatible con Ollama `/api/embeddings` funciona.
-- El embedding se computa sobre `title + description + content[:2000]`.
+- `qwen3-embedding:0.6b` produce vectores de 1024 dimensiones (soporta Matryoshka: 32-1024). Multilingüe (100+ idiomas).
+- El embedding se computa sobre `title + description + content` (hasta 8000 chars capturados, 6000 runes max al modelo).
 
 ## Notas para futuros cambios
 
