@@ -38,6 +38,7 @@ type Fetcher struct {
 	maxBodySizeKB int
 	maxRetries    int
 	logger        *slog.Logger
+	dnsCache      *DNSCache
 
 	hostBackoffMu sync.Mutex
 	hostBackoff   map[string]*hostBackoffEntry
@@ -97,11 +98,12 @@ func (f *Fetcher) recordThrottle(host string) {
 
 // NewFetcher creates a new HTTP fetcher with the given configuration.
 func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetries, maxIdleConnsPerHost int, disableCookies bool, proxyURL string, logger *slog.Logger) *Fetcher {
+	baseDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 			Renegotiation:      tls.RenegotiateOnceAsClient,
@@ -118,6 +120,7 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		ForceAttemptHTTP2:     true,
 	}
 
+	var dnsCache *DNSCache
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
 		if err == nil {
@@ -139,6 +142,9 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		} else {
 			logger.Warn("invalid proxy URL, ignoring", "url", proxyURL, "error", err)
 		}
+	} else {
+		dnsCache = NewDNSCache(5*time.Minute, baseDialer, logger)
+		transport.DialContext = dnsCache.DialContext
 	}
 
 	client := &http.Client{
@@ -184,18 +190,21 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		maxRetries:    maxRetries,
 		logger:        logger.With("component", "fetcher"),
 		hostBackoff:   initHostBackoff(),
+		dnsCache:      dnsCache,
 	}
+}
+
+// Close releases resources held by the fetcher (e.g. DNS cache janitor).
+func (f *Fetcher) Close() error {
+	if f.dnsCache != nil {
+		f.dnsCache.Close()
+	}
+	return nil
 }
 
 // Fetch downloads the content at the given URL with automatic retries
 // and adaptive per-host backoff for throttled responses (429, 503).
 func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, error) {
-	return f.FetchWithUserAgent(ctx, targetURL, f.userAgent)
-}
-
-// FetchWithUserAgent is like Fetch but uses the provided User-Agent instead
-// of the default one. This is used for UA fallback (e.g. Googlebot).
-func (f *Fetcher) FetchWithUserAgent(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing URL %q: %w", targetURL, err)
@@ -234,7 +243,7 @@ func (f *Fetcher) FetchWithUserAgent(ctx context.Context, targetURL, userAgent s
 			}
 		}
 
-		result, err := f.fetchOnce(ctx, targetURL, userAgent)
+		result, err := f.fetchOnce(ctx, targetURL)
 		lastErr = err
 
 		if err == nil {
@@ -261,8 +270,8 @@ func (f *Fetcher) FetchWithUserAgent(ctx context.Context, targetURL, userAgent s
 	return nil, fmt.Errorf("after %d attempts: %w", f.maxRetries+1, lastErr)
 }
 
-// fetchOnce performs a single HTTP GET request with the given User-Agent.
-func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*FetchResult, error) {
+// fetchOnce performs a single HTTP GET request.
+func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult, error) {
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -270,7 +279,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 		return nil, fmt.Errorf("creating request for %q: %w", targetURL, err)
 	}
 
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", f.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	// NOTE: Do NOT manually set Accept-Encoding. Go's http.Transport with
@@ -288,21 +297,27 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 
 	duration := time.Since(start)
 
-	// Check Content-Type: we only process HTML pages.
+	// Check Content-Type: allow HTML and selected discovery-only types.
 	contentType := resp.Header.Get("Content-Type")
-	if !isHTMLContentType(contentType) {
+	isHTML, isDiscovery := isAllowedContentType(contentType)
+	if !isHTML && !isDiscovery {
 		return &FetchResult{
 			StatusCode:  resp.StatusCode,
 			ContentType: contentType,
 			FinalURL:    resp.Request.URL.String(),
 			Duration:    duration,
-		}, fmt.Errorf("non-HTML content type: %s", contentType)
+		}, fmt.Errorf("unsupported content type: %s", contentType)
 	}
 
 	// Read body with size limit to prevent downloading huge files.
-	// If the page exceeds the limit, we keep what we have (truncated) so
-	// that metadata, title, and outbound links can still be extracted.
+	// For non-HTML discovery assets use a tighter cap to protect memory.
 	maxBytes := int64(f.maxBodySizeKB) * 1024
+	if !isHTML {
+		const maxDiscoveryKB = 256
+		if maxBytes > maxDiscoveryKB*1024 {
+			maxBytes = maxDiscoveryKB * 1024
+		}
+	}
 	limitedReader := io.LimitReader(resp.Body, maxBytes)
 
 	body, err := io.ReadAll(limitedReader)
@@ -328,4 +343,25 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL, userAgent string) (*
 func isHTMLContentType(ct string) bool {
 	ct = strings.ToLower(ct)
 	return strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml+xml")
+}
+
+// isAllowedContentType returns whether a Content-Type is HTML indexable and/or
+// allowed for discovery-only crawling.
+func isAllowedContentType(ct string) (isHTML bool, isDiscovery bool) {
+	ct = strings.ToLower(ct)
+	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml+xml") {
+		return true, true
+	}
+	discoveryTypes := []string{
+		"text/css",
+		"application/javascript", "text/javascript", "application/x-javascript", "application/ecmascript",
+		"application/json", "application/ld+json",
+		"application/xml", "text/xml", "application/rss+xml", "application/atom+xml",
+	}
+	for _, d := range discoveryTypes {
+		if strings.Contains(ct, d) {
+			return false, true
+		}
+	}
+	return false, false
 }

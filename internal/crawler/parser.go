@@ -110,6 +110,25 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// Extract <title>.
 	result.Title = strings.TrimSpace(doc.Find("title").First().Text())
 
+	// Fallback/override for generic titles (e.g., Reddit SPA "Reddit - ...")
+	if result.Title == "" || strings.HasPrefix(result.Title, "Reddit -") {
+		shredditTitle := doc.Find("shreddit-title").AttrOr("title", "")
+		if shredditTitle == "" {
+			shredditTitle = doc.Find("shreddit-post").AttrOr("post-title", "")
+		}
+		
+		if shredditTitle != "" {
+			result.Title = strings.TrimSpace(shredditTitle)
+		} else {
+			// Try og:title
+			doc.Find(`meta[property="og:title"]`).Each(func(_ int, s *goquery.Selection) {
+				if content, exists := s.Attr("content"); exists {
+					result.Title = strings.TrimSpace(content)
+				}
+			})
+		}
+	}
+
 	// Extract <meta name="description">.
 	doc.Find(`meta[name="description"]`).Each(func(_ int, s *goquery.Selection) {
 		if content, exists := s.Attr("content"); exists {
@@ -155,9 +174,52 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// --- Extract images (before removing elements) ---
 	result.Images = extractImages(doc, base)
 
+	// Extract resource links (script, link, iframe) before removing elements.
+	seen := make(map[string]bool)
+	doc.Find("script[src], link[href], iframe[src]").Each(func(_ int, s *goquery.Selection) {
+		var href string
+		var ok bool
+		switch goquery.NodeName(s) {
+		case "script":
+			href, ok = s.Attr("src")
+		case "link":
+			href, ok = s.Attr("href")
+		case "iframe":
+			href, ok = s.Attr("src")
+		}
+		if !ok {
+			return
+		}
+		href = strings.TrimSpace(href)
+		if href == "" || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "#") {
+			return
+		}
+		resolved := resolveURL(base, href)
+		if resolved == "" {
+			return
+		}
+		if isBinaryExtension(resolved) {
+			return
+		}
+		if parsedResolved, err := url.Parse(resolved); err == nil && isDisallowedPath(parsedResolved.Path) {
+			return
+		}
+		if !seen[resolved] {
+			seen[resolved] = true
+			result.Links = append(result.Links, resolved)
+			result.Anchors = append(result.Anchors, LinkAnchor{
+				URL:    resolved,
+				Anchor: "",
+			})
+		}
+	})
+
 	// Extract visible text content.
 	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
 	doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
+
+	// Remove common content noise: ads, sidebars, comments, widgets, code blocks, etc.
+	doc.Find(".ad, .ads, .advertisement, .ad-container, .google-ad, .sidebar, #sidebar, .comments, .comment-list, .comment-section, .related-posts, .newsletter, .cookie-banner, .popup, .modal, .social-share, .share-buttons, .author-bio, .toc, .table-of-contents, pre, code").Remove()
 
 	// Get the text from the main content area.
 	// Try <main>, <article>, then fall back to <body>.
@@ -169,7 +231,18 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	result.H1 = extractHeadingText(contentRoot, "h1", 1200)
 	result.H2 = extractHeadingText(contentRoot, "h2", 2000)
 
-	contentText := extractText(contentRoot)
+	var contentText string
+	shredditPost := doc.Find("shreddit-post").First()
+	if shredditPost.Length() > 0 {
+		textBody := shredditPost.Find("[slot='text-body']")
+		if textBody.Length() > 0 {
+			contentText = extractText(textBody)
+		} else {
+			contentText = extractText(shredditPost)
+		}
+	} else {
+		contentText = extractText(contentRoot)
+	}
 
 	result.Content = normalizeWhitespace(contentText)
 
@@ -195,7 +268,6 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	}
 
 	// Extract links.
-	seen := make(map[string]bool)
 	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 		href, exists := s.Attr("href")
 		if !exists {
@@ -409,7 +481,6 @@ func isBinaryExtension(rawURL string) bool {
 		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
 		".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".wav",
 		".exe", ".msi", ".dmg", ".apk", ".deb", ".rpm",
-		".css", ".js", ".json", ".xml", ".rss", ".atom",
 		".woff", ".woff2", ".ttf", ".eot", ".otf",
 		".iso", ".bin", ".img":
 		return true

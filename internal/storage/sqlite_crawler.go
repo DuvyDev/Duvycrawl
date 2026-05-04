@@ -142,6 +142,46 @@ func (s *SQLiteStorage) GetAllPageURLs(ctx context.Context) (urls []string, fing
 	return urls, fingerprints, nil
 }
 
+// UpsertDiscoveredResource inserts or updates a discovered resource.
+func (s *SQLiteStorage) UpsertDiscoveredResource(ctx context.Context, resource *DiscoveredResource) error {
+	_, err := s.writeContentDB.ExecContext(ctx, `
+		INSERT INTO discovered_resources (url, url_fingerprint, kind, status_code, last_crawled)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			url_fingerprint = excluded.url_fingerprint,
+			kind            = excluded.kind,
+			status_code     = excluded.status_code,
+			last_crawled    = excluded.last_crawled
+	`, resource.URL, resource.URLFingerprint, resource.Kind, resource.StatusCode, resource.LastCrawled)
+	if err != nil {
+		return fmt.Errorf("upsert discovered resource: %w", err)
+	}
+	return nil
+}
+
+// GetAllDiscoveredURLs returns every discovered resource URL and fingerprint.
+func (s *SQLiteStorage) GetAllDiscoveredURLs(ctx context.Context) (urls []string, fingerprints []string, err error) {
+	rows, err := s.readContentDB.QueryContext(ctx, "SELECT url, url_fingerprint FROM discovered_resources")
+	if err != nil {
+		return nil, nil, fmt.Errorf("querying discovered resources: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var u, f string
+		if err := rows.Scan(&u, &f); err != nil {
+			return nil, nil, fmt.Errorf("scanning discovered resource: %w", err)
+		}
+		urls = append(urls, u)
+		fingerprints = append(fingerprints, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterating discovered resources: %w", err)
+	}
+	return urls, fingerprints, nil
+}
+
 // SearchPages performs hybrid search optimized for navigational queries and
 // typo tolerance. It tries increasingly permissive retrieval modes and then
 // re-ranks candidates in Go using title/domain phrase quality, domain-root

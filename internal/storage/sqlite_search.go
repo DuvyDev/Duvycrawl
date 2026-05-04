@@ -1174,6 +1174,14 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 	}
 
+	// --- Reddit intent boost ---
+	// If the user query clearly implies a Reddit search, strongly boost reddit.com results.
+	if strings.Contains(query.normalized, "reddit") || strings.Contains(query.normalized, "subreddit") {
+		if domainInfo.effectiveDomain == "reddit.com" {
+			score += 10000.0
+		}
+	}
+
 	if candidate.mode == searchModeFuzzy {
 		strongestPhrase := max(max(titlePhrase, h1Phrase), max(max(h2Phrase, descPhrase), domainPhrase))
 		strongestToken := max(weightedFieldAvg, max(domainAvg, urlAvg))

@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,22 +26,6 @@ const (
 	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
 )
-
-// fallbackState tracks whether a domain needs the fallback User-Agent.
-type fallbackState int
-
-const (
-	fallbackUnknown fallbackState = iota
-	fallbackNeeded
-	fallbackNotNeeded
-	fallbackFailed
-)
-
-// botBlockKeywords are substrings that indicate a WAF/bot-block page.
-var botBlockKeywords = []string{
-	"blocked", "forbidden", "captcha", "cloudflare", "challenge",
-	"verify you are human", "access denied", "bot detected",
-}
 
 // embedJob carries the data needed to generate an embedding for a page.
 type embedJob struct {
@@ -75,9 +58,6 @@ type Engine struct {
 
 	// seedDomains holds the set of seed domain names for SeedDomainsOnly filtering.
 	seedDomains map[string]bool
-
-	// fallbackStates tracks per-domain UA-fallback decisions.
-	fallbackStates sync.Map // string domain -> fallbackState
 
 	// High-priority jobs are freshly persisted pages; low-priority jobs are
 	// backfill of older pages missing embeddings.
@@ -196,6 +176,12 @@ func (e *Engine) Stop() {
 		}
 	}
 
+	if e.fetcher != nil {
+		if err := e.fetcher.Close(); err != nil {
+			e.logger.Warn("fetcher close failed", "error", err)
+		}
+	}
+
 	// Signal embedding workers to stop once the queue is drained.
 	close(e.highEmbedQueue)
 	close(e.lowEmbedQueue)
@@ -294,50 +280,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		return
 	}
 
-	// Determine User-Agent based on per-domain fallback state.
-	userAgent := e.cfg.UserAgent
-	if state, ok := e.fallbackStates.Load(job.Domain); ok && state.(fallbackState) == fallbackNeeded {
-		userAgent = e.cfg.FallbackUserAgent
-		logger.Debug("using fallback user-agent", "domain", job.Domain)
-	}
-
 	// Fetch the page.
 	logger.Debug("fetching page")
-	result, err := e.fetcher.FetchWithUserAgent(ctx, job.URL, userAgent)
+	result, err := e.fetcher.Fetch(ctx, job.URL)
 	if err != nil {
 		e.retryOrFail(job, logger, "fetch failed", err)
 		return
-	}
-
-	// Detect bot-block / empty-page and retry with fallback UA if appropriate.
-	if userAgent != e.cfg.FallbackUserAgent && e.needsFallback(result) {
-		logger.Info("retrying with fallback user-agent",
-			"url", job.URL,
-			"status", result.StatusCode,
-			"reason", e.fallbackReason(result),
-		)
-		fallbackResult, fallbackErr := e.fetcher.FetchWithUserAgent(ctx, job.URL, e.cfg.FallbackUserAgent)
-		if fallbackErr == nil && fallbackResult.StatusCode >= 200 && fallbackResult.StatusCode < 300 {
-			logger.Info("fallback succeeded", "url", job.URL, "status", fallbackResult.StatusCode)
-			e.fallbackStates.Store(job.Domain, fallbackNeeded)
-			result = fallbackResult
-		} else {
-			fallbackStatus := 0
-			if fallbackResult != nil {
-				fallbackStatus = fallbackResult.StatusCode
-			}
-			logger.Warn("fallback failed",
-				"url", job.URL,
-				"error", fallbackErr,
-				"status", fallbackStatus,
-			)
-			e.fallbackStates.Store(job.Domain, fallbackFailed)
-			// Continue with original result so we don't lose the 2xx/3xx data.
-			if result.StatusCode < 200 || result.StatusCode >= 300 {
-				e.retryOrFail(job, logger, "non-2xx status after fallback", nil)
-				return
-			}
-		}
 	}
 
 	// Skip non-2xx responses.
@@ -351,6 +299,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 			"url", job.URL,
 			"limit_kb", e.cfg.MaxPageSizeKB,
 		)
+	}
+
+	// Discovery-only path for non-HTML assets (CSS, JS, JSON, XML, RSS, Atom).
+	if !isHTMLContentType(result.ContentType) {
+		e.processDiscoveryOnly(ctx, logger, job, result)
+		return
 	}
 
 	// Parse the HTML.
@@ -466,15 +420,26 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger, anchors []LinkAnchor, depth int, page *storage.Page) {
 	baseScore := storage.PriorityNormal
 
+	var sourceTitle, sourceSchemaType, sourceLanguage string
+	if page != nil {
+		sourceTitle = page.Title
+		sourceSchemaType = page.SchemaType
+		sourceLanguage = page.Language
+	}
+
 	// Build LinkContext for each anchor.
 	var links []frontier.LinkContext
 	for _, a := range anchors {
+		// Restrict asset links (CSS/JS/JSON/XML/RSS/Atom) to the same domain.
+		if isAssetExtension(a.URL) && page != nil && frontier.ExtractDomain(a.URL) != page.Domain {
+			continue
+		}
 		links = append(links, frontier.LinkContext{
 			URL:              a.URL,
 			AnchorText:       a.Anchor,
-			SourcePageTitle:  page.Title,
-			SourceSchemaType: page.SchemaType,
-			SourceLanguage:   page.Language,
+			SourcePageTitle:  sourceTitle,
+			SourceSchemaType: sourceSchemaType,
+			SourceLanguage:   sourceLanguage,
 		})
 	}
 
@@ -512,49 +477,55 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 	}
 }
 
-// needsFallback determines whether a fetch result indicates the site
-// rejected our primary User-Agent and we should try the fallback.
-func (e *Engine) needsFallback(result *FetchResult) bool {
-	if result == nil {
-		return false
+// processDiscoveryOnly handles non-HTML assets (CSS, JS, JSON, XML, RSS, Atom)
+// that are crawled solely to discover additional links. They are NOT indexed.
+func (e *Engine) processDiscoveryOnly(ctx context.Context, logger *slog.Logger, job *queue.Job, result *FetchResult) {
+	links := ExtractResourceLinks(result.Body, result.ContentType, result.FinalURL)
+	if len(links) == 0 {
+		return
 	}
 
-	// Empty 200 OK: very few links and almost no text content.
-	if result.StatusCode == http.StatusOK {
-		return len(result.Body) < 500
-	}
-
-	// 403 that looks like a bot-block (empty body or known keywords).
-	if result.StatusCode == http.StatusForbidden {
-		if len(result.Body) == 0 || len(result.Body) < 200 {
-			return true
-		}
-		return e.bodyContainsBotBlock(result.Body)
-	}
-
-	return false
-}
-
-// fallbackReason returns a human-readable reason for the fallback decision.
-func (e *Engine) fallbackReason(result *FetchResult) string {
-	if result.StatusCode == http.StatusOK {
-		return fmt.Sprintf("empty page (%d bytes)", len(result.Body))
-	}
-	if result.StatusCode == http.StatusForbidden {
-		return "403 with bot-block indicators"
-	}
-	return fmt.Sprintf("status %d", result.StatusCode)
-}
-
-// bodyContainsBotBlock checks if the response body contains known WAF/bot-block keywords.
-func (e *Engine) bodyContainsBotBlock(body []byte) bool {
-	lower := strings.ToLower(string(body))
-	for _, kw := range botBlockKeywords {
-		if strings.Contains(lower, kw) {
-			return true
+	var anchors []LinkAnchor
+	for _, l := range links {
+		if frontier.ExtractDomain(l) == job.Domain {
+			anchors = append(anchors, LinkAnchor{URL: l})
 		}
 	}
-	return false
+	if len(anchors) > 0 && job.Depth < e.cfg.MaxDepth {
+		e.enqueueDiscoveredLinks(ctx, logger, anchors, job.Depth+1, nil)
+	}
+
+	fingerprint := frontier.FingerprintURL(job.URL)
+	dr := &storage.DiscoveredResource{
+		URL:            job.URL,
+		URLFingerprint: fingerprint,
+		Kind:           kindFromContentType(result.ContentType),
+		StatusCode:     result.StatusCode,
+		LastCrawled:    time.Now().UTC(),
+	}
+	if err := e.store.UpsertDiscoveredResource(ctx, dr); err != nil {
+		logger.Warn("failed to persist discovered resource", "error", err)
+	}
+}
+
+func kindFromContentType(ct string) string {
+	ct = strings.ToLower(ct)
+	switch {
+	case strings.Contains(ct, "text/css"):
+		return "css"
+	case strings.Contains(ct, "javascript"), strings.Contains(ct, "ecmascript"):
+		return "js"
+	case strings.Contains(ct, "json"):
+		return "json"
+	case strings.Contains(ct, "rss"):
+		return "rss"
+	case strings.Contains(ct, "atom"):
+		return "atom"
+	case strings.Contains(ct, "xml"):
+		return "xml"
+	default:
+		return "other"
+	}
 }
 
 // truncateString truncates a string to the given maximum length.

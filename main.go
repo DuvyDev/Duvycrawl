@@ -228,8 +228,21 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 		marked += 2
 	}
 
+	// Also seed from discovered resources (non-HTML assets crawled for link discovery).
+	discURLs, discFingerprints, err := store.GetAllDiscoveredURLs(ctx)
+	if err != nil {
+		logger.Warn("failed to seed bloom filter from discovered resources", "error", err)
+	} else {
+		for i := range discURLs {
+			q.MarkSeen(discFingerprints[i])
+			q.MarkSeen(discURLs[i])
+			marked += 2
+		}
+	}
+
 	logger.Info("bloom filter seeded from database",
 		"urls", len(urls),
+		"discovered", len(discURLs),
 		"marked", marked,
 	)
 	return nil

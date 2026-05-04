@@ -116,6 +116,15 @@ type Storage interface {
 	// DeleteDomain removes a domain from the seed list (sets is_seed = false).
 	DeleteDomain(ctx context.Context, domainName string) error
 
+	// --- Discovered Resources ---
+
+	// UpsertDiscoveredResource inserts or updates a non-HTML discovery asset.
+	UpsertDiscoveredResource(ctx context.Context, resource *DiscoveredResource) error
+
+	// GetAllDiscoveredURLs returns every discovered resource URL and fingerprint.
+	// Used to seed the in-memory Bloom filter on startup.
+	GetAllDiscoveredURLs(ctx context.Context) (urls []string, fingerprints []string, err error)
+
 	// --- Statistics ---
 
 	// GetStats returns overall crawler statistics.

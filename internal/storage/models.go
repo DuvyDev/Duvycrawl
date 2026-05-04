@@ -101,6 +101,16 @@ type SearchResult struct {
 	SchemaRating     float64    `json:"schema_rating,omitempty"`
 }
 
+// DiscoveredResource represents a non-HTML asset crawled only for link discovery.
+type DiscoveredResource struct {
+	ID             int64     `json:"id"`
+	URL            string    `json:"url"`
+	URLFingerprint string    `json:"url_fingerprint"`
+	Kind           string    `json:"kind"`
+	StatusCode     int       `json:"status_code"`
+	LastCrawled    time.Time `json:"last_crawled"`
+}
+
 // ImageRecord represents an image discovered during crawling.
 type ImageRecord struct {
 	ID        int64     `json:"id"`

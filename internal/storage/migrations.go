@@ -175,6 +175,17 @@ var contentMigrations = []string{
         FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
     )`,
     `CREATE INDEX IF NOT EXISTS idx_embeddings_model ON page_embeddings(model)`,
+
+	// --- Discovered resources (non-HTML assets crawled for link discovery only) ---
+	`CREATE TABLE IF NOT EXISTS discovered_resources (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		url             TEXT    NOT NULL UNIQUE,
+		url_fingerprint TEXT    NOT NULL UNIQUE,
+		kind            TEXT    NOT NULL DEFAULT '',
+		status_code     INTEGER NOT NULL DEFAULT 0,
+		last_crawled    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_discovered_resources_fingerprint ON discovered_resources(url_fingerprint)`,
 }
 
 var crawlerMigrations = []string{
