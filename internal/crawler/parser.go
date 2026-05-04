@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/url"
 	"path"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -75,13 +74,6 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// 2. chardet heuristic fallback
 	// 3. Return as-is if everything fails
 	htmlBody = toUTF8(htmlBody, contentType)
-
-	// FAST PATH: If the content is not HTML (e.g. JS, CSS, JSON), do not pass it
-	// to goquery. The HTML tokenizer will explode in memory trying to parse
-	// minified JS/JSON as HTML. Instead, we use simple regex to find endpoints.
-	if !isHTMLContentType(contentType) {
-		return p.parseNonHTML(htmlBody, baseURL)
-	}
 
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(htmlBody))
 	if err != nil {
@@ -182,10 +174,45 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// --- Extract images (before removing elements) ---
 	result.Images = extractImages(doc, base)
 
-	// --- Extract links from tags that will be removed for content extraction ---
-	// These tags are stripped below for text content purposes, but contain
-	// valuable outbound URLs that the crawler should follow.
-	extraLinks := extractAdditionalLinks(doc, base)
+	// Extract resource links (script, link, iframe) before removing elements.
+	seen := make(map[string]bool)
+	doc.Find("script[src], link[href], iframe[src]").Each(func(_ int, s *goquery.Selection) {
+		var href string
+		var ok bool
+		switch goquery.NodeName(s) {
+		case "script":
+			href, ok = s.Attr("src")
+		case "link":
+			href, ok = s.Attr("href")
+		case "iframe":
+			href, ok = s.Attr("src")
+		}
+		if !ok {
+			return
+		}
+		href = strings.TrimSpace(href)
+		if href == "" || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "#") {
+			return
+		}
+		resolved := resolveURL(base, href)
+		if resolved == "" {
+			return
+		}
+		if isBinaryExtension(resolved) {
+			return
+		}
+		if parsedResolved, err := url.Parse(resolved); err == nil && isDisallowedPath(parsedResolved.Path) {
+			return
+		}
+		if !seen[resolved] {
+			seen[resolved] = true
+			result.Links = append(result.Links, resolved)
+			result.Anchors = append(result.Anchors, LinkAnchor{
+				URL:    resolved,
+				Anchor: "",
+			})
+		}
+	})
 
 	// Extract visible text content.
 	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
@@ -237,11 +264,10 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	// Truncate content to a reasonable size (100KB of text).
 	if len(result.Content) > 100*1024 {
-		result.Content = strings.Clone(result.Content[:100*1024])
+		result.Content = result.Content[:100*1024]
 	}
 
 	// Extract links.
-	seen := make(map[string]bool)
 	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 		href, exists := s.Attr("href")
 		if !exists {
@@ -280,7 +306,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 			seen[resolved] = true
 			anchorText := strings.TrimSpace(s.Text())
 			if len(anchorText) > 500 {
-				anchorText = strings.Clone(anchorText[:500])
+				anchorText = anchorText[:500]
 			}
 			result.Links = append(result.Links, resolved)
 			result.Anchors = append(result.Anchors, LinkAnchor{
@@ -289,60 +315,6 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 			})
 		}
 	})
-
-	// Merge links discovered from removed tags (iframe, script, form, etc.)
-	for _, extra := range extraLinks {
-		if !seen[extra] {
-			seen[extra] = true
-			result.Links = append(result.Links, extra)
-			result.Anchors = append(result.Anchors, LinkAnchor{
-				URL:    extra,
-				Anchor: "",
-			})
-		}
-	}
-
-	return result, nil
-}
-
-var (
-	// absURLRegex matches absolute HTTP(S) URLs
-	absURLRegex = regexp.MustCompile(`https?://[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]+`)
-	// relURLRegex matches relative paths in quotes
-	relURLRegex = regexp.MustCompile(`["'` + "`" + `](/[a-zA-Z0-9_@:%_+.~#?&/=]+)["'` + "`" + `]`)
-)
-
-// parseNonHTML extracts URLs from text files (JS, CSS, JSON) using regular expressions
-// instead of a full DOM parser. This prevents massive memory leaks when parsing minified code.
-func (p *Parser) parseNonHTML(body []byte, baseURL string) (*ParseResult, error) {
-	result := &ParseResult{}
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return result, nil // Return empty if base is invalid
-	}
-
-	seen := make(map[string]bool)
-	addLink := func(href string) {
-		resolved := resolveURL(base, href)
-		if resolved == "" || seen[resolved] || isBinaryExtension(resolved) {
-			return
-		}
-		seen[resolved] = true
-		result.Links = append(result.Links, resolved)
-		result.Anchors = append(result.Anchors, LinkAnchor{URL: resolved})
-	}
-
-	// Find absolute URLs
-	for _, match := range absURLRegex.FindAll(body, -1) {
-		addLink(string(match))
-	}
-
-	// Find relative paths in quotes
-	for _, match := range relURLRegex.FindAllSubmatch(body, -1) {
-		if len(match) > 1 {
-			addLink(string(match[1]))
-		}
-	}
 
 	return result, nil
 }
@@ -477,7 +449,7 @@ func extractHeadingText(root *goquery.Selection, selector string, maxLen int) st
 
 	joined := strings.Join(parts, " ")
 	if maxLen > 0 && len(joined) > maxLen {
-		joined = strings.Clone(joined[:maxLen])
+		joined = joined[:maxLen]
 	}
 	return joined
 }
@@ -496,8 +468,6 @@ func isBlockElement(tag string) bool {
 }
 
 // isBinaryExtension returns true if the URL path ends with a known binary file extension.
-// Note: .js, .css, .json, .xml are NOT considered binary — they are text-based
-// resources that can contain discoverable endpoints.
 func isBinaryExtension(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -516,107 +486,6 @@ func isBinaryExtension(rawURL string) bool {
 		return true
 	}
 	return false
-}
-
-// extractAdditionalLinks discovers URLs from HTML tags that will be removed
-// during content extraction (scripts, iframes, forms, link tags, etc.).
-// This must be called BEFORE the doc.Find(...).Remove() step.
-// Inspired by Katana's 30+ tag parsers — these are the most impactful ones.
-func extractAdditionalLinks(doc *goquery.Document, base *url.URL) []string {
-	var links []string
-	seen := make(map[string]bool)
-
-	addLink := func(href string) {
-		href = strings.TrimSpace(href)
-		if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") ||
-			strings.HasPrefix(href, "data:") || strings.HasPrefix(href, "mailto:") {
-			return
-		}
-		resolved := resolveURL(base, href)
-		if resolved == "" || seen[resolved] || isBinaryExtension(resolved) {
-			return
-		}
-		seen[resolved] = true
-		links = append(links, resolved)
-	}
-
-	// <iframe src>
-	doc.Find("iframe[src]").Each(func(_ int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok {
-			addLink(src)
-		}
-	})
-
-	// <frame src>
-	doc.Find("frame[src]").Each(func(_ int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok {
-			addLink(src)
-		}
-	})
-
-	// <script src> — external JS files can be entry points for SPA routes
-	doc.Find("script[src]").Each(func(_ int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok {
-			addLink(src)
-		}
-	})
-
-	// <link href> — not just canonical; includes alternate, preload, stylesheet
-	// We skip rel=icon/shortcut/apple-touch (icons are not crawlable pages)
-	doc.Find("link[href]").Each(func(_ int, s *goquery.Selection) {
-		rel, _ := s.Attr("rel")
-		rel = strings.ToLower(rel)
-		if strings.Contains(rel, "icon") || strings.Contains(rel, "apple-touch") {
-			return
-		}
-		if href, ok := s.Attr("href"); ok {
-			addLink(href)
-		}
-	})
-
-	// <form action> — form target URLs are discoverable endpoints
-	doc.Find("form[action]").Each(func(_ int, s *goquery.Selection) {
-		if action, ok := s.Attr("action"); ok {
-			addLink(action)
-		}
-	})
-
-	// <meta content> — extract URLs from http-equiv=refresh, og:url, etc.
-	doc.Find("meta").Each(func(_ int, s *goquery.Selection) {
-		content, exists := s.Attr("content")
-		if !exists || content == "" {
-			return
-		}
-		// http-equiv="refresh" format: "5;url=https://..."
-		httpEquiv, _ := s.Attr("http-equiv")
-		if strings.EqualFold(httpEquiv, "refresh") {
-			if idx := strings.Index(strings.ToLower(content), "url="); idx >= 0 {
-				addLink(strings.TrimSpace(content[idx+4:]))
-			}
-			return
-		}
-		// og:url, og:see_also, etc.
-		prop, _ := s.Attr("property")
-		if strings.HasPrefix(prop, "og:") && strings.Contains(content, "://") {
-			addLink(content)
-		}
-	})
-
-	// <embed src>
-	doc.Find("embed[src]").Each(func(_ int, s *goquery.Selection) {
-		if src, ok := s.Attr("src"); ok {
-			addLink(src)
-		}
-	})
-
-	// <object data>
-	doc.Find("object[data]").Each(func(_ int, s *goquery.Selection) {
-		if data, ok := s.Attr("data"); ok {
-			addLink(data)
-		}
-	})
-
-	return links
 }
 
 // normalizeLanguage extracts a clean 2-letter ISO 639-1 language code
@@ -700,7 +569,7 @@ func extractImages(doc *goquery.Document, base *url.URL) []ImageMeta {
 		if parent.Length() > 0 {
 			context = normalizeWhitespace(parent.Text())
 			if len(context) > 200 {
-				context = strings.Clone(context[:200])
+				context = context[:200]
 			}
 		}
 

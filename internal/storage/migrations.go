@@ -165,14 +165,7 @@ var contentMigrations = []string{
         last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
 
-    // --- Phase 5: External Domain Authority (Tranco) ---
-    `CREATE TABLE IF NOT EXISTS domain_authority (
-        domain TEXT PRIMARY KEY,
-        tranco_rank INTEGER NOT NULL DEFAULT 0,
-        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-    )`,
-
-    // --- Phase 6: Semantic Embeddings for AI Re-ranking ---
+    // --- Phase 5: Semantic Embeddings for AI Re-ranking ---
     `CREATE TABLE IF NOT EXISTS page_embeddings (
         page_id INTEGER PRIMARY KEY,
         model TEXT NOT NULL DEFAULT 'all-minilm',
@@ -182,6 +175,17 @@ var contentMigrations = []string{
         FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
     )`,
     `CREATE INDEX IF NOT EXISTS idx_embeddings_model ON page_embeddings(model)`,
+
+	// --- Discovered resources (non-HTML assets crawled for link discovery only) ---
+	`CREATE TABLE IF NOT EXISTS discovered_resources (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		url             TEXT    NOT NULL UNIQUE,
+		url_fingerprint TEXT    NOT NULL UNIQUE,
+		kind            TEXT    NOT NULL DEFAULT '',
+		status_code     INTEGER NOT NULL DEFAULT 0,
+		last_crawled    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_discovered_resources_fingerprint ON discovered_resources(url_fingerprint)`,
 }
 
 var crawlerMigrations = []string{

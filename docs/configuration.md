@@ -17,8 +17,6 @@ crawler:
   random_delay: 500ms
   max_retries: 3
   user_agent: "Mozilla/5.0 ..."
-  fallback_user_agent: "Mozilla/5.0 ...bingbot..."
-  max_fallback_retries: 1
   max_page_size_kb: 512
   respect_robots: false
   seed_domains_only: false
@@ -54,9 +52,7 @@ logging:
 | `politeness_delay` | duration | `1s` | Min delay between requests to the same domain. |
 | `random_delay` | duration | `500ms` | Random jitter added to politeness delay. |
 | `max_retries` | int | `3` | Max retry attempts for failed requests. |
-| `user_agent` | string | (see above) | Primary User-Agent. |
-| `fallback_user_agent` | string | (see above) | Fallback UA for bot-blocked sites. |
-| `max_fallback_retries` | int | `1` | Max fallback attempts per URL. |
+| `user_agent` | string | (see above) | User-Agent sent with every request. |
 | `max_page_size_kb` | int | `512` | Max page size in KB. Larger pages are truncated, not discarded. |
 | `respect_robots` | bool | `false` | Whether to honor robots.txt. |
 | `seed_domains_only` | bool | `false` | If `true`, only crawl within seed domains. |

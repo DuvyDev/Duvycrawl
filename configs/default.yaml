@@ -20,7 +20,7 @@ crawler:
   # DO NOT use bot-like identifiers (Googlebot, crawler, etc.).
   user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
   # Maximum page size to download (in KB)
-  max_page_size_kb: 2048
+  max_page_size_kb: 512
   # Whether to respect robots.txt directives
   respect_robots: false
   # If true, ONLY crawl pages within seed domains.
@@ -64,17 +64,6 @@ crawler:
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
   db_path: "./data"
-
-# External domain authority signals to supplement the local link graph.
-authority:
-  # Weight for the Tranco-based logarithmic boost.
-  # Higher values give globally popular domains a bigger advantage.
-  tranco_weight: 45.0
-  # Weight for the corpus page-count boost.
-  # Domains with many indexed pages receive a logarithmic bonus.
-  corpus_count_weight: 25.0
-  # Download URL for the Tranco top-1M domain ranking (ZIP).
-  tranco_url: "https://tranco-list.eu/top-1m.csv.zip"
 
 api:
   # Host to bind the API server

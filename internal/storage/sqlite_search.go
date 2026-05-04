@@ -87,7 +87,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		total += count
 
 		// If we've collected a decent number of solid candidates, stop evaluating relaxed modes.
-		if len(candidates) >= candidateLimit {
+		if len(candidates) >= candidateLimit/2 {
 			break
 		}
 	}
@@ -119,18 +119,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		}
 	}
 
-	// --- Enrich candidates with domain authority signals ---
-	s.enrichAuthorityCandidates(candidates)
-
-	aw := authorityWeights{}
-	if s.authority != nil {
-		aw = authorityWeights{
-			trancoWeight:      s.authority.trancoWeight,
-			corpusCountWeight: s.authority.corpusCountWeight,
-		}
-	}
-
-	reranked := rerankSearchCandidates(candidates, q, lang, aw)
+	reranked := rerankSearchCandidates(candidates, q, lang)
 
 	// --- Semantic re-ranking via embeddings (if Ollama is available) ---
 	if len(reranked) > 0 && s.embedder != nil {
@@ -145,22 +134,15 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 
 			embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
 			if err == nil && len(embs) > 0 {
-				// Dynamic Semantic Weighting:
-				// Short queries (1-2 words) need exact brand/noun matches (Lexical prioritized).
-				// Long queries (3+ words) need conceptual matches (Semantic prioritized).
-				semanticBoostWeight := 0.60
-				if len(q.tokens) <= 2 {
-					semanticBoostWeight = 0.20
-				}
-				
+				semanticBoostWeight := 0.25 // 25% semantic, 75% lexical
 				for i := 0; i < topN; i++ {
 					emb, ok := embs[reranked[i].ID]
 					if !ok || len(emb.Embedding) == 0 {
 						continue
 					}
 					sim := cosineSimilarity(queryEmbedding, emb.Embedding)
-					// Scale similarity aggressively so high semantic similarity overrides poor lexical scores.
-					semanticScore := sim * 12000.0
+					// Scale similarity (0..1) to the same magnitude as lexical scores.
+					semanticScore := sim * 10000.0
 					oldRank := reranked[i].Rank
 					reranked[i].Rank = oldRank*(1.0-semanticBoostWeight) + semanticScore*semanticBoostWeight
 				}
@@ -349,11 +331,13 @@ func newSearchQuery(query string) searchQuery {
 	for _, tok := range tokens {
 		if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
 			siteTypeIntent = tok
+		} else {
+			searchTokens = append(searchTokens, tok)
 		}
-		// Do not strip the intent word from the FTS5 search query. 
-		// If the user searches for "noticias uruguay", we must ensure FTS5 
-		// still searches for the word "noticias" in titles and text!
-		searchTokens = append(searchTokens, tok)
+	}
+	if len(searchTokens) == 0 {
+		// Query was only a site-type word (e.g. "wiki") — keep original tokens.
+		searchTokens = tokens
 	}
 
 	return searchQuery{
@@ -993,10 +977,10 @@ func fuzzyLanguageSQL(lang string) string {
 	return " + CASE WHEN p.language = ? THEN 20.0 ELSE 0 END"
 }
 
-func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string, aw authorityWeights) []searchCandidate {
+func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string) []searchCandidate {
 	reranked := make([]searchCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		score, keep := scoreSearchCandidate(candidate, query, lang, aw)
+		score, keep := scoreSearchCandidate(candidate, query, lang)
 		if !keep {
 			continue
 		}
@@ -1022,7 +1006,7 @@ func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lan
 	return reranked
 }
 
-func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string, aw authorityWeights) (float64, bool) {
+func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string) (float64, bool) {
 	titleNorm := normalizeSearchText(candidate.Title)
 	h1Norm := normalizeSearchText(candidate.H1)
 	h2Norm := normalizeSearchText(candidate.H2)
@@ -1108,18 +1092,6 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		score += math.Log1p(candidate.PageRank) * 200.0
 	} else if candidate.ReferringDomains > 0 {
 		score += math.Log1p(float64(candidate.ReferringDomains)) * 140.0
-	}
-
-	// --- External domain authority boost (Tranco global ranking) ---
-	// log(1M / rank) scales from ~13.8 (rank 1) to ~0 (rank 1M).
-	if candidate.trancoRank > 0 && aw.trancoWeight > 0 {
-		score += math.Log(1_000_000.0/float64(candidate.trancoRank)) * aw.trancoWeight
-	}
-
-	// --- Corpus breadth boost ---
-	// Domains with many indexed pages are likely large, authoritative sites.
-	if candidate.corpusPages > 1 && aw.corpusCountWeight > 0 {
-		score += math.Log1p(float64(candidate.corpusPages)) * aw.corpusCountWeight
 	}
 
 	if len(query.tokens) > 0 && titleExact == len(query.tokens) {
@@ -1650,19 +1622,9 @@ func buildFTSExactQuery(tokens []string) string {
 
 	parts := make([]string, 0, len(tokens))
 	for _, token := range tokens {
-		escaped := quoteFTS5Token(token)
-		// For words 4 characters or longer, combine exact and prefix match
-		// e.g. "nuke" becomes ("nuke" OR "nuke*"). This acts as a robust fallback 
-		// when the Porter stemmer fails to associate suffixes like "-er" or "-ers".
-		if len([]rune(token)) >= 4 {
-			parts = append(parts, "(" + escaped + " OR " + escaped + "*)")
-		} else {
-			parts = append(parts, escaped)
-		}
+		parts = append(parts, quoteFTS5Token(token))
 	}
-	// FTS5 requires explicit AND between parenthesized expressions.
-	// Implicit AND (space) only works between bare strings.
-	return strings.Join(parts, " AND ")
+	return strings.Join(parts, " ")
 }
 
 func buildFTSMajorityQuery(tokens []string) string {

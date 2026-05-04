@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
-	"golang.org/x/sync/singleflight"
 )
 
 // FetchResult contains the raw result of an HTTP fetch operation.
@@ -39,6 +38,7 @@ type Fetcher struct {
 	maxBodySizeKB int
 	maxRetries    int
 	logger        *slog.Logger
+	dnsCache      *DNSCache
 
 	hostBackoffMu sync.Mutex
 	hostBackoff   map[string]*hostBackoffEntry
@@ -96,100 +96,18 @@ func (f *Fetcher) recordThrottle(host string) {
 	entry.nextAllowed = time.Now().Add(delay)
 }
 
-// -----------------------------------------------------------------------
-// DNS cache with TTL — avoids redundant lookups when 300 workers hit
-// the same domains. Uses singleflight to deduplicate concurrent queries.
-// -----------------------------------------------------------------------
-
-const dnsCacheTTL = 5 * time.Minute
-
-type dnsCacheEntry struct {
-	addrs   []string
-	expires time.Time
-}
-
-type dnsCache struct {
-	entries sync.Map            // string -> *dnsCacheEntry
-	group   singleflight.Group
-}
-
-func (c *dnsCache) lookup(ctx context.Context, host string) ([]string, error) {
-	// Check cache.
-	if v, ok := c.entries.Load(host); ok {
-		entry := v.(*dnsCacheEntry)
-		if time.Now().Before(entry.expires) {
-			return entry.addrs, nil
-		}
-		c.entries.Delete(host)
-	}
-
-	// Deduplicate concurrent lookups for the same host.
-	result, err, _ := c.group.Do(host, func() (interface{}, error) {
-		resolver := &net.Resolver{}
-		addrs, err := resolver.LookupHost(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		c.entries.Store(host, &dnsCacheEntry{
-			addrs:   addrs,
-			expires: time.Now().Add(dnsCacheTTL),
-		})
-		return addrs, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result.([]string), nil
-}
-
-// newCachingDialer wraps a net.Dialer with a DNS cache so that repeated
-// connections to the same host reuse resolved addresses.
-func newCachingDialer(baseDialer *net.Dialer, cache *dnsCache) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			// Fallback if addr doesn't have port.
-			return baseDialer.DialContext(ctx, network, addr)
-		}
-
-		// Skip cache for IP literals.
-		if net.ParseIP(host) != nil {
-			return baseDialer.DialContext(ctx, network, addr)
-		}
-
-		addrs, err := cache.lookup(ctx, host)
-		if err != nil || len(addrs) == 0 {
-			// Fallback to standard resolution on error.
-			return baseDialer.DialContext(ctx, network, addr)
-		}
-
-		// Try resolved addresses in order.
-		var lastErr error
-		for _, ip := range addrs {
-			conn, err := baseDialer.DialContext(ctx, network, net.JoinHostPort(ip, port))
-			if err == nil {
-				return conn, nil
-			}
-			lastErr = err
-		}
-		return nil, lastErr
-	}
-}
-
 // NewFetcher creates a new HTTP fetcher with the given configuration.
 func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetries, maxIdleConnsPerHost int, disableCookies bool, proxyURL string, logger *slog.Logger) *Fetcher {
 	baseDialer := &net.Dialer{
 		Timeout:   10 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-	cache := &dnsCache{}
 
 	transport := &http.Transport{
-		DialContext: newCachingDialer(baseDialer, cache),
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: false,
 			Renegotiation:      tls.RenegotiateOnceAsClient,
-			MinVersion:         tls.VersionTLS10,
+			MinVersion:         tls.VersionTLS12,
 		},
 		TLSHandshakeTimeout:   10 * time.Second,
 		MaxIdleConns:          1000,
@@ -202,6 +120,7 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		ForceAttemptHTTP2:     true,
 	}
 
+	var dnsCache *DNSCache
 	if proxyURL != "" {
 		parsedProxy, err := url.Parse(proxyURL)
 		if err == nil {
@@ -223,6 +142,9 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		} else {
 			logger.Warn("invalid proxy URL, ignoring", "url", proxyURL, "error", err)
 		}
+	} else {
+		dnsCache = NewDNSCache(5*time.Minute, baseDialer, logger)
+		transport.DialContext = dnsCache.DialContext
 	}
 
 	client := &http.Client{
@@ -268,7 +190,16 @@ func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetri
 		maxRetries:    maxRetries,
 		logger:        logger.With("component", "fetcher"),
 		hostBackoff:   initHostBackoff(),
+		dnsCache:      dnsCache,
 	}
+}
+
+// Close releases resources held by the fetcher (e.g. DNS cache janitor).
+func (f *Fetcher) Close() error {
+	if f.dnsCache != nil {
+		f.dnsCache.Close()
+	}
+	return nil
 }
 
 // Fetch downloads the content at the given URL with automatic retries
@@ -366,23 +297,27 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 
 	duration := time.Since(start)
 
-	// Check Content-Type: reject known binary types (images, audio, video,
-	// fonts, archives) but accept HTML, XML, JSON, JS, CSS, and anything
-	// text-based so the parser can discover URLs from non-HTML responses.
+	// Check Content-Type: allow HTML and selected discovery-only types.
 	contentType := resp.Header.Get("Content-Type")
-	if isBinaryContentType(contentType) {
+	isHTML, isDiscovery := isAllowedContentType(contentType)
+	if !isHTML && !isDiscovery {
 		return &FetchResult{
 			StatusCode:  resp.StatusCode,
 			ContentType: contentType,
 			FinalURL:    resp.Request.URL.String(),
 			Duration:    duration,
-		}, fmt.Errorf("binary content type: %s", contentType)
+		}, fmt.Errorf("unsupported content type: %s", contentType)
 	}
 
 	// Read body with size limit to prevent downloading huge files.
-	// If the page exceeds the limit, we keep what we have (truncated) so
-	// that metadata, title, and outbound links can still be extracted.
+	// For non-HTML discovery assets use a tighter cap to protect memory.
 	maxBytes := int64(f.maxBodySizeKB) * 1024
+	if !isHTML {
+		const maxDiscoveryKB = 256
+		if maxBytes > maxDiscoveryKB*1024 {
+			maxBytes = maxDiscoveryKB * 1024
+		}
+	}
 	limitedReader := io.LimitReader(resp.Body, maxBytes)
 
 	body, err := io.ReadAll(limitedReader)
@@ -410,23 +345,23 @@ func isHTMLContentType(ct string) bool {
 	return strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml+xml")
 }
 
-// isBinaryContentType returns true if the Content-Type indicates a binary
-// resource that cannot contain useful links (images, audio, video, fonts,
-// archives, executables). Text-based types (HTML, XML, JSON, JS, CSS,
-// plain text) are allowed through so the parser can extract URLs from them.
-func isBinaryContentType(ct string) bool {
+// isAllowedContentType returns whether a Content-Type is HTML indexable and/or
+// allowed for discovery-only crawling.
+func isAllowedContentType(ct string) (isHTML bool, isDiscovery bool) {
 	ct = strings.ToLower(ct)
-	for _, prefix := range []string{
-		"image/", "audio/", "video/", "font/",
-		"application/octet-stream", "application/pdf",
-		"application/zip", "application/gzip",
-		"application/x-tar", "application/x-rar",
-		"application/x-7z", "application/vnd.ms-",
-		"application/vnd.openxmlformats",
-	} {
-		if strings.HasPrefix(ct, prefix) || strings.Contains(ct, prefix) {
-			return true
+	if strings.Contains(ct, "text/html") || strings.Contains(ct, "application/xhtml+xml") {
+		return true, true
+	}
+	discoveryTypes := []string{
+		"text/css",
+		"application/javascript", "text/javascript", "application/x-javascript", "application/ecmascript",
+		"application/json", "application/ld+json",
+		"application/xml", "text/xml", "application/rss+xml", "application/atom+xml",
+	}
+	for _, d := range discoveryTypes {
+		if strings.Contains(ct, d) {
+			return false, true
 		}
 	}
-	return false
+	return false, false
 }

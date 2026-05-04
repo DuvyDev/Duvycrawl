@@ -141,7 +141,7 @@ func (e *Engine) Start(ctx context.Context) {
 	// Launch background embedding workers (limited concurrency to avoid
 	// overwhelming the Ollama API).
 	if e.embedder != nil {
-		embedWorkers := 2
+		embedWorkers := 1
 		for i := 0; i < embedWorkers; i++ {
 			e.embedWG.Add(1)
 			go e.embedWorker(ctx, i)
@@ -173,6 +173,12 @@ func (e *Engine) Stop() {
 	if e.batchWriter != nil {
 		if err := e.batchWriter.Flush(); err != nil {
 			e.logger.Warn("final batch flush failed", "error", err)
+		}
+	}
+
+	if e.fetcher != nil {
+		if err := e.fetcher.Close(); err != nil {
+			e.logger.Warn("fetcher close failed", "error", err)
 		}
 	}
 
@@ -295,6 +301,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		)
 	}
 
+	// Discovery-only path for non-HTML assets (CSS, JS, JSON, XML, RSS, Atom).
+	if !isHTMLContentType(result.ContentType) {
+		e.processDiscoveryOnly(ctx, logger, job, result)
+		return
+	}
+
 	// Parse the HTML.
 	parsed, err := e.parser.Parse(result.Body, result.ContentType, result.FinalURL)
 	if err != nil {
@@ -408,15 +420,26 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger, anchors []LinkAnchor, depth int, page *storage.Page) {
 	baseScore := storage.PriorityNormal
 
+	var sourceTitle, sourceSchemaType, sourceLanguage string
+	if page != nil {
+		sourceTitle = page.Title
+		sourceSchemaType = page.SchemaType
+		sourceLanguage = page.Language
+	}
+
 	// Build LinkContext for each anchor.
 	var links []frontier.LinkContext
 	for _, a := range anchors {
+		// Restrict asset links (CSS/JS/JSON/XML/RSS/Atom) to the same domain.
+		if isAssetExtension(a.URL) && page != nil && frontier.ExtractDomain(a.URL) != page.Domain {
+			continue
+		}
 		links = append(links, frontier.LinkContext{
 			URL:              a.URL,
 			AnchorText:       a.Anchor,
-			SourcePageTitle:  page.Title,
-			SourceSchemaType: page.SchemaType,
-			SourceLanguage:   page.Language,
+			SourcePageTitle:  sourceTitle,
+			SourceSchemaType: sourceSchemaType,
+			SourceLanguage:   sourceLanguage,
 		})
 	}
 
@@ -454,13 +477,63 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 	}
 }
 
+// processDiscoveryOnly handles non-HTML assets (CSS, JS, JSON, XML, RSS, Atom)
+// that are crawled solely to discover additional links. They are NOT indexed.
+func (e *Engine) processDiscoveryOnly(ctx context.Context, logger *slog.Logger, job *queue.Job, result *FetchResult) {
+	links := ExtractResourceLinks(result.Body, result.ContentType, result.FinalURL)
+	if len(links) == 0 {
+		return
+	}
+
+	var anchors []LinkAnchor
+	for _, l := range links {
+		if frontier.ExtractDomain(l) == job.Domain {
+			anchors = append(anchors, LinkAnchor{URL: l})
+		}
+	}
+	if len(anchors) > 0 && job.Depth < e.cfg.MaxDepth {
+		e.enqueueDiscoveredLinks(ctx, logger, anchors, job.Depth+1, nil)
+	}
+
+	fingerprint := frontier.FingerprintURL(job.URL)
+	dr := &storage.DiscoveredResource{
+		URL:            job.URL,
+		URLFingerprint: fingerprint,
+		Kind:           kindFromContentType(result.ContentType),
+		StatusCode:     result.StatusCode,
+		LastCrawled:    time.Now().UTC(),
+	}
+	if err := e.store.UpsertDiscoveredResource(ctx, dr); err != nil {
+		logger.Warn("failed to persist discovered resource", "error", err)
+	}
+}
+
+func kindFromContentType(ct string) string {
+	ct = strings.ToLower(ct)
+	switch {
+	case strings.Contains(ct, "text/css"):
+		return "css"
+	case strings.Contains(ct, "javascript"), strings.Contains(ct, "ecmascript"):
+		return "js"
+	case strings.Contains(ct, "json"):
+		return "json"
+	case strings.Contains(ct, "rss"):
+		return "rss"
+	case strings.Contains(ct, "atom"):
+		return "atom"
+	case strings.Contains(ct, "xml"):
+		return "xml"
+	default:
+		return "other"
+	}
+}
+
 // truncateString truncates a string to the given maximum length.
-// Uses strings.Clone to prevent leaking memory of large backing arrays.
 func truncateString(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return strings.Clone(s[:maxLen])
+	return s[:maxLen]
 }
 
 // loadSeedDomains populates the seedDomains set from the database.
@@ -527,17 +600,8 @@ func (e *Engine) backfillEmbeddings(ctx context.Context) {
 	logger := e.logger.With("component", "embed_backfill")
 
 	const batchSize = 250
-	idleSleep := 5 * time.Second
-	queueFullSleep := 1 * time.Second
-
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-
 		afterID := int64(0)
-		loaded := 0
-
 		for {
 			if ctx.Err() != nil {
 				return
@@ -561,27 +625,13 @@ func (e *Engine) backfillEmbeddings(ctx context.Context) {
 					content:     page.Content,
 				}, false)
 				afterID = page.ID
-				loaded++
-			}
-
-			// If the low queue is full, back off briefly so workers can drain it,
-			// then continue with the next batch instead of sleeping for minutes.
-			if len(e.lowEmbedQueue) == cap(e.lowEmbedQueue) {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(queueFullSleep):
-				}
 			}
 		}
 
-		// No more pending pages found — sleep briefly and restart scan from top.
-		if loaded == 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(idleSleep):
-			}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
 		}
 	}
 }
@@ -602,9 +652,6 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 		}
 
 		select {
-		case <-ctx.Done():
-			logger.Debug("embedding worker shutting down (context cancelled)")
-			return
 		case job, ok := <-highQueue:
 			if !ok {
 				highQueue = nil
@@ -616,9 +663,6 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 		}
 
 		select {
-		case <-ctx.Done():
-			logger.Debug("embedding worker shutting down (context cancelled)")
-			return
 		case job, ok := <-highQueue:
 			if !ok {
 				highQueue = nil
@@ -638,6 +682,9 @@ func (e *Engine) embedWorker(ctx context.Context, id int) {
 func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
 	defer e.embedQueued.Delete(job.pageID)
 
+	// Build a clean representation prioritising title and description over raw
+	// content. Title is the strongest semantic signal, description next; content
+	// is used only if budget remains.
 	title := sanitizeEmbedText(job.title)
 	desc := sanitizeEmbedText(job.description)
 	content := sanitizeEmbedText(job.content)
