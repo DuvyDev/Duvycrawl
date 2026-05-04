@@ -20,9 +20,9 @@ crawler:
   # DO NOT use bot-like identifiers (Googlebot, crawler, etc.).
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
   # Fallback User-Agent used when the primary UA returns an empty page
-  # or a bot-block response. Uses a different browser variant (macOS Chrome)
-  # rather than a bot UA — sites blocking Chrome won't welcome bots either.
-  fallback_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+  # or a bot-block response. Googlebot-style UAs can coax some sites
+  # into serving a simplified static version.
+  fallback_user_agent: "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/147.0.0.0 Safari/537.36"
   # Max retry attempts when using the fallback UA.
   max_fallback_retries: 1
   # Maximum page size to download (in KB)
