@@ -17,7 +17,7 @@ import (
 )
 
 func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, offset int, lang string, domain string, schemaType string) ([]SearchResult, int, error) {
-	q := newSearchQuery(query)
+	q := s.newSearchQuery(query)
 	if q.normalized == "" {
 		return nil, 0, nil
 	}
@@ -288,50 +288,7 @@ func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searc
 	return nil
 }
 
-// siteTypes is the set of keywords that indicate the user is looking for a
-// specific kind of site (e.g. "wiki", "docs", "blog"). These tokens are
-// stripped from the search tokens so they don't penalise phrase matching,
-// but are used to boost homepages of domains that contain them.
-var siteTypes = map[string]struct{}{
-	"wiki": {}, "blog": {}, "docs": {}, "forum": {}, "forums": {},
-	"foro": {}, "tienda": {}, "store": {}, "info": {},
-	"guia": {}, "guias": {}, "guide": {}, "guides": {},
-	"noticias": {}, "news": {},
-	"comunidad": {}, "community": {},
-	"api": {},
-	"documentacion": {}, "documentation": {},
-	"soporte": {}, "support": {},
-	"ayuda": {}, "help": {},
-	"portal": {}, "hub": {}, "status": {},
-}
-
-// platformDomains maps common platform names to domain-like search intent.
-// When a query contains one of these (e.g. "warframe reddit"), the token is
-// stripped from the FTS query and used as a navigational/domain filter so
-// results from that platform are included even though the word itself rarely
-// appears in page content.
-var platformDomains = map[string]struct{}{
-	"reddit": {}, "youtube": {}, "github": {}, "twitter": {}, "x": {},
-	"facebook": {}, "instagram": {}, "tiktok": {}, "linkedin": {},
-	"pinterest": {}, "twitch": {}, "discord": {}, "netflix": {},
-	"spotify": {}, "steam": {}, "epicgames": {}, "medium": {},
-	"substack": {}, "patreon": {}, "kickstarter": {}, "indiegogo": {},
-	"vimeo": {}, "dailymotion": {}, "tumblr": {}, "quora": {},
-	"stackexchange": {}, "stackoverflow": {}, "gitlab": {},
-	"bitbucket": {}, "sourceforge": {}, "itchio": {},
-	"deviantart": {}, "artstation": {}, "behance": {}, "dribbble": {},
-	"soundcloud": {}, "bandcamp": {}, "mixcloud": {}, "audiomack": {},
-	"goodreads": {}, "wattpad": {}, "fanfiction": {}, "ao3": {},
-	"imgur": {}, "gfycat": {}, "tenor": {}, "giphy": {},
-	"pastebin": {}, "hastebin": {}, "jsfiddle": {}, "codepen": {},
-	"replit": {}, "glitch": {}, "heroku": {}, "vercel": {},
-	"netlify": {}, "wordpress": {}, "blogger": {}, "wix": {},
-	"squarespace": {}, "weebly": {}, "shopify": {}, "etsy": {},
-	"amazon": {}, "aliexpress": {}, "ebay": {}, "mercadolibre": {},
-	"newegg": {}, "bestbuy": {}, "walmart": {}, "target": {},
-}
-
-func newSearchQuery(query string) searchQuery {
+func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 	normalized := normalizeSearchText(query)
 	tokens := strings.Fields(normalized)
 	domainLike := normalizeDomainLikeQuery(query)
@@ -356,20 +313,53 @@ func newSearchQuery(query string) searchQuery {
 		navTerm = tokens[0]
 	}
 
-	// Detect site-type intent (e.g. "wiki warframe" → looking for wiki.warframe.com)
-	// and platform intent (e.g. "warframe reddit" → looking for reddit.com results).
-	siteTypeIntent := ""
-	platformIntent := ""
-	var searchTokens []string
-	for _, tok := range tokens {
-		if _, ok := platformDomains[tok]; ok && platformIntent == "" {
-			platformIntent = tok
-		} else if _, ok := siteTypes[tok]; ok && siteTypeIntent == "" {
-			siteTypeIntent = tok
-		} else {
-			searchTokens = append(searchTokens, tok)
+	// Detect site-type intent and platform intent.
+	// We only extract these if they are at the edges of the query (first or last token).
+	// If multiple platforms are detected (e.g. "youtube vs twitch"), we abort extraction
+	// so FTS can search for both platform names in the text.
+	var foundPlatforms []string
+	var foundSiteTypes []string
+
+	isEdge := func(i int) bool {
+		return i == 0 || i == len(tokens)-1
+	}
+
+	for i, tok := range tokens {
+		if s.platformDomains != nil {
+			if _, ok := s.platformDomains[tok]; ok && isEdge(i) {
+				foundPlatforms = append(foundPlatforms, tok)
+				continue
+			}
+		}
+		if s.siteTypes != nil {
+			if _, ok := s.siteTypes[tok]; ok && isEdge(i) {
+				foundSiteTypes = append(foundSiteTypes, tok)
+			}
 		}
 	}
+
+	platformIntent := ""
+	if len(foundPlatforms) == 1 {
+		platformIntent = foundPlatforms[0]
+	}
+
+	siteTypeIntent := ""
+	// Only set site type if no platform intent was extracted
+	if len(foundSiteTypes) == 1 && platformIntent == "" {
+		siteTypeIntent = foundSiteTypes[0]
+	}
+
+	var searchTokens []string
+	for _, tok := range tokens {
+		if tok == platformIntent {
+			continue
+		}
+		if tok == siteTypeIntent {
+			continue
+		}
+		searchTokens = append(searchTokens, tok)
+	}
+
 	if len(searchTokens) == 0 {
 		// Query was only a site-type or platform word (e.g. "wiki" or "reddit") — keep original tokens.
 		searchTokens = tokens

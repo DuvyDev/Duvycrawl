@@ -67,6 +67,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initializing storage: %w", err)
 	}
+	store.WithSearchIntents(cfg.SearchIntents.SiteTypes, cfg.SearchIntents.PlatformDomains)
 	defer store.Close()
 
 	// --- Initialize Scorer ---

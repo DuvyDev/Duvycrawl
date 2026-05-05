@@ -17,8 +17,9 @@ type Config struct {
 	Crawler CrawlerConfig `yaml:"crawler"`
 	Storage StorageConfig `yaml:"storage"`
 	API     APIConfig     `yaml:"api"`
-	Logging LoggingConfig `yaml:"logging"`
-	Seeds   []SeedConfig  `yaml:"seeds"`
+	Logging       LoggingConfig       `yaml:"logging"`
+	Seeds         []SeedConfig        `yaml:"seeds"`
+	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
 }
 
 // CrawlerConfig controls the crawling behavior.
@@ -132,6 +133,12 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
+// SearchIntentsConfig holds dictionaries for navigational intent detection.
+type SearchIntentsConfig struct {
+	SiteTypes       []string `yaml:"site_types"`
+	PlatformDomains []string `yaml:"platform_domains"`
+}
+
 // Addr returns the full address string (host:port) for the API server.
 func (a APIConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", a.Host, a.Port)
@@ -183,6 +190,28 @@ func DefaultConfig() *Config {
 		// Seeds default to empty — the hardcoded defaults from internal/seeds
 		// are used as fallback when no seeds are defined in the config.
 		Seeds: nil,
+		SearchIntents: SearchIntentsConfig{
+			SiteTypes: []string{
+				"wiki", "blog", "docs", "forum", "forums", "foro", "tienda", "store",
+				"info", "guia", "guias", "guide", "guides", "noticias", "news",
+				"comunidad", "community", "api", "documentacion", "documentation",
+				"soporte", "support", "ayuda", "help", "portal", "hub", "status",
+			},
+			PlatformDomains: []string{
+				"reddit", "youtube", "github", "twitter", "x", "facebook", "instagram",
+				"tiktok", "linkedin", "pinterest", "twitch", "discord", "netflix",
+				"spotify", "steam", "epicgames", "medium", "substack", "patreon",
+				"kickstarter", "indiegogo", "vimeo", "dailymotion", "tumblr", "quora",
+				"stackexchange", "stackoverflow", "gitlab", "bitbucket", "sourceforge",
+				"itchio", "deviantart", "artstation", "behance", "dribbble", "soundcloud",
+				"bandcamp", "mixcloud", "audiomack", "goodreads", "wattpad", "fanfiction",
+				"ao3", "imgur", "gfycat", "tenor", "giphy", "pastebin", "hastebin",
+				"jsfiddle", "codepen", "replit", "glitch", "heroku", "vercel", "netlify",
+				"wordpress", "blogger", "wix", "squarespace", "weebly", "shopify",
+				"etsy", "amazon", "aliexpress", "ebay", "mercadolibre", "newegg",
+				"bestbuy", "walmart", "target",
+			},
+		},
 	}
 }
 

@@ -78,3 +78,7 @@ logging:
   level: "info"
   # Log format: text (human-readable) or json (machine-readable)
   format: "text"
+
+search_intents:
+  site_types: ["wiki", "blog", "docs", "forum", "forums", "foro", "tienda", "store", "info", "guia", "guias", "guide", "guides", "noticias", "news", "comunidad", "community", "api", "documentacion", "documentation", "soporte", "support", "ayuda", "help", "portal", "hub", "status"]
+  platform_domains: ["reddit", "youtube", "github", "twitter", "x", "facebook", "instagram", "tiktok", "linkedin", "pinterest", "twitch", "discord", "netflix", "spotify", "steam", "epicgames", "medium", "substack", "patreon", "kickstarter", "indiegogo", "vimeo", "dailymotion", "tumblr", "quora", "stackexchange", "stackoverflow", "gitlab", "bitbucket", "sourceforge", "itchio", "deviantart", "artstation", "behance", "dribbble", "soundcloud", "bandcamp", "mixcloud", "audiomack", "goodreads", "wattpad", "fanfiction", "ao3", "imgur", "gfycat", "tenor", "giphy", "pastebin", "hastebin", "jsfiddle", "codepen", "replit", "glitch", "heroku", "vercel", "netlify", "wordpress", "blogger", "wix", "squarespace", "weebly", "shopify", "etsy", "amazon", "aliexpress", "ebay", "mercadolibre", "newegg", "bestbuy", "walmart", "target"]

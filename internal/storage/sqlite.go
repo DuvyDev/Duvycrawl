@@ -33,8 +33,10 @@ type SQLiteStorage struct {
 	crawlerDB      *sql.DB
 	graphDB        *sql.DB
 	logger         *slog.Logger
-	dataDir        string
-	embedder       *embedder.Client
+	dataDir         string
+	embedder        *embedder.Client
+	siteTypes       map[string]struct{}
+	platformDomains map[string]struct{}
 }
 
 // ... skipped types, keeping them below ...
@@ -328,6 +330,19 @@ func (s *SQLiteStorage) GraphDB() *sql.DB {
 // WithEmbedder attaches an Ollama embedding client for semantic search.
 func (s *SQLiteStorage) WithEmbedder(client *embedder.Client) *SQLiteStorage {
 	s.embedder = client
+	return s
+}
+
+// WithSearchIntents configures the dictionaries for navigational search intent extraction.
+func (s *SQLiteStorage) WithSearchIntents(siteTypes, platformDomains []string) *SQLiteStorage {
+	s.siteTypes = make(map[string]struct{}, len(siteTypes))
+	for _, t := range siteTypes {
+		s.siteTypes[strings.ToLower(t)] = struct{}{}
+	}
+	s.platformDomains = make(map[string]struct{}, len(platformDomains))
+	for _, p := range platformDomains {
+		s.platformDomains[strings.ToLower(p)] = struct{}{}
+	}
 	return s
 }
 
