@@ -144,6 +144,7 @@ type SearchIntentsConfig struct {
 
 // EmbedderConfig controls the Ollama semantic embeddings client.
 type EmbedderConfig struct {
+	Enabled bool   `yaml:"enabled"`
 	URL     string `yaml:"url"`
 	Model   string `yaml:"model"`
 	Workers int    `yaml:"workers"`
@@ -224,6 +225,7 @@ func DefaultConfig() *Config {
 			},
 		},
 		Embedder: EmbedderConfig{
+			Enabled: false,
 			URL:     "http://localhost:11434",
 			Model:   "all-minilm:l6-v2",
 			Workers: 2,

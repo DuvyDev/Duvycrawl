@@ -81,6 +81,9 @@ logging:
   format: "text"
 
 embedder:
+  # Enable or disable semantic embeddings generation and search re-ranking.
+  # Set to true only if you have Ollama running and the model pulled.
+  enabled: false
   # Base URL for the Ollama embeddings API
   url: "http://localhost:11434"
   # The semantic embedding model to use

@@ -97,8 +97,11 @@ func run() error {
 	defer domainStats.Stop()
 
 	// Initialize Ollama embedder for semantic search (optional — falls back to lexical-only if unavailable).
-	embedClient := embedder.NewClient(cfg.Embedder)
-	store.WithEmbedder(embedClient)
+	var embedClient *embedder.Client
+	if cfg.Embedder.Enabled {
+		embedClient = embedder.NewClient(cfg.Embedder)
+		store.WithEmbedder(embedClient)
+	}
 
 	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Crawler.ProxyURL, logger)
 
