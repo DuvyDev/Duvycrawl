@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/DuvyDev/Duvycrawl/internal/config"
 )
 
 const (
@@ -31,31 +31,22 @@ type Client struct {
 	client  *http.Client
 }
 
-// NewClient creates an embedder client using environment variables:
-//   - OLLAMA_EMBED_URL (default: http://localhost:11434)
-//   - OLLAMA_EMBED_MODEL (default: all-minilm)
-//   - OLLAMA_EMBED_WORKERS (default: 2, max: 16)
-func NewClient() *Client {
-	baseURL := os.Getenv("OLLAMA_EMBED_URL")
+// NewClient creates an embedder client using the provided configuration.
+func NewClient(cfg config.EmbedderConfig) *Client {
+	baseURL := cfg.URL
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	model := os.Getenv("OLLAMA_EMBED_MODEL")
+	model := cfg.Model
 	if model == "" {
 		model = defaultModel
 	}
 
-	workers := defaultWorkers
-	if wStr := os.Getenv("OLLAMA_EMBED_WORKERS"); wStr != "" {
-		if w, err := strconv.Atoi(wStr); err == nil {
-			if w < 1 {
-				workers = 1
-			} else if w > maxWorkers {
-				workers = maxWorkers
-			} else {
-				workers = w
-			}
-		}
+	workers := cfg.Workers
+	if workers < 1 {
+		workers = 1
+	} else if workers > maxWorkers {
+		workers = maxWorkers
 	}
 
 	// Reuse TCP connections aggressively — critical when Ollama is remote.

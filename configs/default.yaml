@@ -37,9 +37,10 @@ crawler:
   # Max idle keep-alive connections per host. Increase for high throughput
   # when crawling the same domains repeatedly.
   max_idle_conns_per_host: 150
-  # NOTE: Proxy is now configured via PROXY_URL environment variable.
-  # Use docker-compose.yml environment section or set PROXY_URL externally.
+  # Proxy configuration.
   # Supports: http://, https://, socks5://, socks5h://
+  # WARP example: socks5://warp:1080
+  proxy_url: ""
   # How often per-domain crawl statistics are flushed from memory to SQLite.
   # Shorter intervals = fresher stats but more DB writes.
   # Longer intervals = fewer writes but possible data loss on crash.
@@ -78,6 +79,14 @@ logging:
   level: "info"
   # Log format: text (human-readable) or json (machine-readable)
   format: "text"
+
+embedder:
+  # Base URL for the Ollama embeddings API
+  url: "http://localhost:11434"
+  # The semantic embedding model to use
+  model: "all-minilm:l6-v2"
+  # Number of concurrent workers sending documents to Ollama
+  workers: 2
 
 search_intents:
   site_types: ["wiki", "blog", "docs", "forum", "forums", "foro", "tienda", "store", "info", "guia", "guias", "guide", "guides", "noticias", "news", "comunidad", "community", "api", "documentacion", "documentation", "soporte", "support", "ayuda", "help", "portal", "hub", "status"]

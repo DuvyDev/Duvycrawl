@@ -49,9 +49,6 @@ func run() error {
 	// --no-start flag overrides auto_start from config.
 	autoStart := cfg.Crawler.AutoStart && !*noStart
 
-	// Get PROXY_URL from environment variable.
-	proxyURL := os.Getenv("PROXY_URL")
-
 	// --- Initialize Logger ---
 	logger := initLogger(cfg.Logging)
 	logger.Info("Duvycrawl starting",
@@ -100,10 +97,10 @@ func run() error {
 	defer domainStats.Stop()
 
 	// Initialize Ollama embedder for semantic search (optional — falls back to lexical-only if unavailable).
-	embedClient := embedder.NewClient()
+	embedClient := embedder.NewClient(cfg.Embedder)
 	store.WithEmbedder(embedClient)
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, proxyURL, logger)
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Crawler.ProxyURL, logger)
 
 	sched := scheduler.New(store, front, scheduler.DefaultPolicy(), logger)
 

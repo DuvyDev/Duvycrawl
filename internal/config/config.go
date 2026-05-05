@@ -20,6 +20,7 @@ type Config struct {
 	Logging       LoggingConfig       `yaml:"logging"`
 	Seeds         []SeedConfig        `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
+	Embedder      EmbedderConfig      `yaml:"embedder"`
 }
 
 // CrawlerConfig controls the crawling behavior.
@@ -59,6 +60,8 @@ type CrawlerConfig struct {
 	// connections to keep per host. Higher values improve throughput when
 	// crawling the same domains repeatedly.
 	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
+	// ProxyURL is an optional HTTP/HTTPS proxy URL.
+	ProxyURL string `yaml:"proxy_url"`
 	// DomainStatsFlushInterval controls how often per-domain crawl statistics
 	// are flushed from memory to SQLite. Shorter intervals = more writes but
 	// fresher stats. Longer intervals = fewer writes but possible data loss on
@@ -139,6 +142,13 @@ type SearchIntentsConfig struct {
 	PlatformDomains []string `yaml:"platform_domains"`
 }
 
+// EmbedderConfig controls the Ollama semantic embeddings client.
+type EmbedderConfig struct {
+	URL     string `yaml:"url"`
+	Model   string `yaml:"model"`
+	Workers int    `yaml:"workers"`
+}
+
 // Addr returns the full address string (host:port) for the API server.
 func (a APIConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", a.Host, a.Port)
@@ -148,19 +158,20 @@ func (a APIConfig) Addr() string {
 func DefaultConfig() *Config {
 	return &Config{
 		Crawler: CrawlerConfig{
-			Workers:                  10,
+			Workers:                  100,
 			MaxDepth:                 3,
 			RequestTimeout:           15 * time.Second,
 			PolitenessDelay:          1 * time.Second,
 			RandomDelay:              0,
 			MaxRetries:               3,
 			UserAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-			MaxPageSizeKB:            5120,
-			RespectRobots:            true,
+			MaxPageSizeKB:            512,
+			RespectRobots:            false,
 			SeedDomainsOnly:          false,
-			ParallelismPerDomain:     2,
+			ParallelismPerDomain:     4,
 			DisableCookies:           false,
 			MaxIdleConnsPerHost:      100,
+			ProxyURL:                 "",
 			DomainStatsFlushInterval: 30 * time.Second,
 			AutoStart:                true,
 			ScoringStrategy:          "adaptive",
@@ -211,6 +222,11 @@ func DefaultConfig() *Config {
 				"etsy", "amazon", "aliexpress", "ebay", "mercadolibre", "newegg",
 				"bestbuy", "walmart", "target",
 			},
+		},
+		Embedder: EmbedderConfig{
+			URL:     "http://localhost:11434",
+			Model:   "all-minilm:l6-v2",
+			Workers: 2,
 		},
 	}
 }
