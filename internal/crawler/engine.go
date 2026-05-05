@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -290,7 +291,18 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Skip non-2xx responses.
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
-		e.retryOrFail(job, logger, "non-2xx status", nil)
+		logger.Warn("non-2xx response",
+			"status_code", result.StatusCode,
+			"content_type", result.ContentType,
+			"final_url", result.FinalURL,
+		)
+		// Don't waste retries on permanent client errors (4xx except 429).
+		if result.StatusCode >= 400 && result.StatusCode < 500 && result.StatusCode != http.StatusTooManyRequests {
+			e.pagesErrored.Add(1)
+			logger.Warn("permanent client error, skipping retries", "status_code", result.StatusCode, "url", job.URL)
+			return
+		}
+		e.retryOrFail(job, logger, fmt.Sprintf("non-2xx status: %d", result.StatusCode), nil)
 		return
 	}
 

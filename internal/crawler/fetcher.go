@@ -288,6 +288,16 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 	// automatic decompression, leaving us with binary gzip data that goquery
 	// cannot parse (resulting in empty titles and zero links/images).
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	// Browser-like client hints and sec-fetch headers help bypass basic WAF
+	// checks (e.g. Cloudflare "Just a moment..." interstitials).
+	// These MUST stay consistent with the configured User-Agent (platform + version).
+	req.Header.Set("Sec-CH-UA", `"Chromium";v="147", "Not:A-Brand";v="2", "Google Chrome";v="147"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
 
 	resp, err := f.client.Do(req)
 	if err != nil {

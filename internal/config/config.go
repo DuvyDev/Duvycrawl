@@ -147,7 +147,7 @@ func DefaultConfig() *Config {
 			PolitenessDelay:          1 * time.Second,
 			RandomDelay:              0,
 			MaxRetries:               3,
-			UserAgent:                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+			UserAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
 			MaxPageSizeKB:            5120,
 			RespectRobots:            true,
 			SeedDomainsOnly:          false,
