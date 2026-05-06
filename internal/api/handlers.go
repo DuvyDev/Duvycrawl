@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/DuvyDev/Duvycrawl/internal/crawler"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
@@ -642,6 +643,115 @@ func roundFloat(val float64, decimals int) float64 {
 		pow *= 10.0
 	}
 	return float64(int(val*pow+0.5)) / pow
+}
+
+// --- Interests ---
+
+type addInterestRequest struct {
+	Term   string  `json:"term"`
+	Weight float64 `json:"weight"`
+	Lang   string  `json:"lang,omitempty"`
+}
+
+// AddInterest creates or accumulates a manual interest term in the adaptive profile.
+func (h *Handlers) AddInterest(w http.ResponseWriter, r *http.Request) {
+	var req addInterestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Term == "" {
+		writeError(w, http.StatusBadRequest, "term is required")
+		return
+	}
+	if req.Weight <= 0 {
+		writeError(w, http.StatusBadRequest, "weight must be > 0")
+		return
+	}
+
+	tokens := normalizeInterestAPITokens(req.Term)
+	if len(tokens) == 0 {
+		writeError(w, http.StatusBadRequest, "term produces no valid tokens (must be > 2 chars)")
+		return
+	}
+
+	for _, tok := range tokens {
+		if err := h.store.SetInterestTerm(r.Context(), tok, req.Weight, "manual", req.Lang); err != nil {
+			h.logger.Error("failed to set interest term", "term", tok, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to set interest term")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"message": "interest term added",
+		"tokens":  tokens,
+		"weight":  req.Weight,
+	})
+}
+
+// ListInterests returns all manually declared interest terms.
+func (h *Handlers) ListInterests(w http.ResponseWriter, r *http.Request) {
+	interests, err := h.store.GetManualInterests(r.Context(), "manual")
+	if err != nil {
+		h.logger.Error("failed to list interests", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list interests")
+		return
+	}
+	if interests == nil {
+		interests = []storage.InterestTermRecord{}
+	}
+	writeSuccess(w, interests)
+}
+
+// DeleteInterest removes a manual interest term.
+func (h *Handlers) DeleteInterest(w http.ResponseWriter, r *http.Request) {
+	rawTerm := r.PathValue("term")
+	if rawTerm == "" {
+		writeError(w, http.StatusBadRequest, "term is required")
+		return
+	}
+
+	tokens := normalizeInterestAPITokens(rawTerm)
+	if len(tokens) == 0 {
+		writeError(w, http.StatusBadRequest, "term produces no valid tokens (must be > 2 chars)")
+		return
+	}
+
+	for _, tok := range tokens {
+		if err := h.store.RemoveInterestTerm(r.Context(), tok, "manual"); err != nil {
+			h.logger.Error("failed to delete interest term", "term", tok, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to delete interest term")
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "interest term removed",
+		"term":    rawTerm,
+		"tokens":  tokens,
+	})
+}
+
+// normalizeInterestAPITokens mirrors storage.normalizeInterestTokens for API use.
+func normalizeInterestAPITokens(s string) []string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var out []string
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else {
+			if b.Len() > 2 {
+				out = append(out, b.String())
+			}
+			b.Reset()
+		}
+	}
+	if b.Len() > 2 {
+		out = append(out, b.String())
+	}
+	return out
 }
 
 // --- Maintenance ---

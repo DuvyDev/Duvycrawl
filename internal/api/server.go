@@ -73,6 +73,11 @@ func NewServer(
 	mux.HandleFunc("POST /api/v1/crawler/stop", handlers.StopCrawler)
 	mux.HandleFunc("GET /api/v1/crawler/status", handlers.CrawlerStatus)
 
+	// Interests
+	mux.HandleFunc("GET /api/v1/interests", handlers.ListInterests)
+	mux.HandleFunc("POST /api/v1/interests", handlers.AddInterest)
+	mux.HandleFunc("DELETE /api/v1/interests/{term}", handlers.DeleteInterest)
+
 	// Maintenance
 	mux.HandleFunc("POST /api/v1/maintenance/rank", handlers.UpdateRankings)
 

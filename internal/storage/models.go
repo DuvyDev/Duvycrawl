@@ -41,8 +41,8 @@ type CrawlJob struct {
 	URL      string    `json:"url"`
 	Domain   string    `json:"domain"`
 	Depth    int       `json:"depth"`
-	Score    float64   `json:"score"` // Higher = more urgent (was Priority int)
-	Status   string    `json:"status"`   // pending, in_progress, done, failed
+	Score    float64   `json:"score"`  // Higher = more urgent (was Priority int)
+	Status   string    `json:"status"` // pending, in_progress, done, failed
 	Retries  int       `json:"retries"`
 	ErrorMsg string    `json:"error_msg,omitempty"`
 	AddedAt  time.Time `json:"added_at"`
@@ -196,4 +196,12 @@ type OutlinkResult struct {
 	TargetURL  string    `json:"target_url"`
 	AnchorText string    `json:"anchor_text"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// InterestTermRecord represents a single interest term stored in the database.
+type InterestTermRecord struct {
+	Term     string  `json:"term"`
+	Weight   float64 `json:"weight"`
+	Source   string  `json:"source"`
+	Language string  `json:"language,omitempty"`
 }

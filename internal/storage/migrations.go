@@ -139,17 +139,17 @@ var contentMigrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_search_clicks_query ON search_clicks(query)`,
 
-    // --- Phase 4: Adaptive Interest Profile ---
-    `CREATE TABLE IF NOT EXISTS search_queries (
+	// --- Phase 4: Adaptive Interest Profile ---
+	`CREATE TABLE IF NOT EXISTS search_queries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         query TEXT NOT NULL,
         normalized_query TEXT NOT NULL,
         lang TEXT,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_search_queries_normalized ON search_queries(normalized_query)`,
+	`CREATE INDEX IF NOT EXISTS idx_search_queries_normalized ON search_queries(normalized_query)`,
 
-    `CREATE TABLE IF NOT EXISTS interest_terms (
+	`CREATE TABLE IF NOT EXISTS interest_terms (
         term TEXT NOT NULL,
         weight REAL NOT NULL DEFAULT 1.0,
         source TEXT NOT NULL DEFAULT 'query',
@@ -158,15 +158,15 @@ var contentMigrations = []string{
         PRIMARY KEY(term, source)
     )`,
 
-    `CREATE TABLE IF NOT EXISTS domain_relevance (
+	`CREATE TABLE IF NOT EXISTS domain_relevance (
         domain TEXT NOT NULL PRIMARY KEY,
         score REAL NOT NULL DEFAULT 0.0,
         pages_count INTEGER NOT NULL DEFAULT 0,
         last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
 
-    // --- Phase 5: Semantic Embeddings for AI Re-ranking ---
-    `CREATE TABLE IF NOT EXISTS page_embeddings (
+	// --- Phase 5: Semantic Embeddings for AI Re-ranking ---
+	`CREATE TABLE IF NOT EXISTS page_embeddings (
         page_id INTEGER PRIMARY KEY,
         model TEXT NOT NULL DEFAULT 'all-minilm',
         dimensions INTEGER NOT NULL DEFAULT 384,
@@ -174,7 +174,7 @@ var contentMigrations = []string{
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_embeddings_model ON page_embeddings(model)`,
+	`CREATE INDEX IF NOT EXISTS idx_embeddings_model ON page_embeddings(model)`,
 
 	// --- Discovered resources (non-HTML assets crawled for link discovery only) ---
 	`CREATE TABLE IF NOT EXISTS discovered_resources (

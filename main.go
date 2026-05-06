@@ -71,6 +71,9 @@ func run() error {
 	var scoringEngine scorer.Scorer
 	if cfg.Crawler.ScoringStrategy == "adaptive" {
 		adaptive := scorer.NewAdaptive(store, cfg.Crawler.Adaptive, logger)
+		if err := adaptive.SeedInterestsFromConfig(ctx, cfg.Crawler.Adaptive.Interests); err != nil {
+			logger.Warn("failed to seed interests from config", "error", err)
+		}
 		adaptive.StartRefreshLoop(ctx)
 		scoringEngine = adaptive
 	} else {

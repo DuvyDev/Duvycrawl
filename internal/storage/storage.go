@@ -180,6 +180,15 @@ type Storage interface {
 	// BoostTermsFromClick increases term weights based on a clicked result's content.
 	BoostTermsFromClick(ctx context.Context, query string, pageURL string, clickWeight float64) error
 
+	// SetInterestTerm inserts or accumulates a manual interest term weight.
+	SetInterestTerm(ctx context.Context, term string, weight float64, source string, lang string) error
+
+	// RemoveInterestTerm deletes a manual interest term.
+	RemoveInterestTerm(ctx context.Context, term string, source string) error
+
+	// GetManualInterests returns interest terms with the given source (e.g. 'manual').
+	GetManualInterests(ctx context.Context, source string) ([]InterestTermRecord, error)
+
 	// Close gracefully shuts down the storage layer.
 	Close() error
 }

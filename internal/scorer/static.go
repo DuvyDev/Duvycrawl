@@ -11,11 +11,11 @@ import (
 // integer priority system. It is used when adaptive scoring is disabled
 // or when not enough queries have been recorded to build a user profile.
 type StaticScorer struct {
-	seedBonus      float64
-	normalScore    float64
-	recrawlScore   float64
-	depthPenaltyK  float64
-	logger         *slog.Logger
+	seedBonus     float64
+	normalScore   float64
+	recrawlScore  float64
+	depthPenaltyK float64
+	logger        *slog.Logger
 }
 
 // NewStatic creates a scorer that maps legacy priority levels to float scores.

@@ -26,16 +26,16 @@ type AdaptiveScorer struct {
 	cfg    config.AdaptiveConfig
 	logger *slog.Logger
 
-	mu         sync.RWMutex
-	profile    *interestProfile
-	refreshed  time.Time
+	mu        sync.RWMutex
+	profile   *interestProfile
+	refreshed time.Time
 }
 
 type interestProfile struct {
-	terms       map[string]float64 // term -> accumulated weight
-	domains     map[string]float64 // domain -> reputation score
-	languages   map[string]float64 // language -> preference weight
-	queryCount  int
+	terms      map[string]float64 // term -> accumulated weight
+	domains    map[string]float64 // domain -> reputation score
+	languages  map[string]float64 // language -> preference weight
+	queryCount int
 }
 
 // NewAdaptive creates a scorer that reads the community interest profile
@@ -49,6 +49,26 @@ func NewAdaptive(store storage.Storage, cfg config.AdaptiveConfig, logger *slog.
 }
 
 func (a *AdaptiveScorer) Name() string { return "adaptive" }
+
+// SeedInterestsFromConfig inserts manual interest terms from the config into
+// the database. Terms are inserted with source='manual' so they are
+// distinguishable from organic query/click terms. The weight is accumulated
+// on top of any existing manual weight for the same term.
+func (a *AdaptiveScorer) SeedInterestsFromConfig(ctx context.Context, interests []config.InterestConfig) error {
+	if len(interests) == 0 {
+		return nil
+	}
+	for _, ic := range interests {
+		tokens := normalizeTokens(ic.Term)
+		for _, tok := range tokens {
+			if err := a.store.SetInterestTerm(ctx, tok, ic.Weight, "manual", ""); err != nil {
+				a.logger.Warn("failed to seed interest term", "term", tok, "error", err)
+			}
+		}
+	}
+	a.logger.Info("seeded manual interests from config", "count", len(interests))
+	return nil
+}
 
 // StartRefreshLoop begins a background goroutine that reloads the profile
 // from the database every ProfileRefreshInterval.  Call once from main.
@@ -93,6 +113,11 @@ func (a *AdaptiveScorer) refresh() error {
 		return err
 	}
 
+	manualInterests, err := a.store.GetManualInterests(ctx, "manual")
+	if err != nil {
+		a.logger.Warn("failed to count manual interests", "error", err)
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -100,17 +125,15 @@ func (a *AdaptiveScorer) refresh() error {
 		terms:      terms,
 		domains:    domains,
 		languages:  make(map[string]float64),
-		queryCount: queryCount,
+		queryCount: queryCount + len(manualInterests),
 	}
-
-	// Simple language preference: count unique query languages from search_queries.
-	// For now we keep languages empty (uniform) unless explicitly populated later.
 
 	a.refreshed = time.Now()
 	a.logger.Debug("profile refreshed",
 		"terms", len(terms),
 		"domains", len(domains),
 		"queries", queryCount,
+		"manual_interests", len(manualInterests),
 	)
 	return nil
 }
@@ -177,8 +200,8 @@ func (a *AdaptiveScorer) relevanceScore(job *queue.Job, terms map[string]float64
 
 	// Collect searchable text.
 	texts := []struct {
-		s     string
-		w     float64
+		s string
+		w float64
 	}{
 		{job.AnchorText, a.cfg.AnchorWeight},
 		{job.URL, a.cfg.URLPathWeight},

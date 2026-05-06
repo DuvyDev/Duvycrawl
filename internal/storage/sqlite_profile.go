@@ -163,3 +163,50 @@ func normalizeInterestTokens(s string) []string {
 	}
 	return out
 }
+
+// SetInterestTerm inserts or accumulates a manual interest term weight.
+func (s *SQLiteStorage) SetInterestTerm(ctx context.Context, term string, weight float64, source string, lang string) error {
+	_, err := s.writeContentDB.ExecContext(ctx, `
+		INSERT INTO interest_terms (term, weight, source, lang, last_seen)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(term, source) DO UPDATE SET
+			weight = weight + ?,
+			last_seen = CURRENT_TIMESTAMP
+	`, term, weight, source, lang, weight)
+	if err != nil {
+		return fmt.Errorf("setting interest term %q: %w", term, err)
+	}
+	return nil
+}
+
+// RemoveInterestTerm deletes an interest term for a given source.
+func (s *SQLiteStorage) RemoveInterestTerm(ctx context.Context, term string, source string) error {
+	_, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM interest_terms WHERE term = ? AND source = ?
+	`, term, source)
+	if err != nil {
+		return fmt.Errorf("removing interest term %q: %w", term, err)
+	}
+	return nil
+}
+
+// GetManualInterests returns interest terms filtered by source.
+func (s *SQLiteStorage) GetManualInterests(ctx context.Context, source string) ([]InterestTermRecord, error) {
+	rows, err := s.readContentDB.QueryContext(ctx, `
+		SELECT term, weight, source, lang FROM interest_terms WHERE source = ?
+	`, source)
+	if err != nil {
+		return nil, fmt.Errorf("querying manual interests: %w", err)
+	}
+	defer rows.Close()
+
+	var results []InterestTermRecord
+	for rows.Next() {
+		var r InterestTermRecord
+		if err := rows.Scan(&r.Term, &r.Weight, &r.Source, &r.Language); err != nil {
+			return nil, fmt.Errorf("scanning interest term: %w", err)
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}

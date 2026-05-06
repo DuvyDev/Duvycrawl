@@ -63,6 +63,24 @@ crawler:
     source_title_weight: 20.0
     domain_reputation_weight: 15.0
     language_match_bonus: 35.0
+    # Manual interest terms that boost the adaptive scorer from startup.
+    # These activate the A* heuristic immediately, without requiring prior searches.
+    # Weight is cumulative: adding it again on restart will increase the total.
+    interests:
+      - term: "uruguay"
+        weight: 5.0
+      - term: "montevideo"
+        weight: 5.0
+      - term: "coding"
+        weight: 5.0
+      - term: "golang"
+        weight: 5.0
+      - term: "python"
+        weight: 5.0
+      - term: "warframe"
+        weight: 5.0
+      - term: "destiny 2"
+        weight: 5.0
 
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)

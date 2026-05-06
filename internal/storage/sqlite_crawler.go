@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/DuvyDev/Duvycrawl/internal/utils"
+	_ "modernc.org/sqlite"
 )
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {

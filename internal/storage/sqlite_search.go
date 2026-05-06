@@ -98,12 +98,12 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		correctedTerm := s.spellChecker.Suggest(q.tokens[0])
 		if correctedTerm != "" && correctedTerm != q.tokens[0] {
 			s.logger.Info("auto-correcting typo", "original", q.tokens[0], "corrected", correctedTerm)
-			
+
 			// Re-create the query with the corrected term
 			qCorrect := s.newSearchQuery(correctedTerm)
 			if qCorrect.normalized != "" {
 				qCorrect.idfMap, _ = s.getSearchIDFMap(searchCtx, qCorrect.tokens)
-				
+
 				// Re-run FTS Exact and Prefix searches for the corrected term
 				fallbackPlans := []struct {
 					mode     searchMode
@@ -112,7 +112,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 					{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(qCorrect.tokens)},
 					{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(qCorrect.tokens)},
 				}
-				
+
 				for _, plan := range fallbackPlans {
 					if searchCtx.Err() != nil {
 						break
@@ -124,7 +124,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 					if err != nil || count == 0 {
 						continue
 					}
-					
+
 					results, err := s.searchFTSCandidates(searchCtx, plan.mode, plan.ftsQuery, qCorrect, lang, candidateLimit)
 					if err == nil && len(results) > 0 {
 						candidates = mergeSearchCandidates(candidates, results)
@@ -135,7 +135,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 						break
 					}
 				}
-				
+
 				// Update q to qCorrect so re-ranking uses the correct token!
 				if len(candidates) > 0 {
 					q = qCorrect
@@ -707,8 +707,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	return candidates, nil
 }
 
-
-
 func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query searchQuery, lang string, limit int) ([]searchCandidate, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -1116,8 +1114,6 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 			}
 		}
 	}
-
-
 
 	return score, true
 }
@@ -1822,8 +1818,6 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	}
 	return results
 }
-
-
 
 func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url string) error {
 	normalizedQuery := normalizeSearchText(query)

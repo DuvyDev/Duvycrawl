@@ -52,8 +52,8 @@ type Engine struct {
 	embedder    *embedder.Client
 	logger      *slog.Logger
 
-	status atomic.Value // EngineStatus
-	cancel context.CancelFunc
+	status  atomic.Value // EngineStatus
+	cancel  context.CancelFunc
 	crawlWG sync.WaitGroup
 	embedWG sync.WaitGroup
 
@@ -84,17 +84,17 @@ func NewEngine(
 	logger *slog.Logger,
 ) *Engine {
 	e := &Engine{
-		cfg:         cfg,
-		store:       store,
-		batchWriter: batchWriter,
-		frontier:    front,
-		fetcher:     NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, proxyURL, logger),
-		parser:      NewParser(),
-		robots:      NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
-		limiter:     limiter,
-		domainStats: domainStats,
-		embedder:    embedClient,
-		logger:      logger.With("component", "engine"),
+		cfg:            cfg,
+		store:          store,
+		batchWriter:    batchWriter,
+		frontier:       front,
+		fetcher:        NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, proxyURL, logger),
+		parser:         NewParser(),
+		robots:         NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
+		limiter:        limiter,
+		domainStats:    domainStats,
+		embedder:       embedClient,
+		logger:         logger.With("component", "engine"),
 		highEmbedQueue: make(chan embedJob, 25000),
 		lowEmbedQueue:  make(chan embedJob, 5000),
 	}

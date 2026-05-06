@@ -208,9 +208,9 @@ func (bw *BatchWriter) flushLocked() error {
 		if page.SchemaRating > 0 {
 			schemaRating = page.SchemaRating
 		}
-		
+
 		page.URLHash = utils.HashURL(page.URL)
-		
+
 		_, err := pageStmt.ExecContext(ctx,
 			page.URL, page.URLHash, page.Domain, page.Title, page.H1, page.H2, page.Description,
 			page.Content, page.Language, page.Region,

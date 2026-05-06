@@ -34,7 +34,7 @@ func NewSpellChecker(logger *slog.Logger) *SpellChecker {
 // trigram index in memory.
 func (sc *SpellChecker) LoadVocabulary(db *sql.DB) {
 	start := time.Now()
-	
+
 	// We only load terms that appear in at least 3 documents to avoid learning
 	// typos from spam pages. We also ignore very short terms.
 	query := `SELECT term, doc FROM pages_fts_vocab WHERE doc >= 3 AND LENGTH(term) >= 4`

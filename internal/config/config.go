@@ -14,9 +14,9 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	Crawler CrawlerConfig `yaml:"crawler"`
-	Storage StorageConfig `yaml:"storage"`
-	API     APIConfig     `yaml:"api"`
+	Crawler       CrawlerConfig       `yaml:"crawler"`
+	Storage       StorageConfig       `yaml:"storage"`
+	API           APIConfig           `yaml:"api"`
 	Logging       LoggingConfig       `yaml:"logging"`
 	Seeds         []SeedConfig        `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
@@ -88,6 +88,12 @@ type SeedConfig struct {
 	StartURLs []string `yaml:"start_urls"`
 }
 
+// InterestConfig represents a manually declared interest term with its weight.
+type InterestConfig struct {
+	Term   string  `yaml:"term"`
+	Weight float64 `yaml:"weight"`
+}
+
 // AdaptiveConfig holds tunable parameters for the adaptive (A*-like) scorer.
 type AdaptiveConfig struct {
 	// MinQueriesBeforeBoost is the number of search queries that must be
@@ -95,7 +101,7 @@ type AdaptiveConfig struct {
 	// scorer behaves almost like the static strategy.
 	MinQueriesBeforeBoost int `yaml:"min_queries_before_boost"`
 	// DepthPenaltyK controls the sub-linear depth penalty:
-	//   penalty = k * ln(1 + depth)
+	// penalty = k * ln(1 + depth)
 	DepthPenaltyK float64 `yaml:"depth_penalty_k"`
 	// ProfileRefreshInterval is how often the in-memory interest profile is
 	// reloaded from SQLite.
@@ -112,6 +118,9 @@ type AdaptiveConfig struct {
 	DomainReputationWeight float64 `yaml:"domain_reputation_weight"`
 	// LanguageMatchBonus is added when a link's language matches the profile.
 	LanguageMatchBonus float64 `yaml:"language_match_bonus"`
+	// Interests is a list of manually declared interest terms that boost
+	// the adaptive scorer from startup, without requiring prior search queries.
+	Interests []InterestConfig `yaml:"interests"`
 }
 
 // StorageConfig controls data persistence.
@@ -331,6 +340,15 @@ func (c *Config) validate() error {
 	validFormats := map[string]bool{"text": true, "json": true}
 	if !validFormats[c.Logging.Format] {
 		return fmt.Errorf("logging.format must be one of [text, json], got %q", c.Logging.Format)
+	}
+
+	for i, ic := range c.Crawler.Adaptive.Interests {
+		if strings.TrimSpace(ic.Term) == "" {
+			return fmt.Errorf("crawler.adaptive.interests[%d].term must not be empty", i)
+		}
+		if ic.Weight <= 0 {
+			return fmt.Errorf("crawler.adaptive.interests[%d].weight must be > 0, got %f", i, ic.Weight)
+		}
 	}
 
 	return nil

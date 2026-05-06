@@ -116,7 +116,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		if shredditTitle == "" {
 			shredditTitle = doc.Find("shreddit-post").AttrOr("post-title", "")
 		}
-		
+
 		if shredditTitle != "" {
 			result.Title = strings.TrimSpace(shredditTitle)
 		} else {

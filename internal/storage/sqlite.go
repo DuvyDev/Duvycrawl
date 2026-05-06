@@ -28,11 +28,11 @@ import (
 // This eliminates SQLITE_BUSY errors under high concurrency while
 // maximizing read throughput in WAL mode.
 type SQLiteStorage struct {
-	readContentDB  *sql.DB
-	writeContentDB *sql.DB
-	crawlerDB      *sql.DB
-	graphDB        *sql.DB
-	logger         *slog.Logger
+	readContentDB   *sql.DB
+	writeContentDB  *sql.DB
+	crawlerDB       *sql.DB
+	graphDB         *sql.DB
+	logger          *slog.Logger
 	dataDir         string
 	embedder        *embedder.Client
 	siteTypes       map[string]struct{}
