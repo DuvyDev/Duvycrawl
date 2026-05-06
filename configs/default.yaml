@@ -129,15 +129,31 @@ seeds:
     recrawl_interval: 3h
   - url: "https://vandal.elespanol.com/"
     recrawl_interval: 3h
+  - url: "https://www.hobbyconsolas.com/"
+    recrawl_interval: 3h
+  - url: "https://www.anmtvla.com/"
+    recrawl_interval: 3h
+  - url: "https://somoskudasai.com/"
+    recrawl_interval: 3h
+  - url: "https://areajugones.sport.es/anime/"
+    recrawl_interval: 3h
+  - url: "https://www.justwatch.com/es"
+    recrawl_interval: 72h
+  - url: "https://www.imdb.com/es-es/"
+    recrawl_interval: 72h
   - url: "https://www.elpais.com.uy/"
     recrawl_interval: 1h
   - url: "https://www.telenoche.com.uy/"
     recrawl_interval: 1h
+  - url: "https://www.montevideo.com.uy/"
+    recrawl_interval: 2h
   - url: "https://www.subrayado.com.uy/"
     recrawl_interval: 2h
   - url: "https://ladiaria.com.uy/"
     recrawl_interval: 2h
   - url: "https://www.infobae.com/"
+    recrawl_interval: 1h
+  - url: "https://www.meneame.net/"
     recrawl_interval: 1h
   - url: "https://www.cronica.com.ar/"
     recrawl_interval: 1h
@@ -183,6 +199,16 @@ seeds:
     recrawl_interval: 72h
   - url: "https://github.com/trending"
     recrawl_interval: 24h
+  - url: "https://www.mindstudio.ai/"
+    recrawl_interval: 24h
+  - url: "https://artificialanalysis.ai/"
+    recrawl_interval: 24h
+  - url: "https://www.datacamp.com/"
+    recrawl_interval: 24h
+  - url: "https://benchlm.ai/"
+    recrawl_interval: 24h
+  - url: "https://www.crunchyroll.com/es-es/"
+    recrawl_interval: 168h
 
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
