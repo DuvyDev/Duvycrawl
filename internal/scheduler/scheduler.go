@@ -1,5 +1,5 @@
-// Package scheduler manages automatic re-crawling of stale pages
-// and periodic injection of seed URLs into the frontier.
+// Package scheduler manages automatic re-crawling of seed URLs
+// based on their configured recrawl intervals.
 package scheduler
 
 import (
@@ -7,42 +7,27 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
-// FreshnessPolicy defines how often different types of pages should be re-crawled.
-type FreshnessPolicy struct {
-	SeedInterval   time.Duration // How often to re-crawl seed domain pages.
-	NormalInterval time.Duration // How often to re-crawl normal pages.
-	UnchangedBonus time.Duration // Extra time before re-crawling unchanged pages.
-}
-
-// DefaultPolicy returns the default freshness policy.
-func DefaultPolicy() FreshnessPolicy {
-	return FreshnessPolicy{
-		SeedInterval:   24 * time.Hour,
-		NormalInterval: 7 * 24 * time.Hour, // 7 days
-		UnchangedBonus: 7 * 24 * time.Hour, // +7 days for unchanged pages (total: 14 days)
-	}
-}
-
-// Scheduler periodically checks for stale pages and injects them
-// back into the frontier for re-crawling.
+// Scheduler periodically checks seed URLs and re-enqueues those
+// that have exceeded their recrawl interval.
 type Scheduler struct {
 	store    storage.Storage
 	frontier *frontier.Frontier
-	policy   FreshnessPolicy
+	cfg      config.SchedulerConfig
 	logger   *slog.Logger
 	done     chan struct{}
 }
 
 // New creates a new scheduler.
-func New(store storage.Storage, front *frontier.Frontier, policy FreshnessPolicy, logger *slog.Logger) *Scheduler {
+func New(store storage.Storage, front *frontier.Frontier, cfg config.SchedulerConfig, logger *slog.Logger) *Scheduler {
 	return &Scheduler{
 		store:    store,
 		frontier: front,
-		policy:   policy,
+		cfg:      cfg,
 		logger:   logger.With("component", "scheduler"),
 		done:     make(chan struct{}),
 	}
@@ -52,14 +37,14 @@ func New(store storage.Storage, front *frontier.Frontier, policy FreshnessPolicy
 // or the context is cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
 	s.logger.Info("scheduler started",
-		"seed_interval", s.policy.SeedInterval,
-		"normal_interval", s.policy.NormalInterval,
+		"tick_interval", s.cfg.TickInterval,
+		"default_seed_interval", s.cfg.SeedRecrawlInterval,
 	)
 
 	// Run immediately on start, then periodically.
 	s.tick(ctx)
 
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(s.cfg.TickInterval)
 	defer ticker.Stop()
 
 	for {
@@ -87,51 +72,47 @@ func (s *Scheduler) Stop() {
 }
 
 // tick performs a single scheduling cycle:
-// 1. Check for stale seed pages → re-enqueue with high priority.
-// 2. Check for stale normal pages → re-enqueue with low priority.
-// 3. Reset any stalled (orphaned) jobs.
+// 1. Find stale seed URLs.
+// 2. Re-enqueue them into the frontier.
+// 3. Update their last_enqueued timestamp.
+// 4. Reset any stalled (orphaned) jobs.
 func (s *Scheduler) tick(ctx context.Context) {
 	s.logger.Debug("scheduler tick starting")
 
-	// Re-queue stale seed pages.
-	seedCutoff := time.Now().Add(-s.policy.SeedInterval)
-	s.requeueStalePages(ctx, seedCutoff, storage.PriorityRecrawl+5, 50) // Slightly higher than normal recrawl.
+	staleSeeds, err := s.store.GetStaleSeedURLs(ctx, 100)
+	if err != nil {
+		s.logger.Error("failed to get stale seed urls", "error", err)
+		return
+	}
 
-	// Re-queue stale normal pages.
-	normalCutoff := time.Now().Add(-s.policy.NormalInterval)
-	s.requeueStalePages(ctx, normalCutoff, storage.PriorityRecrawl, 100)
+	if len(staleSeeds) > 0 {
+		urls := make([]string, len(staleSeeds))
+		for i, seed := range staleSeeds {
+			urls[i] = seed.URL
+		}
+
+		if _, err := s.frontier.AddBatchDirect(ctx, urls, 0, storage.PriorityRecrawl+5); err != nil {
+			s.logger.Error("failed to re-enqueue stale seed urls",
+				"error", err,
+				"count", len(urls),
+			)
+		} else {
+			now := time.Now().UTC()
+			for _, seed := range staleSeeds {
+				if err := s.store.UpdateSeedURLLastEnqueued(ctx, seed.URL, now); err != nil {
+					s.logger.Warn("failed to update seed last_enqueued", "url", seed.URL, "error", err)
+				}
+			}
+			s.logger.Info("re-enqueued stale seed urls for re-crawl",
+				"count", len(urls),
+			)
+		}
+	}
+
+	// Reset stalled jobs regardless of seed re-crawl result.
+	if _, err := s.store.ResetStalledJobs(ctx, 30*time.Minute); err != nil {
+		s.logger.Warn("failed to reset stalled jobs", "error", err)
+	}
 
 	s.logger.Debug("scheduler tick complete")
-}
-
-// requeueStalePages finds pages older than the cutoff and re-adds them to the frontier.
-func (s *Scheduler) requeueStalePages(ctx context.Context, olderThan time.Time, baseScore float64, limit int) {
-	pages, err := s.store.GetStalePages(ctx, olderThan, limit)
-	if err != nil {
-		s.logger.Error("failed to get stale pages", "error", err)
-		return
-	}
-
-	if len(pages) == 0 {
-		return
-	}
-
-	var urls []string
-	for _, p := range pages {
-		urls = append(urls, p.URL)
-	}
-
-	if _, err := s.frontier.AddBatchDirect(ctx, urls, 0, baseScore); err != nil {
-		s.logger.Error("failed to re-enqueue stale pages",
-			"error", err,
-			"count", len(urls),
-		)
-		return
-	}
-
-	s.logger.Info("re-enqueued stale pages for re-crawl",
-		"count", len(urls),
-		"base_score", baseScore,
-		"older_than", olderThan.Format(time.RFC3339),
-	)
 }

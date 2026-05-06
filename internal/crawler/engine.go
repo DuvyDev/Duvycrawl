@@ -57,9 +57,6 @@ type Engine struct {
 	crawlWG sync.WaitGroup
 	embedWG sync.WaitGroup
 
-	// seedDomains holds the set of seed domain names for SeedDomainsOnly filtering.
-	seedDomains map[string]bool
-
 	// High-priority jobs are freshly persisted pages; low-priority jobs are
 	// backfill of older pages missing embeddings.
 	highEmbedQueue chan embedJob
@@ -125,13 +122,7 @@ func (e *Engine) Start(ctx context.Context) {
 		"parallelism_per_domain", e.cfg.ParallelismPerDomain,
 		"max_retries", e.cfg.MaxRetries,
 		"disable_cookies", e.cfg.DisableCookies,
-		"seed_domains_only", e.cfg.SeedDomainsOnly,
 	)
-
-	// Load seed domains so we can tag pages with IsSeed.
-	if err := e.loadSeedDomains(ctx); err != nil {
-		e.logger.Error("failed to load seed domains", "error", err)
-	}
 
 	// Launch workers.
 	for i := range e.cfg.Workers {
@@ -367,7 +358,6 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		SchemaAuthor:      truncateString(parsed.SchemaAuthor, 500),
 		SchemaKeywords:    truncateString(parsed.SchemaKeywords, 1000),
 		SchemaRating:      parsed.SchemaRating,
-		IsSeed:            e.seedDomains[job.Domain],
 	}
 
 	e.batchWriter.WritePage(page)
@@ -455,25 +445,6 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 		})
 	}
 
-	// Filter by seed domains if configured.
-	if e.cfg.SeedDomainsOnly && len(e.seedDomains) > 0 {
-		filtered := make([]frontier.LinkContext, 0, len(links))
-		for _, link := range links {
-			domain := frontier.ExtractDomain(link.URL)
-			if e.seedDomains[domain] {
-				filtered = append(filtered, link)
-			}
-		}
-		if len(links) != len(filtered) {
-			logger.Debug("filtered links by seed domains",
-				"total", len(links),
-				"kept", len(filtered),
-				"discarded", len(links)-len(filtered),
-			)
-		}
-		links = filtered
-	}
-
 	// Limit the number of links per page to prevent flooding.
 	maxLinks := 100
 	if len(links) > maxLinks {
@@ -546,30 +517,6 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen]
-}
-
-// loadSeedDomains populates the seedDomains set from the database.
-func (e *Engine) loadSeedDomains(ctx context.Context) error {
-	seeds, err := e.store.GetSeedDomains(ctx)
-	if err != nil {
-		return err
-	}
-
-	e.seedDomains = make(map[string]bool, len(seeds))
-	for _, s := range seeds {
-		e.seedDomains[s.Domain] = true
-	}
-
-	e.logger.Info("loaded seed domains for filtering",
-		"count", len(e.seedDomains),
-	)
-	return nil
-}
-
-// RefreshSeedDomains reloads the seed domains set.
-// Call this after adding/removing seeds via the API.
-func (e *Engine) RefreshSeedDomains(ctx context.Context) error {
-	return e.loadSeedDomains(ctx)
 }
 
 func (e *Engine) onPagesPersisted(pages []*storage.Page) {

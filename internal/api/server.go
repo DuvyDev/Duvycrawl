@@ -66,7 +66,7 @@ func NewServer(
 	// Seeds
 	mux.HandleFunc("GET /api/v1/seeds", handlers.ListSeeds)
 	mux.HandleFunc("POST /api/v1/seeds", handlers.AddSeed)
-	mux.HandleFunc("DELETE /api/v1/seeds/{domain}", handlers.DeleteSeed)
+	mux.HandleFunc("DELETE /api/v1/seeds/{url}", handlers.DeleteSeed)
 
 	// Crawler control
 	mux.HandleFunc("POST /api/v1/crawler/start", handlers.StartCrawler)

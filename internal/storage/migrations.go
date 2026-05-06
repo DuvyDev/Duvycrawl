@@ -31,8 +31,7 @@ var contentMigrations = []string{
 		schema_keywords    TEXT    NOT NULL DEFAULT '',
 		schema_rating      REAL,
 		referring_domains  INTEGER NOT NULL DEFAULT 0,
-		pagerank           REAL    NOT NULL DEFAULT 1.0,
-		is_seed            BOOLEAN NOT NULL DEFAULT FALSE
+		pagerank           REAL    NOT NULL DEFAULT 1.0
 	)`,
 
 	// --- Performance indexes ---
@@ -45,7 +44,6 @@ var contentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_schema_type ON pages(schema_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_pagerank ON pages(pagerank)`,
-	`CREATE INDEX IF NOT EXISTS idx_pages_is_seed ON pages(is_seed)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_url_hash ON pages(url_hash)`,
 
 	// --- Full-text search index ---
@@ -209,7 +207,6 @@ var crawlerMigrations = []string{
 	`CREATE TABLE IF NOT EXISTS domains (
 		id              INTEGER PRIMARY KEY AUTOINCREMENT,
 		domain          TEXT    NOT NULL UNIQUE,
-		is_seed         BOOLEAN NOT NULL DEFAULT FALSE,
 		robots_txt      TEXT    NOT NULL DEFAULT '',
 		robots_fetched  DATETIME,
 		last_crawled    DATETIME,
@@ -217,8 +214,19 @@ var crawlerMigrations = []string{
 		avg_response_ms INTEGER NOT NULL DEFAULT 0,
 		created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
-	`CREATE INDEX IF NOT EXISTS idx_domains_seed ON domains(is_seed)`,
 	`CREATE INDEX IF NOT EXISTS idx_domains_domain ON domains(domain)`,
+
+	// --- Seed URLs table ---
+	`CREATE TABLE IF NOT EXISTS seed_urls (
+		id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+		url                      TEXT    NOT NULL UNIQUE,
+		domain                   TEXT    NOT NULL,
+		recrawl_interval_seconds INTEGER NOT NULL DEFAULT 86400,
+		last_enqueued            DATETIME,
+		created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_seed_urls_domain ON seed_urls(domain)`,
+	`CREATE INDEX IF NOT EXISTS idx_seed_urls_last_enqueued ON seed_urls(last_enqueued)`,
 }
 
 var graphMigrations = []string{

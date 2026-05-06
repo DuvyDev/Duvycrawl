@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/api"
 	"github.com/DuvyDev/Duvycrawl/internal/config"
@@ -23,7 +22,6 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
 	"github.com/DuvyDev/Duvycrawl/internal/scheduler"
 	"github.com/DuvyDev/Duvycrawl/internal/scorer"
-	"github.com/DuvyDev/Duvycrawl/internal/seeds"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
@@ -108,7 +106,7 @@ func run() error {
 
 	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Crawler.ProxyURL, logger)
 
-	sched := scheduler.New(store, front, scheduler.DefaultPolicy(), logger)
+	sched := scheduler.New(store, front, cfg.Crawler.Scheduler, logger)
 
 	apiServer := api.NewServer(&cfg.API, store, engine, front, logger)
 
@@ -117,14 +115,9 @@ func run() error {
 		logger.Warn("failed to seed bloom filter", "error", err)
 	}
 
-	// --- Re-queue stale pages to give the crawler initial work on restart.
-	if err := requeueStalePagesOnStartup(ctx, store, front, logger); err != nil {
-		logger.Warn("failed to re-queue stale pages on startup", "error", err)
-	}
-
-	// --- Seed Default Domains ---
-	if err := seedDefaultDomains(ctx, cfg, store, front, logger); err != nil {
-		return fmt.Errorf("seeding default domains: %w", err)
+	// --- Seed URLs from config ---
+	if err := seedURLsFromConfig(ctx, cfg, store, front, logger); err != nil {
+		return fmt.Errorf("seeding urls from config: %w", err)
 	}
 
 	// --- Setup Graceful Shutdown ---
@@ -252,125 +245,54 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 	return nil
 }
 
-// seedDefaultDomains registers seed domains and enqueues their start URLs.
-// Seeds are read from the YAML config. If none are defined, the built-in
-// defaults from internal/seeds are used as a fallback.
-//
-// Domain registration (in SQLite) only happens once, but seed URLs are
-// always enqueued into the in-memory queue on every startup so crawling
-// resumes immediately.
-func seedDefaultDomains(ctx context.Context, cfg *config.Config, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
-	// Build the seed list: prefer config, fall back to hardcoded defaults.
-	var seedList []config.SeedConfig
-
-	if len(cfg.Seeds) > 0 {
-		seedList = cfg.Seeds
-		logger.Info("using seeds from configuration file", "count", len(seedList))
-	} else {
-		// Convert hardcoded defaults to SeedConfig format.
-		for _, s := range seeds.DefaultSeeds() {
-			seedList = append(seedList, config.SeedConfig{
-				Domain:    s.Domain,
-				Priority:  s.Priority,
-				StartURLs: s.StartURLs,
-			})
-		}
-		logger.Info("no seeds in config, using built-in defaults", "count", len(seedList))
+// seedURLsFromConfig persists seed URLs from the config into the database
+// and enqueues them into the frontier. Each seed gets its own recrawl interval.
+func seedURLsFromConfig(ctx context.Context, cfg *config.Config, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
+	if len(cfg.Seeds) == 0 {
+		logger.Info("no seed urls configured")
+		return nil
 	}
 
-	registered := 0
+	defaultInterval := int(cfg.Crawler.Scheduler.SeedRecrawlInterval.Seconds())
+	if defaultInterval <= 0 {
+		defaultInterval = 86400 // 24h fallback
+	}
+
 	enqueued := 0
-	for _, seed := range seedList {
-		// Apply default base score if not set.
-		baseScore := float64(seed.Priority)
-		if baseScore <= 0 {
-			baseScore = storage.PrioritySeed
+	for _, seedCfg := range cfg.Seeds {
+		domain := frontier.ExtractDomain(seedCfg.URL)
+		if domain == "" {
+			logger.Warn("skipping invalid seed url", "url", seedCfg.URL)
+			continue
 		}
 
-		// Register the domain as a seed (only if not already registered).
-		existing, err := store.GetDomain(ctx, seed.Domain)
-		if err != nil {
-			return fmt.Errorf("checking seed domain %q: %w", seed.Domain, err)
+		interval := int(seedCfg.RecrawlInterval.Seconds())
+		if interval <= 0 {
+			interval = defaultInterval
 		}
 
-		if existing == nil || !existing.IsSeed {
-			domain := &storage.Domain{
-				Domain: seed.Domain,
-				IsSeed: true,
-			}
-			if err := store.UpsertDomain(ctx, domain); err != nil {
-				return fmt.Errorf("upserting seed domain %q: %w", seed.Domain, err)
-			}
-			registered++
+		seed := &storage.SeedURL{
+			URL:                    seedCfg.URL,
+			Domain:                 domain,
+			RecrawlIntervalSeconds: interval,
 		}
 
-		// Always enqueue start URLs into the in-memory queue.
-		// The queue's deduplication set prevents double-processing within
-		// the same session, and already-crawled pages will be re-crawled
-		// only if their content has changed (via content hash).
-		startURLs := seed.StartURLs
-		if len(startURLs) == 0 {
-			startURLs = []string{"https://" + seed.Domain + "/"}
+		if err := store.UpsertSeedURL(ctx, seed); err != nil {
+			logger.Warn("failed to persist seed url", "url", seedCfg.URL, "error", err)
+			continue
 		}
 
-		if _, err := front.AddBatchDirect(ctx, startURLs, 0, baseScore); err != nil {
-			logger.Warn("failed to enqueue seed URLs",
-				"domain", seed.Domain,
-				"error", err,
-			)
+		if err := front.Add(ctx, seedCfg.URL, 0, storage.PrioritySeed); err != nil {
+			logger.Warn("failed to enqueue seed url", "url", seedCfg.URL, "error", err)
 			continue
 		}
 
 		enqueued++
 	}
 
-	logger.Info("seeded domains",
-		"new_domains", registered,
+	logger.Info("seed urls configured",
+		"count", len(cfg.Seeds),
 		"enqueued", enqueued,
-	)
-
-	return nil
-}
-
-// requeueStalePagesOnStartup re-queues pages that haven't been crawled recently,
-// giving the crawler initial work on restart without re-crawling fresh content.
-func requeueStalePagesOnStartup(ctx context.Context, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
-	// Seed pages older than 4 hours get re-queued with high priority.
-	seedCutoff := time.Now().Add(-4 * time.Hour)
-	staleSeeds, err := store.GetStalePages(ctx, seedCutoff, 200)
-	if err != nil {
-		return err
-	}
-
-	// Normal pages older than 3 days get re-queued with low priority.
-	normalCutoff := time.Now().Add(-72 * time.Hour)
-	stalePages, err := store.GetStalePages(ctx, normalCutoff, 2000)
-	if err != nil {
-		return err
-	}
-
-	var allURLs []string
-	for _, p := range staleSeeds {
-		allURLs = append(allURLs, p.URL)
-	}
-	for _, p := range stalePages {
-		allURLs = append(allURLs, p.URL)
-	}
-
-	if len(allURLs) == 0 {
-		logger.Info("no stale pages to re-queue on startup")
-		return nil
-	}
-
-	added, err := front.AddBatchDirect(ctx, allURLs, 0, storage.PriorityNormal)
-	if err != nil {
-		return fmt.Errorf("re-queuing stale pages on startup: %w", err)
-	}
-
-	logger.Info("re-queued stale pages on startup",
-		"stale_seeds", len(staleSeeds),
-		"stale_pages", len(stalePages),
-		"enqueued", added,
 	)
 	return nil
 }

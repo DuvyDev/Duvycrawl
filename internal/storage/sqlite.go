@@ -76,7 +76,6 @@ type searchCandidate struct {
 	H2              string
 	BodyPreview     string
 	sqlScore        float64
-	isSeed          bool
 	contentLen      int
 	mode            searchMode
 	publishedAtTime time.Time
@@ -253,8 +252,8 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 	if err := s.crawlerDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains`).Scan(&stats.TotalDomains); err != nil {
 		return nil, fmt.Errorf("counting domains: %w", err)
 	}
-	if err := s.crawlerDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM domains WHERE is_seed = TRUE`).Scan(&stats.SeedDomains); err != nil {
-		return nil, fmt.Errorf("counting seed domains: %w", err)
+	if err := s.crawlerDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM seed_urls`).Scan(&stats.SeedDomains); err != nil {
+		return nil, fmt.Errorf("counting seed urls: %w", err)
 	}
 
 	// Queue stats.

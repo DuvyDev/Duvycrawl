@@ -25,9 +25,6 @@ crawler:
   max_page_size_kb: 512
   # Whether to respect robots.txt directives
   respect_robots: false
-  # If true, ONLY crawl pages within seed domains.
-  # If false, follow links freely across the entire web.
-  seed_domains_only: false
   # Max concurrent requests to the SAME domain (like Colly's Parallelism).
   # Higher = faster for a single domain, but be polite. Default: 2.
   parallelism_per_domain: 8
@@ -81,6 +78,111 @@ crawler:
         weight: 5.0
       - term: "destiny 2"
         weight: 5.0
+  # Scheduler controls how often seed URLs are re-crawled.
+  scheduler:
+    tick_interval: 10m
+    seed_recrawl_interval: 24h
+
+# Seed URLs are the starting points for the crawler.
+# Each URL can have its own recrawl_interval. If omitted, the scheduler's
+# seed_recrawl_interval is used.
+seeds:
+  - url: "https://www.reddit.com/news/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/uruguay/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/monte_video/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/argentina/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/gaming/"
+    recrawl_interval: 40m
+  - url: "https://www.reddit.com/r/pcmasterrace/"
+    recrawl_interval: 30m
+  - url: "https://www.reddit.com/r/Selfhosted/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/LocalLLM/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/privacy/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/sysadmin/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/firefox/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/buildapc/"
+    recrawl_interval: 3h
+  - url: "https://www.reddit.com/r/Warframe/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/marvelrivals/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/DestinyTheGame/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/hytale/"
+    recrawl_interval: 2h
+  - url: "https://news.ycombinator.com/"
+    recrawl_interval: 15m
+  - url: "https://www.mozilla.org/es-ES/"
+    recrawl_interval: 72h
+  - url: "https://www.xataka.com/"
+    recrawl_interval: 3h
+  - url: "https://www.3djuegos.com/"
+    recrawl_interval: 3h
+  - url: "https://vandal.elespanol.com/"
+    recrawl_interval: 3h
+  - url: "https://www.elpais.com.uy/"
+    recrawl_interval: 1h
+  - url: "https://www.telenoche.com.uy/"
+    recrawl_interval: 1h
+  - url: "https://www.subrayado.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://ladiaria.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://www.infobae.com/"
+    recrawl_interval: 1h
+  - url: "https://www.cronica.com.ar/"
+    recrawl_interval: 1h
+  - url: "https://www.fandom.com/"
+    recrawl_interval: 8h
+  - url: "https://www.warframe.com/es"
+    recrawl_interval: 168h
+  - url: "https://overframe.gg/"
+    recrawl_interval: 72h
+  - url: "https://hytale.com/"
+    recrawl_interval: 24h
+  - url: "https://wiki.warframe.com/"
+    recrawl_interval: 168h
+  - url: "https://warframe.fandom.com/wiki/WARFRAME_Wiki"
+    recrawl_interval: 72h
+  - url: "https://marvelrivals.gg/"
+    recrawl_interval: 24h
+  - url: "https://www.marvelrivals.com/"
+    recrawl_interval: 72h
+  - url: "https://tracker.gg/"
+    recrawl_interval: 72h
+  - url: "https://www.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://1122.com.uy/"
+    recrawl_interval: 24h
+  - url: "https://sucive.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://www.uruguayconcursa.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://tienda.farmashop.com.uy/"
+    recrawl_interval: 24h
+  - url: "https://ues.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://correo.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://dac.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://openrouter.ai/"
+    recrawl_interval: 72h
+  - url: "https://opencode.ai/"
+    recrawl_interval: 72h
+  - url: "https://hub.docker.com/"
+    recrawl_interval: 72h
+  - url: "https://github.com/trending"
+    recrawl_interval: 24h
 
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
@@ -101,7 +203,7 @@ logging:
 embedder:
   # Enable or disable semantic embeddings generation and search re-ranking.
   # Set to true only if you have Ollama running and the model pulled.
-  enabled: false
+  enabled: true
   # Base URL for the Ollama embeddings API
   url: "http://localhost:11434"
   # The semantic embedding model to use

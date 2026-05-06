@@ -348,14 +348,14 @@ func (h *Handlers) SearchImages(w http.ResponseWriter, r *http.Request) {
 
 // --- Seeds ---
 
-type addSeedRequest struct {
-	Domain   string `json:"domain"`
-	Priority int    `json:"priority,omitempty"`
+type seedURLRequest struct {
+	URL              string        `json:"url"`
+	RecrawlInterval  time.Duration `json:"recrawl_interval,omitempty"`
 }
 
-// ListSeeds returns all seed domains.
+// ListSeeds returns all seed URLs.
 func (h *Handlers) ListSeeds(w http.ResponseWriter, r *http.Request) {
-	seeds, err := h.store.GetSeedDomains(r.Context())
+	seeds, err := h.store.GetSeedURLs(r.Context())
 	if err != nil {
 		h.logger.Error("failed to list seeds", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to list seeds")
@@ -363,70 +363,71 @@ func (h *Handlers) ListSeeds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if seeds == nil {
-		seeds = []storage.Domain{}
+		seeds = []storage.SeedURL{}
 	}
 
 	writeSuccess(w, seeds)
 }
 
-// AddSeed adds a new seed domain.
+// AddSeed adds a new seed URL.
 func (h *Handlers) AddSeed(w http.ResponseWriter, r *http.Request) {
-	var req addSeedRequest
+	var req seedURLRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if req.Domain == "" {
-		writeError(w, http.StatusBadRequest, "domain is required")
+	if req.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
 		return
 	}
 
-	domain := &storage.Domain{
-		Domain: req.Domain,
-		IsSeed: true,
+	domain := frontier.ExtractDomain(req.URL)
+	if domain == "" {
+		writeError(w, http.StatusBadRequest, "invalid url")
+		return
 	}
 
-	if err := h.store.UpsertDomain(r.Context(), domain); err != nil {
-		h.logger.Error("failed to add seed", "domain", req.Domain, "error", err)
+	seed := &storage.SeedURL{
+		URL:                    req.URL,
+		Domain:                 domain,
+		RecrawlIntervalSeconds: int(req.RecrawlInterval.Seconds()),
+	}
+
+	if err := h.store.UpsertSeedURL(r.Context(), seed); err != nil {
+		h.logger.Error("failed to add seed", "url", req.URL, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to add seed")
 		return
 	}
 
-	// Also enqueue the domain's home page.
-	baseScore := float64(req.Priority)
-	if baseScore <= 0 {
-		baseScore = storage.PrioritySeed
-	}
-
-	homeURL := "https://" + req.Domain + "/"
-	if err := h.frontier.Add(r.Context(), homeURL, 0, baseScore); err != nil {
-		h.logger.Warn("failed to enqueue seed home page", "url", homeURL, "error", err)
+	// Also enqueue the URL immediately.
+	if err := h.frontier.Add(r.Context(), req.URL, 0, storage.PrioritySeed); err != nil {
+		h.logger.Warn("failed to enqueue seed url", "url", req.URL, "error", err)
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"message": "seed domain added",
-		"domain":  req.Domain,
+		"message": "seed url added",
+		"url":     req.URL,
 	})
 }
 
-// DeleteSeed removes a seed domain.
+// DeleteSeed removes a seed URL.
 func (h *Handlers) DeleteSeed(w http.ResponseWriter, r *http.Request) {
-	domain := r.PathValue("domain")
-	if domain == "" {
-		writeError(w, http.StatusBadRequest, "domain is required")
+	url := r.PathValue("url")
+	if url == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
 		return
 	}
 
-	if err := h.store.DeleteDomain(r.Context(), domain); err != nil {
-		h.logger.Error("failed to delete seed", "domain", domain, "error", err)
-		writeError(w, http.StatusNotFound, "domain not found")
+	if err := h.store.DeleteSeedURL(r.Context(), url); err != nil {
+		h.logger.Error("failed to delete seed", "url", url, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete seed")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message": "seed domain removed",
-		"domain":  domain,
+		"message": "seed url removed",
+		"url":     url,
 	})
 }
 

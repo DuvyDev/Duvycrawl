@@ -5,7 +5,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,11 +13,11 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	Crawler       CrawlerConfig       `yaml:"crawler"`
-	Storage       StorageConfig       `yaml:"storage"`
-	API           APIConfig           `yaml:"api"`
+	Crawler CrawlerConfig `yaml:"crawler"`
+	Storage StorageConfig `yaml:"storage"`
+	API     APIConfig     `yaml:"api"`
 	Logging       LoggingConfig       `yaml:"logging"`
-	Seeds         []SeedConfig        `yaml:"seeds"`
+	Seeds         []SeedURLConfig     `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
 	Embedder      EmbedderConfig      `yaml:"embedder"`
 }
@@ -44,10 +43,6 @@ type CrawlerConfig struct {
 	MaxPageSizeKB int `yaml:"max_page_size_kb"`
 	// RespectRobots controls whether robots.txt directives are honored.
 	RespectRobots bool `yaml:"respect_robots"`
-	// SeedDomainsOnly when true restricts crawling to seed domains only.
-	// Discovered links pointing to non-seed domains are discarded.
-	// When false, the crawler follows links freely across the web.
-	SeedDomainsOnly bool `yaml:"seed_domains_only"`
 	// ParallelismPerDomain is the maximum number of concurrent requests
 	// to the same domain. Higher values increase throughput for a single
 	// domain but be careful not to overwhelm servers. Default: 2.
@@ -76,16 +71,26 @@ type CrawlerConfig struct {
 	ScoringStrategy string `yaml:"scoring_strategy"`
 	// Adaptive holds the parameters for the adaptive scorer.
 	Adaptive AdaptiveConfig `yaml:"adaptive"`
+	// Scheduler holds the parameters for the re-crawl scheduler.
+	Scheduler SchedulerConfig `yaml:"scheduler"`
 }
 
-// SeedConfig represents a seed domain defined in the configuration file.
-type SeedConfig struct {
-	// Domain is the domain name (e.g. "github.com").
-	Domain string `yaml:"domain"`
-	// Priority controls crawl order. Higher = crawled sooner. Default: 100.
-	Priority int `yaml:"priority"`
-	// StartURLs are the initial pages to crawl. If empty, "https://<domain>/" is used.
-	StartURLs []string `yaml:"start_urls"`
+// SeedURLConfig represents a seed URL with its own re-crawl interval.
+type SeedURLConfig struct {
+	// URL is the seed URL to crawl periodically.
+	URL string `yaml:"url"`
+	// RecrawlInterval is how often this URL should be re-crawled.
+	// If zero, the scheduler's SeedRecrawlInterval is used.
+	RecrawlInterval time.Duration `yaml:"recrawl_interval"`
+}
+
+// SchedulerConfig holds tunable parameters for the re-crawl scheduler.
+type SchedulerConfig struct {
+	// TickInterval is how often the scheduler checks for stale seeds.
+	TickInterval time.Duration `yaml:"tick_interval"`
+	// SeedRecrawlInterval is the default re-crawl interval for seed URLs
+	// that do not specify their own.
+	SeedRecrawlInterval time.Duration `yaml:"seed_recrawl_interval"`
 }
 
 // InterestConfig represents a manually declared interest term with its weight.
@@ -101,7 +106,7 @@ type AdaptiveConfig struct {
 	// scorer behaves almost like the static strategy.
 	MinQueriesBeforeBoost int `yaml:"min_queries_before_boost"`
 	// DepthPenaltyK controls the sub-linear depth penalty:
-	// penalty = k * ln(1 + depth)
+	//   penalty = k * ln(1 + depth)
 	DepthPenaltyK float64 `yaml:"depth_penalty_k"`
 	// ProfileRefreshInterval is how often the in-memory interest profile is
 	// reloaded from SQLite.
@@ -177,7 +182,6 @@ func DefaultConfig() *Config {
 			UserAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
 			MaxPageSizeKB:            512,
 			RespectRobots:            false,
-			SeedDomainsOnly:          false,
 			ParallelismPerDomain:     4,
 			DisableCookies:           false,
 			MaxIdleConnsPerHost:      100,
@@ -196,6 +200,10 @@ func DefaultConfig() *Config {
 				DomainReputationWeight: 15.0,
 				LanguageMatchBonus:     35.0,
 			},
+			Scheduler: SchedulerConfig{
+				TickInterval:        10 * time.Minute,
+				SeedRecrawlInterval: 24 * time.Hour,
+			},
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",
@@ -208,8 +216,7 @@ func DefaultConfig() *Config {
 			Level:  "info",
 			Format: "text",
 		},
-		// Seeds default to empty — the hardcoded defaults from internal/seeds
-		// are used as fallback when no seeds are defined in the config.
+		// Seeds default to empty — they must be defined in the config.
 		Seeds: nil,
 		SearchIntents: SearchIntentsConfig{
 			SiteTypes: []string{
@@ -257,33 +264,6 @@ func Load(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
-	}
-
-	// Merge seeds from any YAML files in the <config-dir>/seeds/ folder.
-	seedsDir := filepath.Join(filepath.Dir(path), "seeds")
-	entries, err := os.ReadDir(seedsDir)
-	if err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := strings.ToLower(entry.Name())
-			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-				continue
-			}
-			seedPath := filepath.Join(seedsDir, entry.Name())
-			seedData, err := os.ReadFile(seedPath)
-			if err != nil {
-				continue // skip unreadable seed files
-			}
-			var partial struct {
-				Seeds []SeedConfig `yaml:"seeds"`
-			}
-			if err := yaml.Unmarshal(seedData, &partial); err != nil {
-				continue // skip malformed seed files
-			}
-			cfg.Seeds = append(cfg.Seeds, partial.Seeds...)
-		}
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -348,6 +328,22 @@ func (c *Config) validate() error {
 		}
 		if ic.Weight <= 0 {
 			return fmt.Errorf("crawler.adaptive.interests[%d].weight must be > 0, got %f", i, ic.Weight)
+		}
+	}
+
+	if c.Crawler.Scheduler.TickInterval < 1*time.Minute {
+		return fmt.Errorf("crawler.scheduler.tick_interval must be >= 1m, got %s", c.Crawler.Scheduler.TickInterval)
+	}
+	if c.Crawler.Scheduler.SeedRecrawlInterval < 1*time.Minute {
+		return fmt.Errorf("crawler.scheduler.seed_recrawl_interval must be >= 1m, got %s", c.Crawler.Scheduler.SeedRecrawlInterval)
+	}
+
+	for i, s := range c.Seeds {
+		if strings.TrimSpace(s.URL) == "" {
+			return fmt.Errorf("seeds[%d].url must not be empty", i)
+		}
+		if s.RecrawlInterval < 0 {
+			return fmt.Errorf("seeds[%d].recrawl_interval must be >= 0, got %s", i, s.RecrawlInterval)
 		}
 	}
 

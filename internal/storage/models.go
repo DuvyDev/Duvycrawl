@@ -32,7 +32,6 @@ type Page struct {
 	SchemaAuthor      string    `json:"schema_author,omitempty"`      // JSON-LD author name
 	SchemaKeywords    string    `json:"schema_keywords,omitempty"`    // JSON-LD keywords (comma-separated)
 	SchemaRating      float64   `json:"schema_rating,omitempty"`      // JSON-LD aggregateRating value
-	IsSeed            bool      `json:"is_seed"`                      // True if domain is a seed domain
 }
 
 // CrawlJob represents a URL queued for crawling in the frontier.
@@ -69,13 +68,22 @@ const (
 type Domain struct {
 	ID            int64     `json:"id"`
 	Domain        string    `json:"domain"`
-	IsSeed        bool      `json:"is_seed"`
 	RobotsTxt     string    `json:"-"` // Raw robots.txt content, excluded from JSON
 	RobotsFetched time.Time `json:"robots_fetched,omitempty"`
 	LastCrawled   time.Time `json:"last_crawled,omitempty"`
 	PagesCount    int       `json:"pages_count"`
 	AvgResponseMs int       `json:"avg_response_ms"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// SeedURL represents a seed URL with its own re-crawl schedule.
+type SeedURL struct {
+	ID                     int64     `json:"id"`
+	URL                    string    `json:"url"`
+	Domain                 string    `json:"domain"`
+	RecrawlIntervalSeconds int       `json:"recrawl_interval_seconds"`
+	LastEnqueued           time.Time `json:"last_enqueued,omitempty"`
+	CreatedAt              time.Time `json:"created_at"`
 }
 
 // SearchResult represents a single result from a full-text search query.

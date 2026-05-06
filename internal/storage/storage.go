@@ -110,11 +110,23 @@ type Storage interface {
 	// GetDomain retrieves a domain by its name.
 	GetDomain(ctx context.Context, domainName string) (*Domain, error)
 
-	// GetSeedDomains returns all domains marked as seeds.
-	GetSeedDomains(ctx context.Context) ([]Domain, error)
+	// --- Seed URL Operations ---
 
-	// DeleteDomain removes a domain from the seed list (sets is_seed = false).
-	DeleteDomain(ctx context.Context, domainName string) error
+	// GetSeedURLs returns all configured seed URLs.
+	GetSeedURLs(ctx context.Context) ([]SeedURL, error)
+
+	// UpsertSeedURL inserts a new seed URL or updates its recrawl interval.
+	UpsertSeedURL(ctx context.Context, seed *SeedURL) error
+
+	// DeleteSeedURL removes a seed URL by its exact URL.
+	DeleteSeedURL(ctx context.Context, url string) error
+
+	// GetStaleSeedURLs returns seed URLs whose last_enqueued + recrawl_interval
+	// has passed. These should be re-enqueued for crawling.
+	GetStaleSeedURLs(ctx context.Context, limit int) ([]SeedURL, error)
+
+	// UpdateSeedURLLastEnqueued updates the last_enqueued timestamp for a seed URL.
+	UpdateSeedURLLastEnqueued(ctx context.Context, url string, t time.Time) error
 
 	// --- Discovered Resources ---
 

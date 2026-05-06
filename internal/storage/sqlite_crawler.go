@@ -16,8 +16,8 @@ import (
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating, is_seed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
@@ -39,8 +39,7 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 			schema_image     = excluded.schema_image,
 			schema_author    = excluded.schema_author,
 			schema_keywords  = excluded.schema_keywords,
-			schema_rating    = excluded.schema_rating,
-			is_seed          = excluded.is_seed
+			schema_rating    = excluded.schema_rating
 	`
 
 	var publishedAt any
@@ -58,7 +57,7 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 		page.StatusCode, page.ContentHash, page.URLFingerprint,
 		publishedAt, page.CrawledAt,
 		page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
-		page.SchemaAuthor, page.SchemaKeywords, schemaRating, page.IsSeed,
+		page.SchemaAuthor, page.SchemaKeywords, schemaRating,
 	)
 	if err != nil {
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
@@ -597,10 +596,9 @@ func (s *SQLiteStorage) FilterExistingFingerprints(ctx context.Context, fingerpr
 // UpsertDomain inserts a new domain or updates an existing one.
 func (s *SQLiteStorage) UpsertDomain(ctx context.Context, domain *Domain) error {
 	query := `
-		INSERT INTO domains (domain, is_seed, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO domains (domain, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(domain) DO UPDATE SET
-			is_seed         = excluded.is_seed,
 			robots_txt      = CASE WHEN excluded.robots_txt != '' THEN excluded.robots_txt ELSE domains.robots_txt END,
 			robots_fetched  = CASE WHEN excluded.robots_fetched IS NOT NULL THEN excluded.robots_fetched ELSE domains.robots_fetched END,
 			last_crawled    = CASE WHEN excluded.last_crawled IS NOT NULL THEN excluded.last_crawled ELSE domains.last_crawled END,
@@ -617,7 +615,7 @@ func (s *SQLiteStorage) UpsertDomain(ctx context.Context, domain *Domain) error 
 	}
 
 	_, err := s.crawlerDB.ExecContext(ctx, query,
-		domain.Domain, domain.IsSeed, domain.RobotsTxt,
+		domain.Domain, domain.RobotsTxt,
 		robotsFetched, lastCrawled,
 		domain.PagesCount, domain.AvgResponseMs,
 	)
@@ -633,10 +631,10 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 	var robotsFetched, lastCrawled, createdAt sql.NullTime
 
 	err := s.crawlerDB.QueryRowContext(ctx, `
-		SELECT id, domain, is_seed, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
+		SELECT id, domain, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
 		FROM domains WHERE domain = ?
 	`, domainName).Scan(
-		&d.ID, &d.Domain, &d.IsSeed, &d.RobotsTxt,
+		&d.ID, &d.Domain, &d.RobotsTxt,
 		&robotsFetched, &lastCrawled, &d.PagesCount,
 		&d.AvgResponseMs, &createdAt,
 	)
@@ -659,48 +657,102 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 	return &d, nil
 }
 
-// GetSeedDomains returns all domains marked as seeds.
-func (s *SQLiteStorage) GetSeedDomains(ctx context.Context) ([]Domain, error) {
+// --------------------------------------------------------------------------
+// Seed URL Operations
+// --------------------------------------------------------------------------
+
+// GetSeedURLs returns all configured seed URLs.
+func (s *SQLiteStorage) GetSeedURLs(ctx context.Context) ([]SeedURL, error) {
 	rows, err := s.crawlerDB.QueryContext(ctx, `
-		SELECT id, domain, is_seed, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
-		FROM domains WHERE is_seed = TRUE
-		ORDER BY domain ASC
+		SELECT id, url, domain, recrawl_interval_seconds, last_enqueued, created_at
+		FROM seed_urls
+		ORDER BY created_at ASC
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("querying seed domains: %w", err)
+		return nil, fmt.Errorf("querying seed urls: %w", err)
 	}
 	defer rows.Close()
 
-	var domains []Domain
+	var seeds []SeedURL
 	for rows.Next() {
-		var d Domain
-		var robotsFetched, lastCrawled, createdAt sql.NullTime
-		if err := rows.Scan(&d.ID, &d.Domain, &d.IsSeed, &robotsFetched, &lastCrawled, &d.PagesCount, &d.AvgResponseMs, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning seed domain: %w", err)
+		var seed SeedURL
+		var lastEnqueued, createdAt sql.NullTime
+		if err := rows.Scan(&seed.ID, &seed.URL, &seed.Domain, &seed.RecrawlIntervalSeconds, &lastEnqueued, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning seed url: %w", err)
 		}
-		if robotsFetched.Valid {
-			d.RobotsFetched = robotsFetched.Time
-		}
-		if lastCrawled.Valid {
-			d.LastCrawled = lastCrawled.Time
+		if lastEnqueued.Valid {
+			seed.LastEnqueued = lastEnqueued.Time
 		}
 		if createdAt.Valid {
-			d.CreatedAt = createdAt.Time
+			seed.CreatedAt = createdAt.Time
 		}
-		domains = append(domains, d)
+		seeds = append(seeds, seed)
 	}
-	return domains, rows.Err()
+	return seeds, rows.Err()
 }
 
-// DeleteDomain removes a domain from the seed list (sets is_seed = false).
-func (s *SQLiteStorage) DeleteDomain(ctx context.Context, domainName string) error {
-	result, err := s.crawlerDB.ExecContext(ctx, `UPDATE domains SET is_seed = FALSE WHERE domain = ?`, domainName)
+// UpsertSeedURL inserts a new seed URL or updates its recrawl interval.
+func (s *SQLiteStorage) UpsertSeedURL(ctx context.Context, seed *SeedURL) error {
+	_, err := s.crawlerDB.ExecContext(ctx, `
+		INSERT INTO seed_urls (url, domain, recrawl_interval_seconds, last_enqueued)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET
+			recrawl_interval_seconds = excluded.recrawl_interval_seconds
+	`, seed.URL, seed.Domain, seed.RecrawlIntervalSeconds, seed.LastEnqueued)
 	if err != nil {
-		return fmt.Errorf("deleting domain %q: %w", domainName, err)
+		return fmt.Errorf("upserting seed url %q: %w", seed.URL, err)
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("domain %q not found", domainName)
+	return nil
+}
+
+// DeleteSeedURL removes a seed URL by its exact URL.
+func (s *SQLiteStorage) DeleteSeedURL(ctx context.Context, url string) error {
+	_, err := s.crawlerDB.ExecContext(ctx, `DELETE FROM seed_urls WHERE url = ?`, url)
+	if err != nil {
+		return fmt.Errorf("deleting seed url %q: %w", url, err)
+	}
+	return nil
+}
+
+// GetStaleSeedURLs returns seed URLs whose last_enqueued + recrawl_interval has passed.
+func (s *SQLiteStorage) GetStaleSeedURLs(ctx context.Context, limit int) ([]SeedURL, error) {
+	rows, err := s.crawlerDB.QueryContext(ctx, `
+		SELECT id, url, domain, recrawl_interval_seconds, last_enqueued, created_at
+		FROM seed_urls
+		WHERE COALESCE(last_enqueued, '1970-01-01') < datetime('now', '-' || recrawl_interval_seconds || ' seconds')
+		ORDER BY COALESCE(last_enqueued, '1970-01-01') ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying stale seed urls: %w", err)
+	}
+	defer rows.Close()
+
+	var seeds []SeedURL
+	for rows.Next() {
+		var seed SeedURL
+		var lastEnqueued, createdAt sql.NullTime
+		if err := rows.Scan(&seed.ID, &seed.URL, &seed.Domain, &seed.RecrawlIntervalSeconds, &lastEnqueued, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning stale seed url: %w", err)
+		}
+		if lastEnqueued.Valid {
+			seed.LastEnqueued = lastEnqueued.Time
+		}
+		if createdAt.Valid {
+			seed.CreatedAt = createdAt.Time
+		}
+		seeds = append(seeds, seed)
+	}
+	return seeds, rows.Err()
+}
+
+// UpdateSeedURLLastEnqueued updates the last_enqueued timestamp for a seed URL.
+func (s *SQLiteStorage) UpdateSeedURLLastEnqueued(ctx context.Context, url string, t time.Time) error {
+	_, err := s.crawlerDB.ExecContext(ctx, `
+		UPDATE seed_urls SET last_enqueued = ? WHERE url = ?
+	`, t, url)
+	if err != nil {
+		return fmt.Errorf("updating last_enqueued for seed url %q: %w", url, err)
 	}
 	return nil
 }

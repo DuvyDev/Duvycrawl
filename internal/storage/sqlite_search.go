@@ -542,7 +542,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		" + CASE WHEN LOWER(p.url) LIKE ? THEN 100.0 ELSE 0 END" +
 		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 1 THEN 500.0 ELSE 0 END" +
 		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) BETWEEN 2 AND 3 THEN 150.0 ELSE 0 END" +
-		" + CASE WHEN p.is_seed = 1 THEN 40.0 ELSE 0 END" +
 		" + MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))"
 
 	urlContains := "%" + query.lowered + "%"
@@ -601,7 +600,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			p.published_at,
 			p.updated_at,
 			m.sql_score,
-			p.is_seed,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
 			p.schema_image,
@@ -637,7 +635,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			crawledAt      sql.NullTime
 			publishedAtStr sql.NullString
 			updatedAtStr   sql.NullString
-			seedFlag       int
 			snippetText    sql.NullString
 			clicksCount    int
 		)
@@ -657,7 +654,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			&publishedAtStr,
 			&updatedAtStr,
 			&candidate.sqlScore,
-			&seedFlag,
 			&candidate.contentLen,
 			&candidate.SchemaType,
 			&candidate.SchemaImage,
@@ -677,7 +673,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			candidate.Snippet = candidate.Description
 		}
 		candidate.mode = mode
-		candidate.isSeed = seedFlag == 1
 		if crawledAt.Valid {
 			candidate.CrawledAt = crawledAt.Time
 		}
@@ -760,11 +755,9 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
 				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
 				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 500.0 ELSE 0 END
-				+ CASE WHEN p.is_seed = 1 THEN 20.0 ELSE 0 END
 				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
 				+ CASE WHEN ? != '' AND p.language = ? THEN 20.0 ELSE 0 END
 			) AS sql_score,
-			p.is_seed,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
 			p.schema_image,
@@ -824,7 +817,6 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			crawledAt      sql.NullTime
 			publishedAtStr sql.NullString
 			updatedAtStr   sql.NullString
-			seedFlag       int
 			snippetText    sql.NullString
 			clicksCount    int
 		)
@@ -844,7 +836,6 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&publishedAtStr,
 			&updatedAtStr,
 			&candidate.sqlScore,
-			&seedFlag,
 			&candidate.contentLen,
 			&candidate.SchemaType,
 			&candidate.SchemaImage,
@@ -861,7 +852,6 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 
 		candidate.Snippet = snippetText.String
 		candidate.mode = searchModeNavigational
-		candidate.isSeed = seedFlag == 1
 		if crawledAt.Valid {
 			candidate.CrawledAt = crawledAt.Time
 		}
@@ -1028,9 +1018,6 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 	if lang != "" && candidate.Language == lang {
 		score += 60.0
-	}
-	if candidate.isSeed {
-		score += 35.0
 	}
 	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAtTime)
 	score += searchContentLengthScore(candidate.contentLen)

@@ -125,7 +125,6 @@ func (ds *DomainStatsCollector) flush() error {
 		avgMs := int(acc.totalDuration.Milliseconds() / int64(acc.pagesCount))
 
 		if existing != nil {
-			d.IsSeed = existing.IsSeed
 			d.RobotsTxt = existing.RobotsTxt
 			d.RobotsFetched = existing.RobotsFetched
 			d.PagesCount = existing.PagesCount + acc.pagesCount
