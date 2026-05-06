@@ -37,6 +37,7 @@ type SQLiteStorage struct {
 	embedder        *embedder.Client
 	siteTypes       map[string]struct{}
 	platformDomains map[string]struct{}
+	spellChecker    *SpellChecker
 }
 
 // ... skipped types, keeping them below ...
@@ -203,7 +204,11 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		graphDB:        graphDB,
 		logger:         logger.With("component", "storage"),
 		dataDir:        dir,
+		spellChecker:   NewSpellChecker(logger),
 	}
+
+	// Start loading the spell checker vocabulary and reload it every 2 hours
+	s.spellChecker.StartPeriodicReload(context.Background(), readContentDB, 2*time.Hour)
 
 	logger.Info("SQLite storage initialized (Multi-DB Architecture)",
 		"dir", dir,

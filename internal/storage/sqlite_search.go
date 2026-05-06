@@ -95,7 +95,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	// --- Fallback to Vocabulary Spell Correction ---
 	// Only apply if the query is a single word and FTS found nothing.
 	if len(candidates) == 0 && searchCtx.Err() == nil && len(q.tokens) == 1 {
-		correctedTerm := s.suggestCorrectTerm(searchCtx, q.tokens[0])
+		correctedTerm := s.spellChecker.Suggest(q.tokens[0])
 		if correctedTerm != "" && correctedTerm != q.tokens[0] {
 			s.logger.Info("auto-correcting typo", "original", q.tokens[0], "corrected", correctedTerm)
 			
@@ -1823,106 +1823,7 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	return results
 }
 
-func (s *SQLiteStorage) suggestCorrectTerm(ctx context.Context, word string) string {
-	word = strings.ToLower(strings.TrimSpace(word))
-	runes := []rune(word)
-	if len(runes) < 4 {
-		return ""
-	}
 
-	// We take the first 3 characters as a prefix to search the vocabulary.
-	// We can try first 4 characters, but 3 gives more tolerance for typos in 4th char.
-	// But 3 chars prefix might match too many terms. Let's try 4 if len > 5.
-	prefixLen := 3
-	if len(runes) > 6 {
-		prefixLen = 4
-	}
-	prefix := string(runes[:prefixLen])
-
-	// Query vocabulary
-	query := `SELECT term, doc FROM pages_fts_vocab WHERE term >= ? AND term < ? ORDER BY doc DESC LIMIT 200`
-	endPrefix := prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1)
-
-	rows, err := s.readContentDB.QueryContext(ctx, query, prefix, endPrefix)
-	if err != nil {
-		s.logger.Warn("failed to query vocab for suggestion", "error", err)
-		return ""
-	}
-	defer rows.Close()
-
-	var bestTerm string
-	var bestScore float64 = -1.0
-	minDist := 100
-
-	maxAllowedDist := 2
-	if len(runes) > 8 {
-		maxAllowedDist = 3
-	}
-
-	for rows.Next() {
-		var term string
-		var doc int
-		if err := rows.Scan(&term, &doc); err != nil {
-			continue
-		}
-
-		dist := levenshtein(word, term)
-		if dist <= maxAllowedDist {
-			// Score formula: favor smaller distance heavily, tie-break with doc frequency.
-			// Lower distance is better. Higher doc count is better.
-			score := 1000.0/float64(dist+1) + float64(doc)
-			if dist < minDist || (dist == minDist && score > bestScore) {
-				minDist = dist
-				bestScore = score
-				bestTerm = term
-			}
-		}
-	}
-
-	return bestTerm
-}
-
-func levenshtein(a, b string) int {
-	if len(a) == 0 {
-		return len([]rune(b))
-	}
-	if len(b) == 0 {
-		return len([]rune(a))
-	}
-
-	s1 := []rune(a)
-	s2 := []rune(b)
-
-	lenS1 := len(s1)
-	lenS2 := len(s2)
-
-	d := make([][]int, lenS1+1)
-	for i := range d {
-		d[i] = make([]int, lenS2+1)
-	}
-
-	for i := 0; i <= lenS1; i++ {
-		d[i][0] = i
-	}
-	for j := 0; j <= lenS2; j++ {
-		d[0][j] = j
-	}
-
-	for i := 1; i <= lenS1; i++ {
-		for j := 1; j <= lenS2; j++ {
-			cost := 1
-			if s1[i-1] == s2[j-1] {
-				cost = 0
-			}
-			d[i][j] = min(
-				d[i-1][j]+1,      // deletion
-				d[i][j-1]+1,      // insertion
-				d[i-1][j-1]+cost, // substitution
-			)
-		}
-	}
-	return d[lenS1][lenS2]
-}
 
 func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url string) error {
 	normalizedQuery := normalizeSearchText(query)
