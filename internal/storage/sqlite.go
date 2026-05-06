@@ -52,7 +52,6 @@ const (
 	searchModeFTSCore      searchMode = "fts_core"
 	searchModeFTSCore2     searchMode = "fts_core2"
 	searchModeFTSRelaxed   searchMode = "fts_relaxed"
-	searchModeFuzzy        searchMode = "fuzzy"
 )
 
 type searchQuery struct {

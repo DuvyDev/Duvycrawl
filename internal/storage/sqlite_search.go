@@ -92,23 +92,56 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		}
 	}
 
-	// --- Fallback to fuzzy LIKE-based search if FTS found nothing ---
-	// Only apply fuzzy search if the query is a single word to avoid polluting multi-word searches.
+	// --- Fallback to Vocabulary Spell Correction ---
+	// Only apply if the query is a single word and FTS found nothing.
 	if len(candidates) == 0 && searchCtx.Err() == nil && len(q.tokens) == 1 {
-		results, fuzzyTotal, err := s.searchFuzzyCandidates(searchCtx, q, lang, candidateLimit)
-		if err != nil {
-			if searchCtx.Err() != nil {
-				return nil, 0, fmt.Errorf("search timed out for %q", query)
+		correctedTerm := s.suggestCorrectTerm(searchCtx, q.tokens[0])
+		if correctedTerm != "" && correctedTerm != q.tokens[0] {
+			s.logger.Info("auto-correcting typo", "original", q.tokens[0], "corrected", correctedTerm)
+			
+			// Re-create the query with the corrected term
+			qCorrect := s.newSearchQuery(correctedTerm)
+			if qCorrect.normalized != "" {
+				qCorrect.idfMap, _ = s.getSearchIDFMap(searchCtx, qCorrect.tokens)
+				
+				// Re-run FTS Exact and Prefix searches for the corrected term
+				fallbackPlans := []struct {
+					mode     searchMode
+					ftsQuery string
+				}{
+					{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(qCorrect.tokens)},
+					{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(qCorrect.tokens)},
+				}
+				
+				for _, plan := range fallbackPlans {
+					if searchCtx.Err() != nil {
+						break
+					}
+					if plan.ftsQuery == "" {
+						continue
+					}
+					count, err := s.countFTSCandidates(searchCtx, plan.ftsQuery)
+					if err != nil || count == 0 {
+						continue
+					}
+					
+					results, err := s.searchFTSCandidates(searchCtx, plan.mode, plan.ftsQuery, qCorrect, lang, candidateLimit)
+					if err == nil && len(results) > 0 {
+						candidates = mergeSearchCandidates(candidates, results)
+						total += count
+						if selectedMode == "" {
+							selectedMode = plan.mode
+						}
+						break
+					}
+				}
+				
+				// Update q to qCorrect so re-ranking uses the correct token!
+				if len(candidates) > 0 {
+					q = qCorrect
+				}
 			}
-			return nil, 0, fmt.Errorf("searching fuzzy candidates for %q: %w", query, err)
 		}
-		if len(results) == 0 {
-			return nil, 0, nil
-		}
-
-		candidates = results
-		total = fuzzyTotal
-		selectedMode = searchModeFuzzy
 	}
 
 	// --- Navigational boost when FTS/fuzzy gave few results ---
@@ -163,6 +196,14 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
+	s.logger.Debug("search query debug",
+		"raw", q.raw,
+		"navTerm", q.navTerm,
+		"domainLike", q.domainLike,
+		"navigational", q.navigational,
+		"tokens", strings.Join(q.tokens, ","),
+	)
+
 	// Debug: log top candidates with their computed scores.
 	if len(reranked) > 0 {
 		debugCount := min(5, len(reranked))
@@ -208,7 +249,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		reranked = diversifyByDomain(reranked)
 	}
 
-	if selectedMode == searchModeFuzzy || domain != "" || schemaType != "" {
+	if domain != "" || schemaType != "" {
 		total = len(reranked)
 	} else if total < len(reranked) {
 		total = len(reranked)
@@ -309,8 +350,18 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 	if domainLike != "" {
 		navTerm = strings.ReplaceAll(normalizeSearchText(classifySearchDomain(domainLike).rootLabel), " ", "")
 	}
-	if navTerm == "" && len(tokens) == 1 {
-		navTerm = tokens[0]
+	if navTerm == "" && len(tokens) >= 1 {
+		if len(tokens) == 1 {
+			navTerm = tokens[0]
+		} else {
+			// Compound domain detection: "uruguay concursa" -> "uruguayconcursa".
+			// This catches domains like uruguayconcursa.gub.uy that concatenate
+			// words without dots or hyphens.
+			compactNav := strings.Join(tokens, "")
+			if len(compactNav) >= 6 {
+				navTerm = compactNav
+			}
+		}
 	}
 
 	// Detect site-type intent and platform intent.
@@ -379,6 +430,13 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		}
 	}
 
+	s.logger.Debug("search query debug",
+		"raw", query,
+		"navTerm", navTerm,
+		"domainLike", domainLike,
+		"navigational", navTerm != "" || domainLike != "",
+		"tokens", strings.Join(searchTokens, ","),
+	)
 	return searchQuery{
 		raw:            query,
 		lowered:        strings.ToLower(strings.TrimSpace(query)),
@@ -649,182 +707,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	return candidates, nil
 }
 
-func (s *SQLiteStorage) searchFuzzyCandidates(ctx context.Context, query searchQuery, lang string, limit int) ([]searchCandidate, int, error) {
-	if len(query.fragments) == 0 {
-		return nil, 0, nil
-	}
 
-	var whereParts []string
-	var whereArgs []any
-	var scoreParts []string
-	var scoreArgs []any
-
-	for _, fragment := range query.fragments {
-		like := "%" + fragment + "%"
-		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.h1) LIKE ? OR LOWER(p.h2) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
-		whereArgs = append(whereArgs, like, like, like, like, like)
-		scoreParts = append(scoreParts,
-			"CASE WHEN LOWER(p.title) LIKE ? THEN 12.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.h1) LIKE ? THEN 8.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.h2) LIKE ? THEN 8.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.domain) LIKE ? THEN 16.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.url) LIKE ? THEN 6.0 ELSE 0 END",
-		)
-		scoreArgs = append(scoreArgs, like, like, like, like, like)
-	}
-
-	if query.navTerm != "" {
-		navLike := "%" + query.navTerm + "%"
-		whereParts = append(whereParts, "(LOWER(p.title) LIKE ? OR LOWER(p.h1) LIKE ? OR LOWER(p.h2) LIKE ? OR LOWER(p.domain) LIKE ? OR LOWER(p.url) LIKE ?)")
-		whereArgs = append(whereArgs, navLike, navLike, navLike, navLike, navLike)
-		scoreParts = append(scoreParts,
-			"CASE WHEN LOWER(p.title) LIKE ? THEN 20.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.h1) LIKE ? THEN 16.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.h2) LIKE ? THEN 16.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.domain) LIKE ? THEN 40.0 ELSE 0 END",
-			"CASE WHEN LOWER(p.url) LIKE ? THEN 12.0 ELSE 0 END",
-		)
-		scoreArgs = append(scoreArgs, navLike, navLike, navLike, navLike, navLike)
-	}
-
-	if len(whereParts) == 0 {
-		return nil, 0, nil
-	}
-
-	whereClause := strings.Join(whereParts, " OR ")
-
-	querySQL := fmt.Sprintf(`
-		SELECT
-			p.id,
-			p.url,
-			p.title,
-			p.h1,
-			p.h2,
-			p.description,
-			CASE
-				WHEN p.description != '' THEN SUBSTR(p.description, 1, 240)
-				ELSE ''
-			END AS snippet,
-			p.domain,
-			p.language,
-			p.region,
-			p.crawled_at,
-			p.published_at,
-			p.updated_at,
-			(%s
-				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 50.0 ELSE 0 END
-				+ CASE WHEN p.is_seed = 1 THEN 20.0 ELSE 0 END
-				+ MAX(0.0, 15.0 - 0.15 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
-				%s
-			) AS sql_score,
-			p.is_seed,
-			LENGTH(p.content) AS content_len,
-			COUNT(*) OVER() AS total_count,
-			p.schema_type,
-			p.schema_image,
-			p.schema_author,
-			p.schema_keywords,
-			p.schema_rating,
-			p.referring_domains,
-			COALESCE(p.pagerank, 1.0) AS pagerank,
-			COALESCE(sc.clicks, 0) AS clicks
-		FROM pages p
-		
-		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
-		WHERE %s
-		ORDER BY (sql_score + COALESCE(sc.clicks, 0) * 150.0) DESC, p.crawled_at DESC
-		LIMIT ?
-	`, strings.Join(scoreParts, " + "), fuzzyLanguageSQL(lang), whereClause)
-
-	args := append([]any{}, scoreArgs...)
-	if lang != "" {
-		args = append(args, lang)
-	}
-	args = append(args, query.raw)
-	args = append(args, whereArgs...)
-	args = append(args, limit)
-
-	rows, err := s.readContentDB.QueryContext(ctx, querySQL, args...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("querying fuzzy candidates: %w", err)
-	}
-	defer rows.Close()
-
-	var candidates []searchCandidate
-	var totalCount int
-	for rows.Next() {
-		var (
-			candidate      searchCandidate
-			crawledAt      sql.NullTime
-			publishedAtStr sql.NullString
-			updatedAtStr   sql.NullString
-			seedFlag       int
-			snippetText    sql.NullString
-			clicksCount    int
-		)
-		var schemaRating sql.NullFloat64
-		if err := rows.Scan(
-			&candidate.ID,
-			&candidate.URL,
-			&candidate.Title,
-			&candidate.H1,
-			&candidate.H2,
-			&candidate.Description,
-			&snippetText,
-			&candidate.Domain,
-			&candidate.Language,
-			&candidate.Region,
-			&crawledAt,
-			&publishedAtStr,
-			&updatedAtStr,
-			&candidate.sqlScore,
-			&seedFlag,
-			&candidate.contentLen,
-			&totalCount,
-			&candidate.SchemaType,
-			&candidate.SchemaImage,
-			&candidate.SchemaAuthor,
-			&candidate.SchemaKeywords,
-			&schemaRating,
-			&candidate.ReferringDomains,
-			&candidate.PageRank,
-			&clicksCount,
-		); err != nil {
-			return nil, 0, fmt.Errorf("scanning fuzzy candidate: %w", err)
-		}
-		candidate.sqlScore += float64(clicksCount) * 150.0
-
-		candidate.Snippet = snippetText.String
-		candidate.mode = searchModeFuzzy
-		candidate.isSeed = seedFlag == 1
-		if crawledAt.Valid {
-			candidate.CrawledAt = crawledAt.Time
-		}
-		if publishedAtStr.Valid && publishedAtStr.String != "" {
-			t := parseFlexibleTime(publishedAtStr.String)
-			if !t.IsZero() {
-				candidate.publishedAtTime = t
-				candidate.PublishedAt = &t
-			}
-		}
-		if updatedAtStr.Valid && updatedAtStr.String != "" {
-			t := parseFlexibleTime(updatedAtStr.String)
-			if !t.IsZero() {
-				candidate.UpdatedAt = &t
-			}
-		}
-		if schemaRating.Valid {
-			candidate.SchemaRating = schemaRating.Float64
-		}
-		candidates = append(candidates, candidate)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterating fuzzy candidates: %w", err)
-	}
-
-	return candidates, totalCount, nil
-}
 
 func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query searchQuery, lang string, limit int) ([]searchCandidate, error) {
 	if limit <= 0 {
@@ -1166,15 +1049,15 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 		if candidateDomain == matchDomain {
 			// e.g. query="reddit.com" → reddit.com, or query="reddit" → reddit (root domain only)
-			score += 5000.0
+			score += 8000.0
 			if isHomepage {
-				score += 3000.0
+				score += 6000.0
 			}
 		} else if domainInfo.isRootDomain && domainInfo.rootLabel == matchDomain {
 			// e.g. query="reddit" → reddit.com, reddit.org, reddit.co.uk (any valid TLD)
-			score += 4000.0
+			score += 6000.0
 			if isHomepage {
-				score += 2500.0
+				score += 5000.0
 			}
 		}
 	}
@@ -1234,13 +1117,7 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		}
 	}
 
-	if candidate.mode == searchModeFuzzy {
-		strongestPhrase := max(max(titlePhrase, h1Phrase), max(max(h2Phrase, descPhrase), domainPhrase))
-		strongestToken := max(weightedFieldAvg, max(domainAvg, urlAvg))
-		if strongestPhrase < 0.72 && strongestToken < 0.78 {
-			return 0, false
-		}
-	}
+
 
 	return score, true
 }
@@ -1944,6 +1821,107 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 		results = append(results, candidate)
 	}
 	return results
+}
+
+func (s *SQLiteStorage) suggestCorrectTerm(ctx context.Context, word string) string {
+	word = strings.ToLower(strings.TrimSpace(word))
+	runes := []rune(word)
+	if len(runes) < 4 {
+		return ""
+	}
+
+	// We take the first 3 characters as a prefix to search the vocabulary.
+	// We can try first 4 characters, but 3 gives more tolerance for typos in 4th char.
+	// But 3 chars prefix might match too many terms. Let's try 4 if len > 5.
+	prefixLen := 3
+	if len(runes) > 6 {
+		prefixLen = 4
+	}
+	prefix := string(runes[:prefixLen])
+
+	// Query vocabulary
+	query := `SELECT term, doc FROM pages_fts_vocab WHERE term >= ? AND term < ? ORDER BY doc DESC LIMIT 200`
+	endPrefix := prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1)
+
+	rows, err := s.readContentDB.QueryContext(ctx, query, prefix, endPrefix)
+	if err != nil {
+		s.logger.Warn("failed to query vocab for suggestion", "error", err)
+		return ""
+	}
+	defer rows.Close()
+
+	var bestTerm string
+	var bestScore float64 = -1.0
+	minDist := 100
+
+	maxAllowedDist := 2
+	if len(runes) > 8 {
+		maxAllowedDist = 3
+	}
+
+	for rows.Next() {
+		var term string
+		var doc int
+		if err := rows.Scan(&term, &doc); err != nil {
+			continue
+		}
+
+		dist := levenshtein(word, term)
+		if dist <= maxAllowedDist {
+			// Score formula: favor smaller distance heavily, tie-break with doc frequency.
+			// Lower distance is better. Higher doc count is better.
+			score := 1000.0/float64(dist+1) + float64(doc)
+			if dist < minDist || (dist == minDist && score > bestScore) {
+				minDist = dist
+				bestScore = score
+				bestTerm = term
+			}
+		}
+	}
+
+	return bestTerm
+}
+
+func levenshtein(a, b string) int {
+	if len(a) == 0 {
+		return len([]rune(b))
+	}
+	if len(b) == 0 {
+		return len([]rune(a))
+	}
+
+	s1 := []rune(a)
+	s2 := []rune(b)
+
+	lenS1 := len(s1)
+	lenS2 := len(s2)
+
+	d := make([][]int, lenS1+1)
+	for i := range d {
+		d[i] = make([]int, lenS2+1)
+	}
+
+	for i := 0; i <= lenS1; i++ {
+		d[i][0] = i
+	}
+	for j := 0; j <= lenS2; j++ {
+		d[0][j] = j
+	}
+
+	for i := 1; i <= lenS1; i++ {
+		for j := 1; j <= lenS2; j++ {
+			cost := 1
+			if s1[i-1] == s2[j-1] {
+				cost = 0
+			}
+			d[i][j] = min(
+				d[i-1][j]+1,      // deletion
+				d[i][j-1]+1,      // insertion
+				d[i-1][j-1]+cost, // substitution
+			)
+		}
+	}
+	return d[lenS1][lenS2]
 }
 
 func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url string) error {
