@@ -13,9 +13,9 @@ import (
 
 // Config holds the complete application configuration.
 type Config struct {
-	Crawler CrawlerConfig `yaml:"crawler"`
-	Storage StorageConfig `yaml:"storage"`
-	API     APIConfig     `yaml:"api"`
+	Crawler       CrawlerConfig       `yaml:"crawler"`
+	Storage       StorageConfig       `yaml:"storage"`
+	API           APIConfig           `yaml:"api"`
 	Logging       LoggingConfig       `yaml:"logging"`
 	Seeds         []SeedURLConfig     `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`

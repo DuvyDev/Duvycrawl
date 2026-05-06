@@ -479,10 +479,12 @@ func isBinaryExtension(rawURL string) bool {
 	case ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
 		".zip", ".tar", ".gz", ".rar", ".7z",
 		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
+		".tif", ".tiff", ".heic", ".heif", ".avif", ".apng",
 		".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".wav",
 		".exe", ".msi", ".dmg", ".apk", ".deb", ".rpm",
 		".woff", ".woff2", ".ttf", ".eot", ".otf",
-		".iso", ".bin", ".img":
+		".wasm", ".swf", ".map", ".mjs",
+		".webmanifest", ".iso", ".bin", ".img":
 		return true
 	}
 	return false

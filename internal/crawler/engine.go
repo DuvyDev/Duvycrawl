@@ -470,6 +470,9 @@ func (e *Engine) processDiscoveryOnly(ctx context.Context, logger *slog.Logger, 
 
 	var anchors []LinkAnchor
 	for _, l := range links {
+		if isBinaryExtension(l) {
+			continue
+		}
 		if frontier.ExtractDomain(l) == job.Domain {
 			anchors = append(anchors, LinkAnchor{URL: l})
 		}

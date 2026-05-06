@@ -280,7 +280,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 	}
 
 	req.Header.Set("User-Agent", f.userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	// NOTE: Do NOT manually set Accept-Encoding. Go's http.Transport with
 	// DisableCompression=false automatically adds "Accept-Encoding: gzip" and

@@ -349,8 +349,8 @@ func (h *Handlers) SearchImages(w http.ResponseWriter, r *http.Request) {
 // --- Seeds ---
 
 type seedURLRequest struct {
-	URL              string        `json:"url"`
-	RecrawlInterval  time.Duration `json:"recrawl_interval,omitempty"`
+	URL             string        `json:"url"`
+	RecrawlInterval time.Duration `json:"recrawl_interval,omitempty"`
 }
 
 // ListSeeds returns all seed URLs.

@@ -167,6 +167,10 @@ seeds:
     recrawl_interval: 24h
   - url: "https://wiki.warframe.com/"
     recrawl_interval: 168h
+  - url: "https://warframe.market/"
+    recrawl_interval: 168h
+  - url: "https://mapgenie.io/"
+    recrawl_interval: 168h
   - url: "https://warframe.fandom.com/wiki/WARFRAME_Wiki"
     recrawl_interval: 72h
   - url: "https://marvelrivals.gg/"

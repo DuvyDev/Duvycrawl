@@ -61,6 +61,9 @@ func extractWithRegexes(body []byte, baseURL string, regexes ...*regexp.Regexp) 
 			if _, ok := seen[resolved]; ok {
 				continue
 			}
+			if isBinaryExtension(resolved) {
+				continue
+			}
 			seen[resolved] = struct{}{}
 			out = append(out, resolved)
 		}
