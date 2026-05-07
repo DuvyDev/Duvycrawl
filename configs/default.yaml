@@ -88,11 +88,11 @@ crawler:
 # the primary path. Enable only when you also provide a local Chromium/Chrome
 # executable or a remote CDP endpoint such as a browser sidecar in Docker.
 rendering:
-  enabled: false
+  enabled: true
   # auto = render only weak HTTP results, force = render all HTML, disabled = off
   mode: auto
   # Docker sidecar example: ws://browser:3000
-  browser_ws_url: ""
+  browser_ws_url: "ws://browser:3000"
   # Local dev override, e.g. C:\Program Files\Google\Chrome\Application\chrome.exe
   executable_path: ""
   max_concurrency: 2

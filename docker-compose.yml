@@ -55,9 +55,6 @@ services:
     restart: unless-stopped
     environment:
       - TZ=${TZ}
-      - RENDERING_ENABLED=${RENDERING_ENABLED:-false}
-      - RENDERING_MODE=${RENDERING_MODE:-auto}
-      - BROWSER_WS_URL=${BROWSER_WS_URL:-}
     volumes:
       - ./crawl/data:/app/data
       - ./crawl/configs:/app/configs:ro
@@ -84,6 +81,7 @@ services:
     environment:
       - CONCURRENT=3
       - TIMEOUT=30000
+      - EXTERNAL=http://browser:3000
     networks:
       - duvycrawl
 

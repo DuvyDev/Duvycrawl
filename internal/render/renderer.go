@@ -52,7 +52,7 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, logger *sl
 	var cancel context.CancelFunc
 
 	if cfg.BrowserWSURL != "" {
-		allocCtx, cancel = chromedp.NewRemoteAllocator(baseCtx, cfg.BrowserWSURL)
+		allocCtx, cancel = chromedp.NewRemoteAllocator(baseCtx, cfg.BrowserWSURL, chromedp.NoModifyURL)
 	} else {
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.Flag("headless", true),
