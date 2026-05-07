@@ -8,10 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 	"github.com/temoto/robotstxt"
 )
 
@@ -221,25 +221,5 @@ func (rc *RobotsCache) ClearDomain(domain string) {
 // isDisallowedPath checks if a path looks like it should be skipped
 // even without robots.txt (common patterns that waste resources).
 func isDisallowedPath(path string) bool {
-	path = strings.ToLower(path)
-	disallowed := []string{
-		"/wp-admin",
-		"/wp-login",
-		"/admin",
-		"/login",
-		"/logout",
-		"/signup",
-		"/register",
-		"/cart",
-		"/checkout",
-		"/account",
-		"/api/",
-		"/cgi-bin/",
-	}
-	for _, prefix := range disallowed {
-		if strings.HasPrefix(path, prefix) {
-			return true
-		}
-	}
-	return false
+	return urlfilter.IsDisallowedPath(path)
 }

@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 )
 
 // ExtractResourceLinks extracts URLs from non-HTML resource bodies (CSS, JS, JSON, XML/RSS/Atom).
@@ -73,15 +75,5 @@ func extractWithRegexes(body []byte, baseURL string, regexes ...*regexp.Regexp) 
 
 // isAssetExtension returns true if the URL path ends with a known asset extension.
 func isAssetExtension(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	ext := strings.ToLower(parsed.Path)
-	for _, e := range []string{".css", ".js", ".json", ".xml", ".rss", ".atom"} {
-		if strings.HasSuffix(ext, e) {
-			return true
-		}
-	}
-	return false
+	return urlfilter.IsAssetExtension(rawURL)
 }

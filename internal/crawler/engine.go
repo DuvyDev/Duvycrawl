@@ -18,6 +18,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
 	"github.com/DuvyDev/Duvycrawl/internal/render"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 )
 
 // EngineStatus represents the current state of the crawler engine.
@@ -292,6 +293,10 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		"domain", job.Domain,
 		"depth", job.Depth,
 	)
+	if urlfilter.IsNonIndexableDocumentURL(job.URL) {
+		logger.Debug("skipping non-indexable URL")
+		return
+	}
 
 	// Check robots.txt if enabled.
 	if e.cfg.RespectRobots && !e.robots.IsAllowed(ctx, job.URL, job.Domain) {
@@ -335,6 +340,10 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		e.retryOrFail(job, logger, fmt.Sprintf("non-2xx status: %d", result.StatusCode), nil)
 		return
 	}
+	if urlfilter.IsNonIndexableDocumentURL(result.FinalURL) {
+		logger.Debug("skipping non-indexable final URL", "final_url", result.FinalURL)
+		return
+	}
 
 	if result.Truncated {
 		logger.Warn("page truncated at size limit, metadata and links preserved but content incomplete",
@@ -366,6 +375,15 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 			result = rendered
 			parsed = renderedParsed
 		}
+	}
+	if urlfilter.IsNonIndexableDocumentURL(result.FinalURL) {
+		logger.Debug("skipping non-indexable final URL", "final_url", result.FinalURL)
+		return
+	}
+	if containsKnownInterstitial(lowerBodySample(result.Body)) {
+		logger.Warn("page still looks like WAF interstitial, skipping index", "fetch_mode", result.Mode)
+		e.pagesErrored.Add(1)
+		return
 	}
 
 	// Compute content hash for change detection.
@@ -508,8 +526,7 @@ func (e *Engine) enqueueDiscoveredLinks(ctx context.Context, logger *slog.Logger
 	// Build LinkContext for each anchor.
 	var links []frontier.LinkContext
 	for _, a := range anchors {
-		// Restrict asset links (CSS/JS/JSON/XML/RSS/Atom) to the same domain.
-		if isAssetExtension(a.URL) && page != nil && frontier.ExtractDomain(a.URL) != page.Domain {
+		if urlfilter.IsNonIndexableDocumentURL(a.URL) {
 			continue
 		}
 		links = append(links, frontier.LinkContext{
@@ -546,7 +563,7 @@ func (e *Engine) processDiscoveryOnly(ctx context.Context, logger *slog.Logger, 
 
 	var anchors []LinkAnchor
 	for _, l := range links {
-		if isBinaryExtension(l) {
+		if urlfilter.IsNonIndexableDocumentURL(l) {
 			continue
 		}
 		if frontier.ExtractDomain(l) == job.Domain {

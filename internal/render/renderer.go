@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
@@ -141,18 +142,10 @@ func (r *BrowserRenderer) Render(ctx context.Context, targetURL string) (*Result
 		metaMu.Unlock()
 	})
 
-	blocked := []*network.BlockPattern{}
-	if r.cfg.BlockImages {
-		blocked = []*network.BlockPattern{
-			{URLPattern: "*://*:*/*.png", Block: true},
-			{URLPattern: "*://*:*/*.jpg", Block: true},
-			{URLPattern: "*://*:*/*.jpeg", Block: true},
-			{URLPattern: "*://*:*/*.gif", Block: true},
-			{URLPattern: "*://*:*/*.webp", Block: true},
-			{URLPattern: "*://*:*/*.avif", Block: true},
-			{URLPattern: "*://*:*/*.svg", Block: true},
-			{URLPattern: "*://*:*/*.ico", Block: true},
-		}
+	blockedPatterns := urlfilter.BrowserBlockedURLPatterns(r.cfg.BlockImages)
+	blocked := make([]*network.BlockPattern, 0, len(blockedPatterns))
+	for _, pattern := range blockedPatterns {
+		blocked = append(blocked, &network.BlockPattern{URLPattern: pattern, Block: true})
 	}
 
 	actions := []chromedp.Action{

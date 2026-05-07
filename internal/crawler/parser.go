@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/saintfish/chardet"
 	"golang.org/x/net/html/charset"
@@ -469,25 +469,7 @@ func isBlockElement(tag string) bool {
 
 // isBinaryExtension returns true if the URL path ends with a known binary file extension.
 func isBinaryExtension(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-
-	ext := strings.ToLower(path.Ext(parsed.Path))
-	switch ext {
-	case ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-		".zip", ".tar", ".gz", ".rar", ".7z",
-		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico",
-		".tif", ".tiff", ".heic", ".heif", ".avif", ".apng",
-		".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".wav",
-		".exe", ".msi", ".dmg", ".apk", ".deb", ".rpm",
-		".woff", ".woff2", ".ttf", ".eot", ".otf",
-		".wasm", ".swf", ".map", ".mjs",
-		".webmanifest", ".iso", ".bin", ".img":
-		return true
-	}
-	return false
+	return urlfilter.IsBinaryExtension(rawURL)
 }
 
 // normalizeLanguage extracts a clean 2-letter ISO 639-1 language code
@@ -596,19 +578,7 @@ func extractImages(doc *goquery.Document, base *url.URL) []ImageMeta {
 
 // isImageExtension returns true if the URL looks like an image file.
 func isImageExtension(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	ext := strings.ToLower(path.Ext(parsed.Path))
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".avif":
-		return true
-	case "":
-		// URLs without extension might still be images (CDN URLs).
-		return true
-	}
-	return false
+	return urlfilter.IsImageExtension(rawURL)
 }
 
 // extractPublishedAt tries multiple strategies to find the publication date

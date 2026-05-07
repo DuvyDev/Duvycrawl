@@ -14,6 +14,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/scorer"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
+	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 )
 
 // LinkContext carries metadata about a discovered link that the scorer can
@@ -53,6 +54,9 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth int, baseScore 
 	normalized, domain, err := CanonicalizeURL(rawURL)
 	if err != nil {
 		return nil // Silently ignore unparseable URLs.
+	}
+	if urlfilter.IsNonIndexableDocumentURL(normalized) {
+		return nil
 	}
 
 	fingerprint := FingerprintURL(normalized)
@@ -123,6 +127,9 @@ func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int,
 	for _, link := range links {
 		normalized, domain, err := CanonicalizeURL(link.URL)
 		if err != nil {
+			continue
+		}
+		if urlfilter.IsNonIndexableDocumentURL(normalized) {
 			continue
 		}
 
@@ -209,6 +216,9 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth i
 	for _, rawURL := range rawURLs {
 		normalized, domain, err := CanonicalizeURL(rawURL)
 		if err != nil {
+			continue
+		}
+		if urlfilter.IsNonIndexableDocumentURL(normalized) {
 			continue
 		}
 
