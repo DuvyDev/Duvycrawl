@@ -40,6 +40,14 @@ type embedJob struct {
 	content     string
 }
 
+type renderBacklogItem struct {
+	job       *queue.Job
+	targetURL string
+	reason    string
+	attempts  int
+	available time.Time
+}
+
 // Engine is the main crawler orchestrator. It manages a pool of worker
 // goroutines that fetch, parse, and store web pages.
 type Engine struct {
@@ -67,6 +75,10 @@ type Engine struct {
 	highEmbedQueue chan embedJob
 	lowEmbedQueue  chan embedJob
 	embedQueued    sync.Map // pageID -> struct{}{}
+
+	renderMu      sync.Mutex
+	renderBacklog []*renderBacklogItem
+	renderQueued  map[string]struct{}
 
 	// Metrics
 	pagesCrawled atomic.Int64
@@ -118,6 +130,7 @@ func NewEngine(
 		logger:         logger.With("component", "engine"),
 		highEmbedQueue: make(chan embedJob, 25000),
 		lowEmbedQueue:  make(chan embedJob, 5000),
+		renderQueued:   make(map[string]struct{}),
 	}
 	if batchWriter != nil {
 		batchWriter.SetPagesPersistedHook(e.onPagesPersisted)
@@ -249,6 +262,13 @@ func (e *Engine) worker(ctx context.Context, id int) {
 		default:
 		}
 
+		if e.frontier.Stats().Pending == 0 {
+			if item := e.popRenderBacklog(); item != nil {
+				e.processRenderBacklogItem(ctx, logger, item)
+				continue
+			}
+		}
+
 		// Ask the queue for a job from any ready domain.
 		// This is entirely in-memory — O(domains), zero DB calls.
 		// DequeueWithWait blocks efficiently until work is available
@@ -316,16 +336,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	// Skip non-2xx responses.
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		if ok, reason := shouldRenderStatus(e.renderingCfg, result); ok {
-			rendered, renderErr := e.renderJob(ctx, logger, job.URL, reason)
-			if renderErr == nil {
-				result = rendered
-			} else if errors.Is(renderErr, render.ErrRendererBusy) {
-				if e.deferRenderRetry(ctx, job, logger, reason) {
-					return
-				}
-				logger.Debug("browser render skipped because renderer remained busy", "reason", reason)
-			} else {
-				logger.Warn("browser render failed after non-2xx HTTP response", "reason", reason, "error", renderErr)
+			if e.enqueueRenderBacklog(job, job.URL, reason, logger) {
+				return
 			}
 		}
 	}
@@ -372,19 +384,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	}
 
 	if ok, reason := shouldRenderParsed(e.renderingCfg, result, parsed); ok {
-		rendered, renderErr := e.renderJob(ctx, logger, result.FinalURL, reason)
-		if errors.Is(renderErr, render.ErrRendererBusy) {
-			if e.deferRenderRetry(ctx, job, logger, reason) {
-				return
-			}
-			logger.Debug("browser render skipped because renderer remained busy", "reason", reason)
-		} else if renderErr != nil {
-			logger.Warn("browser render failed after weak HTTP parse", "reason", reason, "error", renderErr)
-		} else if renderedParsed, parseErr := e.parser.Parse(rendered.Body, rendered.ContentType, rendered.FinalURL); parseErr != nil {
-			logger.Warn("rendered HTML parse failed, keeping HTTP parse", "reason", reason, "error", parseErr)
-		} else {
-			result = rendered
-			parsed = renderedParsed
+		if e.enqueueRenderBacklog(job, result.FinalURL, reason, logger) {
+			return
 		}
 	}
 	if urlfilter.IsNonIndexableDocumentURL(result.FinalURL) {
@@ -397,6 +398,10 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		return
 	}
 
+	e.persistParsedPage(ctx, logger, job, result, parsed)
+}
+
+func (e *Engine) persistParsedPage(ctx context.Context, logger *slog.Logger, job *queue.Job, result *FetchResult, parsed *ParseResult) {
 	// Compute content hash for change detection.
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(parsed.Content)))
 	pageURL := result.FinalURL
@@ -501,6 +506,137 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	e.domainStats.Record(job.Domain, result.Duration)
 }
 
+func (e *Engine) enqueueRenderBacklog(job *queue.Job, targetURL, reason string, logger *slog.Logger) bool {
+	if e.renderer == nil || !renderingEnabled(e.renderingCfg) {
+		return false
+	}
+	if urlfilter.IsNonIndexableDocumentURL(targetURL) {
+		return false
+	}
+	normalized, _, err := frontier.CanonicalizeURL(targetURL)
+	if err == nil {
+		targetURL = normalized
+	}
+
+	key := frontier.FingerprintURL(targetURL) + ":" + reason
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	if _, exists := e.renderQueued[key]; exists {
+		logger.Debug("browser render already queued", "reason", reason, "render_url", targetURL)
+		return true
+	}
+
+	jobCopy := *job
+	e.renderQueued[key] = struct{}{}
+	e.renderBacklog = append(e.renderBacklog, &renderBacklogItem{
+		job:       &jobCopy,
+		targetURL: targetURL,
+		reason:    reason,
+		available: time.Now(),
+	})
+	logger.Debug("queued URL for browser render backlog", "reason", reason, "render_url", targetURL, "backlog", len(e.renderBacklog))
+	return true
+}
+
+func (e *Engine) popRenderBacklog() *renderBacklogItem {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	if len(e.renderBacklog) == 0 {
+		return nil
+	}
+	item := e.renderBacklog[0]
+	copy(e.renderBacklog, e.renderBacklog[1:])
+	e.renderBacklog[len(e.renderBacklog)-1] = nil
+	e.renderBacklog = e.renderBacklog[:len(e.renderBacklog)-1]
+	delete(e.renderQueued, frontier.FingerprintURL(item.targetURL)+":"+item.reason)
+	return item
+}
+
+func (e *Engine) pushRenderBacklog(item *renderBacklogItem) {
+	key := frontier.FingerprintURL(item.targetURL) + ":" + item.reason
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	if _, exists := e.renderQueued[key]; exists {
+		return
+	}
+	e.renderQueued[key] = struct{}{}
+	e.renderBacklog = append(e.renderBacklog, item)
+}
+
+func (e *Engine) processRenderBacklogItem(ctx context.Context, logger *slog.Logger, item *renderBacklogItem) {
+	job := item.job
+	logger = logger.With(
+		"url", job.URL,
+		"domain", job.Domain,
+		"depth", job.Depth,
+		"render_url", item.targetURL,
+		"render_reason", item.reason,
+	)
+	if wait := time.Until(item.available); wait > 0 {
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+
+	if e.frontier.Stats().Pending > 0 {
+		e.pushRenderBacklog(item)
+		return
+	}
+
+	rendered, err := e.renderJob(ctx, logger, item.targetURL, item.reason)
+	if errors.Is(err, render.ErrRendererBusy) {
+		if item.attempts < e.renderingCfg.BusyRetryMaxAttempts {
+			item.attempts++
+			delay := time.Duration(item.attempts) * e.renderingCfg.BusyRetryBaseDelay
+			if delay > e.renderingCfg.BusyRetryMaxDelay {
+				delay = e.renderingCfg.BusyRetryMaxDelay
+			}
+			item.available = time.Now().Add(delay)
+			e.pushRenderBacklog(item)
+			logger.Debug("browser renderer busy, keeping URL in render backlog", "attempts", item.attempts, "delay", delay)
+			return
+		}
+		logger.Warn("browser renderer remained busy, dropping render backlog item", "attempts", item.attempts)
+		e.pagesErrored.Add(1)
+		return
+	}
+	if err != nil {
+		logger.Warn("browser render failed for backlog item", "error", err)
+		e.pagesErrored.Add(1)
+		return
+	}
+	if rendered.StatusCode < 200 || rendered.StatusCode >= 300 {
+		logger.Warn("rendered backlog item returned non-2xx", "status_code", rendered.StatusCode)
+		e.pagesErrored.Add(1)
+		return
+	}
+	if urlfilter.IsNonIndexableDocumentURL(rendered.FinalURL) {
+		logger.Debug("skipping non-indexable rendered final URL", "final_url", rendered.FinalURL)
+		return
+	}
+	if !isHTMLContentType(rendered.ContentType) {
+		e.processDiscoveryOnly(ctx, logger, job, rendered)
+		return
+	}
+	parsed, err := e.parser.Parse(rendered.Body, rendered.ContentType, rendered.FinalURL)
+	if err != nil {
+		logger.Warn("rendered backlog HTML parse failed", "error", err)
+		e.pagesErrored.Add(1)
+		return
+	}
+	if containsKnownInterstitial(lowerBodySample(rendered.Body)) {
+		logger.Warn("rendered backlog page still looks like WAF interstitial, skipping index")
+		e.pagesErrored.Add(1)
+		return
+	}
+
+	e.persistParsedPage(ctx, logger, job, rendered, parsed)
+}
+
 func (e *Engine) renderJob(ctx context.Context, logger *slog.Logger, targetURL, reason string) (*FetchResult, error) {
 	if e.renderer == nil {
 		return nil, fmt.Errorf("renderer unavailable")
@@ -520,39 +656,6 @@ func (e *Engine) renderJob(ctx context.Context, logger *slog.Logger, targetURL, 
 		Mode:         "browser",
 		RenderReason: reason,
 	}, nil
-}
-
-func (e *Engine) deferRenderRetry(ctx context.Context, job *queue.Job, logger *slog.Logger, reason string) bool {
-	maxRetries := e.renderingCfg.BusyRetryMaxAttempts
-	if maxRetries < 1 || job.RenderRetries >= maxRetries {
-		return false
-	}
-
-	job.RenderRetries++
-	delay := time.Duration(job.RenderRetries) * e.renderingCfg.BusyRetryBaseDelay
-	if delay > e.renderingCfg.BusyRetryMaxDelay {
-		delay = e.renderingCfg.BusyRetryMaxDelay
-	}
-
-	logger.Debug("deferring job until browser renderer has capacity",
-		"reason", reason,
-		"render_retries", job.RenderRetries,
-		"delay", delay,
-	)
-
-	go func() {
-		timer := time.NewTimer(delay)
-		defer timer.Stop()
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			e.frontier.Retry(job)
-		}
-	}()
-
-	return true
 }
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.

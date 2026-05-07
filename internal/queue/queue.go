@@ -31,15 +31,14 @@ const bloomFPP float64 = 0.001
 
 // Job represents a URL queued for crawling.
 type Job struct {
-	ID            int64
-	URL           string
-	Domain        string
-	Depth         int
-	Score         float64 // Computed by the scorer; higher = crawled sooner.
-	BaseScore     float64 // Legacy static bonus (seed, recrawl, etc.).
-	Fingerprint   string  // Structural fingerprint for deduplication.
-	Retries       int     // Number of times this job has been retried.
-	RenderRetries int     // Number of times browser rendering was deferred.
+	ID          int64
+	URL         string
+	Domain      string
+	Depth       int
+	Score       float64 // Computed by the scorer; higher = crawled sooner.
+	BaseScore   float64 // Legacy static bonus (seed, recrawl, etc.).
+	Fingerprint string  // Structural fingerprint for deduplication.
+	Retries     int     // Number of times this job has been retried.
 
 	// Context signals for the adaptive scorer (cheap, pre-crawl).
 	AnchorText       string
