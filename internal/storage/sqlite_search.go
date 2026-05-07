@@ -22,7 +22,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
-	searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
@@ -156,12 +156,17 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 			}
 		}
 	}
+	if err := searchCtx.Err(); err != nil && len(candidates) == 0 {
+		return nil, 0, fmt.Errorf("search timed out before collecting candidates for %q: %w", query, err)
+	}
 
 	reranked := rerankSearchCandidates(candidates, q, lang)
 
 	// --- Semantic re-ranking via embeddings (if Ollama is available) ---
 	if len(reranked) > 0 && s.embedder != nil {
-		queryEmbedding, err := s.embedder.GenerateEmbedding(q.raw)
+		semanticCtx, semanticCancel := context.WithTimeout(searchCtx, 1200*time.Millisecond)
+		queryEmbedding, err := s.embedder.GenerateEmbeddingContext(semanticCtx, q.raw)
+		semanticCancel()
 		if err == nil && len(queryEmbedding) > 0 {
 			// Collect page IDs for the top candidates.
 			topN := min(len(reranked), 100) // Only re-rank top 100 for speed.
@@ -293,7 +298,7 @@ func (s *SQLiteStorage) loadResultBodies(ctx context.Context, candidates []searc
 		SELECT id, SUBSTR(content, 1, 4000) FROM pages WHERE id IN (%s)
 	`, strings.Join(ids, ","))
 
-	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
+	rows, err := s.searchContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("loading result bodies: %w", err)
 	}
@@ -466,7 +471,7 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 	}
 
 	var totalDocs float64
-	if err := s.readContentDB.QueryRowContext(ctx, `SELECT MAX(rowid) FROM pages_fts`).Scan(&totalDocs); err != nil {
+	if err := s.searchContentDB.QueryRowContext(ctx, `SELECT MAX(rowid) FROM pages_fts`).Scan(&totalDocs); err != nil {
 		totalDocs = 10000.0
 	}
 	if totalDocs <= 0 {
@@ -487,7 +492,7 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 	}
 
 	query := fmt.Sprintf(`SELECT term, doc FROM pages_fts_vocab WHERE term IN (%s)`, strings.Join(placeholders, ","))
-	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
+	rows, err := s.searchContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		s.logger.Warn("failed to fetch IDF map", "error", err)
 		return idfMap, nil
@@ -511,7 +516,7 @@ func (s *SQLiteStorage) TestFTSQuery(ctx context.Context, query string) (int, er
 
 func (s *SQLiteStorage) countFTSCandidates(ctx context.Context, ftsQuery string) (int, error) {
 	var total int
-	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
+	if err := s.searchContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
 		return 0, err
 	}
 	return total, nil
@@ -626,7 +631,7 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	`, scoreExpr)
 	args = append(args, query.raw, matchQuery, limit, matchQuery)
 
-	rows, err := s.readContentDB.QueryContext(ctx, searchSQL, args...)
+	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -824,7 +829,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		limit,
 	}
 
-	rows, err := s.readContentDB.QueryContext(ctx, querySQL, args...)
+	rows, err := s.searchContentDB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying navigational candidates: %w", err)
 	}
@@ -1870,7 +1875,7 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	// Count total matches.
 	var total int
 	countQuery := `SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH ?`
-	if err := s.readContentDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
+	if err := s.searchContentDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting image results for %q: %w", query, err)
 	}
 
@@ -1889,7 +1894,7 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	LIMIT ? OFFSET ?
 	`
 
-	rows, err := s.readContentDB.QueryContext(ctx, searchQuery, query, limit, offset)
+	rows, err := s.searchContentDB.QueryContext(ctx, searchQuery, query, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("searching images for %q: %w", query, err)
 	}

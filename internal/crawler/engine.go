@@ -3,6 +3,7 @@ package crawler
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -318,6 +319,11 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 			rendered, renderErr := e.renderJob(ctx, logger, job.URL, reason)
 			if renderErr == nil {
 				result = rendered
+			} else if errors.Is(renderErr, render.ErrRendererBusy) {
+				if e.deferRenderRetry(ctx, job, logger, reason) {
+					return
+				}
+				logger.Debug("browser render skipped because renderer remained busy", "reason", reason)
 			} else {
 				logger.Warn("browser render failed after non-2xx HTTP response", "reason", reason, "error", renderErr)
 			}
@@ -367,7 +373,12 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	if ok, reason := shouldRenderParsed(e.renderingCfg, result, parsed); ok {
 		rendered, renderErr := e.renderJob(ctx, logger, result.FinalURL, reason)
-		if renderErr != nil {
+		if errors.Is(renderErr, render.ErrRendererBusy) {
+			if e.deferRenderRetry(ctx, job, logger, reason) {
+				return
+			}
+			logger.Debug("browser render skipped because renderer remained busy", "reason", reason)
+		} else if renderErr != nil {
 			logger.Warn("browser render failed after weak HTTP parse", "reason", reason, "error", renderErr)
 		} else if renderedParsed, parseErr := e.parser.Parse(rendered.Body, rendered.ContentType, rendered.FinalURL); parseErr != nil {
 			logger.Warn("rendered HTML parse failed, keeping HTTP parse", "reason", reason, "error", parseErr)
@@ -509,6 +520,39 @@ func (e *Engine) renderJob(ctx context.Context, logger *slog.Logger, targetURL, 
 		Mode:         "browser",
 		RenderReason: reason,
 	}, nil
+}
+
+func (e *Engine) deferRenderRetry(ctx context.Context, job *queue.Job, logger *slog.Logger, reason string) bool {
+	maxRetries := e.renderingCfg.BusyRetryMaxAttempts
+	if maxRetries < 1 || job.RenderRetries >= maxRetries {
+		return false
+	}
+
+	job.RenderRetries++
+	delay := time.Duration(job.RenderRetries) * e.renderingCfg.BusyRetryBaseDelay
+	if delay > e.renderingCfg.BusyRetryMaxDelay {
+		delay = e.renderingCfg.BusyRetryMaxDelay
+	}
+
+	logger.Debug("deferring job until browser renderer has capacity",
+		"reason", reason,
+		"render_retries", job.RenderRetries,
+		"delay", delay,
+	)
+
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			e.frontier.Retry(job)
+		}
+	}()
+
+	return true
 }
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.

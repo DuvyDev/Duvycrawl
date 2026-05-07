@@ -36,8 +36,18 @@ type RenderingConfig struct {
 	ExecutablePath string `yaml:"executable_path"`
 	// MaxConcurrency limits simultaneous browser tabs globally.
 	MaxConcurrency int `yaml:"max_concurrency"`
+	// AcquireTimeout is how long a crawler worker may wait for a browser slot
+	// before deferring the job and continuing with other URLs.
+	AcquireTimeout time.Duration `yaml:"acquire_timeout"`
 	// Timeout is the hard limit for a single rendered navigation.
 	Timeout time.Duration `yaml:"timeout"`
+	// BusyRetryMaxAttempts caps how many times a job is deferred when all browser
+	// slots are occupied. Zero disables deferral retries.
+	BusyRetryMaxAttempts int `yaml:"busy_retry_max_attempts"`
+	// BusyRetryBaseDelay is multiplied by the attempt number before re-queueing.
+	BusyRetryBaseDelay time.Duration `yaml:"busy_retry_base_delay"`
+	// BusyRetryMaxDelay caps the browser-busy requeue delay.
+	BusyRetryMaxDelay time.Duration `yaml:"busy_retry_max_delay"`
 	// WaitAfterLoad allows SPAs to hydrate after DOMContentLoaded.
 	WaitAfterLoad time.Duration `yaml:"wait_after_load"`
 	// MaxHTMLSizeKB caps the rendered HTML kept in memory.
@@ -236,18 +246,22 @@ func DefaultConfig() *Config {
 			},
 		},
 		Rendering: RenderingConfig{
-			Enabled:             false,
-			Mode:                "auto",
-			BrowserWSURL:        "",
-			ExecutablePath:      "",
-			MaxConcurrency:      2,
-			Timeout:             20 * time.Second,
-			WaitAfterLoad:       1200 * time.Millisecond,
-			MaxHTMLSizeKB:       2048,
-			MinTextChars:        200,
-			MinLinks:            1,
-			RenderOnStatusCodes: []int{403, 503},
-			BlockImages:         true,
+			Enabled:              false,
+			Mode:                 "auto",
+			BrowserWSURL:         "",
+			ExecutablePath:       "",
+			MaxConcurrency:       2,
+			AcquireTimeout:       500 * time.Millisecond,
+			Timeout:              20 * time.Second,
+			BusyRetryMaxAttempts: 3,
+			BusyRetryBaseDelay:   2 * time.Second,
+			BusyRetryMaxDelay:    15 * time.Second,
+			WaitAfterLoad:        1200 * time.Millisecond,
+			MaxHTMLSizeKB:        2048,
+			MinTextChars:         200,
+			MinLinks:             1,
+			RenderOnStatusCodes:  []int{403, 503},
+			BlockImages:          true,
 		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",
@@ -357,8 +371,26 @@ func (c *Config) validate() error {
 	if c.Rendering.MaxConcurrency < 1 {
 		return fmt.Errorf("rendering.max_concurrency must be >= 1, got %d", c.Rendering.MaxConcurrency)
 	}
+	if c.Rendering.AcquireTimeout < 0 {
+		return fmt.Errorf("rendering.acquire_timeout must be >= 0, got %s", c.Rendering.AcquireTimeout)
+	}
 	if c.Rendering.Timeout < time.Second {
 		return fmt.Errorf("rendering.timeout must be >= 1s, got %s", c.Rendering.Timeout)
+	}
+	if c.Rendering.BusyRetryMaxAttempts < 0 {
+		return fmt.Errorf("rendering.busy_retry_max_attempts must be >= 0, got %d", c.Rendering.BusyRetryMaxAttempts)
+	}
+	if c.Rendering.BusyRetryBaseDelay < 0 {
+		return fmt.Errorf("rendering.busy_retry_base_delay must be >= 0, got %s", c.Rendering.BusyRetryBaseDelay)
+	}
+	if c.Rendering.BusyRetryMaxDelay < 0 {
+		return fmt.Errorf("rendering.busy_retry_max_delay must be >= 0, got %s", c.Rendering.BusyRetryMaxDelay)
+	}
+	if c.Rendering.BusyRetryMaxAttempts > 0 && c.Rendering.BusyRetryBaseDelay == 0 {
+		return fmt.Errorf("rendering.busy_retry_base_delay must be > 0 when busy_retry_max_attempts > 0")
+	}
+	if c.Rendering.BusyRetryMaxAttempts > 0 && c.Rendering.BusyRetryMaxDelay == 0 {
+		return fmt.Errorf("rendering.busy_retry_max_delay must be > 0 when busy_retry_max_attempts > 0")
 	}
 	if c.Rendering.WaitAfterLoad < 0 {
 		return fmt.Errorf("rendering.wait_after_load must be >= 0, got %s", c.Rendering.WaitAfterLoad)

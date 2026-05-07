@@ -1275,7 +1275,7 @@ func (s *SQLiteStorage) GetPageEmbeddings(ctx context.Context, pageIDs []int64) 
 		"SELECT page_id, model, dimensions, embedding, created_at FROM page_embeddings WHERE page_id IN (%s)",
 		strings.Join(placeholders, ","),
 	)
-	rows, err := s.readContentDB.QueryContext(ctx, query, args...)
+	rows, err := s.searchContentDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("querying page embeddings: %w", err)
 	}

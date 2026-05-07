@@ -33,7 +33,7 @@ crawler:
   disable_cookies: false
   # Max idle keep-alive connections per host. Increase for high throughput
   # when crawling the same domains repeatedly.
-  max_idle_conns_per_host: 150
+  max_idle_conns_per_host: 100
   # Proxy configuration.
   # Supports: http://, https://, socks5://, socks5h://
   # WARP example: socks5://warp:1080
@@ -96,7 +96,13 @@ rendering:
   # Local dev override, e.g. C:\Program Files\Google\Chrome\Application\chrome.exe
   executable_path: ""
   max_concurrency: 2
+  # Max time a crawler worker waits for a free Chromium slot before deferring.
+  acquire_timeout: 500ms
   timeout: 20s
+  # Browser-saturated jobs are requeued with attempt * base_delay, capped here.
+  busy_retry_max_attempts: 3
+  busy_retry_base_delay: 2s
+  busy_retry_max_delay: 15s
   wait_after_load: 1200ms
   max_html_size_kb: 2048
   min_text_chars: 200
@@ -196,6 +202,14 @@ seeds:
     recrawl_interval: 168h
   - url: "https://mapgenie.io/"
     recrawl_interval: 168h
+  - url: "https://steamdb.info/"
+    recrawl_interval: 168h
+  - url: "https://protondb.com/"
+    recrawl_interval: 168h
+  - url: "https://distrowatch.com/"
+    recrawl_interval: 72h
+  - url: "https://www.phoronix.com/"
+    recrawl_interval: 72h
   - url: "https://warframe.fandom.com/wiki/WARFRAME_Wiki"
     recrawl_interval: 72h
   - url: "https://marvelrivals.gg/"
@@ -206,6 +220,26 @@ seeds:
     recrawl_interval: 72h
   - url: "https://www.gub.uy/"
     recrawl_interval: 24h
+  - url: "https://www.movie.com.uy/home"
+    recrawl_interval: 72h
+  - url: "https://www.lifecinemas.com.uy/"
+    recrawl_interval: 72h
+  - url: "https://cinesopera.com/"
+    recrawl_interval: 72h
+  - url: "https://www.grupocine.com.uy/"
+    recrawl_interval: 72h
+  - url: "https://www.disco.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.eldorado.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.tiendainglesa.com.uy/supermercado"
+    recrawl_interval: 168h
+  - url: "https://www.tata.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.geant.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.devoto.com.uy/"
+    recrawl_interval: 168h
   - url: "https://1122.com.uy/"
     recrawl_interval: 24h
   - url: "https://sucive.gub.uy/"

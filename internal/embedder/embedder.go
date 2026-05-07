@@ -5,6 +5,7 @@ package embedder
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -70,6 +71,11 @@ func NewClient(cfg config.EmbedderConfig) *Client {
 
 // GenerateEmbedding sends text to Ollama and returns the embedding vector.
 func (c *Client) GenerateEmbedding(text string) ([]float32, error) {
+	return c.GenerateEmbeddingContext(context.Background(), text)
+}
+
+// GenerateEmbeddingContext sends text to Ollama and returns the embedding vector.
+func (c *Client) GenerateEmbeddingContext(ctx context.Context, text string) ([]float32, error) {
 	if text == "" {
 		return nil, fmt.Errorf("empty text")
 	}
@@ -84,7 +90,7 @@ func (c *Client) GenerateEmbedding(text string) ([]float32, error) {
 		return nil, fmt.Errorf("marshalling payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/api/embeddings", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embeddings", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}

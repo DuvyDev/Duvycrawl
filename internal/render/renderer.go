@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +17,10 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
+
+// ErrRendererBusy means all browser slots are occupied and the caller should
+// keep crawling instead of tying up a crawler worker waiting for Chromium.
+var ErrRendererBusy = errors.New("renderer busy")
 
 // Result contains the raw HTML and metadata produced by a browser render.
 type Result struct {
@@ -96,16 +101,37 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, proxyURL s
 }
 
 func (r *BrowserRenderer) Render(ctx context.Context, targetURL string) (*Result, error) {
-	select {
-	case r.sem <- struct{}{}:
-		defer func() { <-r.sem }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
 	timeout := r.cfg.Timeout
 	if timeout <= 0 {
 		timeout = 20 * time.Second
+	}
+
+	acquireWait := r.cfg.AcquireTimeout
+	if acquireWait > timeout {
+		acquireWait = timeout
+	}
+	if acquireWait <= 0 {
+		select {
+		case r.sem <- struct{}{}:
+			defer func() { <-r.sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, ErrRendererBusy
+		}
+	} else {
+		acquireCtx, acquireCancel := context.WithTimeout(ctx, acquireWait)
+		defer acquireCancel()
+
+		select {
+		case r.sem <- struct{}{}:
+			defer func() { <-r.sem }()
+		case <-acquireCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, ErrRendererBusy
+		}
 	}
 
 	tabCtx, tabCancel := chromedp.NewContext(r.allocCtx)

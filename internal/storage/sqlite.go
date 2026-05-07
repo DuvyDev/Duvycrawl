@@ -29,6 +29,7 @@ import (
 // maximizing read throughput in WAL mode.
 type SQLiteStorage struct {
 	readContentDB   *sql.DB
+	searchContentDB *sql.DB
 	writeContentDB  *sql.DB
 	crawlerDB       *sql.DB
 	graphDB         *sql.DB
@@ -139,7 +140,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 	}
 
 	readContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", contentPath)
-	readContentDB, err := openDB(readContentDSN, 8, 8)
+	readContentDB, err := openDB(readContentDSN, 16, 8)
 	if err != nil {
 		writeContentDB.Close()
 		return nil, fmt.Errorf("opening read content database: %w", err)
@@ -149,23 +150,38 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		writeContentDB.Close()
 		return nil, fmt.Errorf("configuring read content database: %w", err)
 	}
+	searchContentDB, err := openDB(readContentDSN, 8, 8)
+	if err != nil {
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("opening search content database: %w", err)
+	}
+	if err := configureReadDB(ctx, searchContentDB); err != nil {
+		searchContentDB.Close()
+		readContentDB.Close()
+		writeContentDB.Close()
+		return nil, fmt.Errorf("configuring search content database: %w", err)
+	}
 
 	// --- 2. Crawler DB (State Machine) ---
 	crawlerDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&_loc=auto", crawlerPath)
 	crawlerDB, err := openDB(crawlerDSN, 1, 1) // Keep single writer for queue
 	if err != nil {
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("opening crawler database: %w", err)
 	}
 	if err := configureWriteDB(ctx, crawlerDB); err != nil {
 		crawlerDB.Close()
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("configuring crawler database: %w", err)
 	}
 	if err := migrateDB(ctx, crawlerDB, crawlerMigrations); err != nil {
 		crawlerDB.Close()
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("running crawler migrations: %w", err)
@@ -177,6 +193,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 	graphDB, err := openDB(graphDSN, 1, 1)
 	if err != nil {
 		crawlerDB.Close()
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("opening graph database: %w", err)
@@ -184,6 +201,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 	if err := configureWriteDB(ctx, graphDB); err != nil {
 		graphDB.Close()
 		crawlerDB.Close()
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("configuring graph database: %w", err)
@@ -191,19 +209,21 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 	if err := migrateDB(ctx, graphDB, graphMigrations); err != nil {
 		graphDB.Close()
 		crawlerDB.Close()
+		searchContentDB.Close()
 		readContentDB.Close()
 		writeContentDB.Close()
 		return nil, fmt.Errorf("running graph migrations: %w", err)
 	}
 
 	s := &SQLiteStorage{
-		readContentDB:  readContentDB,
-		writeContentDB: writeContentDB,
-		crawlerDB:      crawlerDB,
-		graphDB:        graphDB,
-		logger:         logger.With("component", "storage"),
-		dataDir:        dir,
-		spellChecker:   NewSpellChecker(logger),
+		readContentDB:   readContentDB,
+		searchContentDB: searchContentDB,
+		writeContentDB:  writeContentDB,
+		crawlerDB:       crawlerDB,
+		graphDB:         graphDB,
+		logger:          logger.With("component", "storage"),
+		dataDir:         dir,
+		spellChecker:    NewSpellChecker(logger),
 	}
 
 	// Start loading the spell checker vocabulary and reload it every 2 hours
@@ -362,6 +382,11 @@ func (s *SQLiteStorage) Close() error {
 	if s.readContentDB != nil {
 		if err := s.readContentDB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("closing readContentDB: %w", err))
+		}
+	}
+	if s.searchContentDB != nil {
+		if err := s.searchContentDB.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing searchContentDB: %w", err))
 		}
 	}
 	if s.crawlerDB != nil {
