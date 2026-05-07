@@ -2,6 +2,8 @@ package render
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -42,7 +44,7 @@ type BrowserRenderer struct {
 
 // NewBrowserRenderer creates a CDP renderer. It does not launch Chrome until the
 // first Render call, which keeps HTTP-only startup cheap.
-func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, logger *slog.Logger) (*BrowserRenderer, error) {
+func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, proxyURL string, logger *slog.Logger) (*BrowserRenderer, error) {
 	if cfg.MaxConcurrency < 1 {
 		cfg.MaxConcurrency = 1
 	}
@@ -52,7 +54,14 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, logger *sl
 	var cancel context.CancelFunc
 
 	if cfg.BrowserWSURL != "" {
-		allocCtx, cancel = chromedp.NewRemoteAllocator(baseCtx, cfg.BrowserWSURL, chromedp.NoModifyURL)
+		wsURL := cfg.BrowserWSURL
+		if proxyURL != "" {
+			launchJSON, _ := json.Marshal(map[string]interface{}{
+				"args": []string{"--proxy-server=" + proxyURL},
+			})
+			wsURL = fmt.Sprintf("%s?launch=%s", wsURL, base64.StdEncoding.EncodeToString(launchJSON))
+		}
+		allocCtx, cancel = chromedp.NewRemoteAllocator(baseCtx, wsURL, chromedp.NoModifyURL)
 	} else {
 		opts := append(chromedp.DefaultExecAllocatorOptions[:],
 			chromedp.Flag("headless", true),
@@ -63,6 +72,9 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, logger *sl
 			chromedp.Flag("disable-sync", true),
 			chromedp.Flag("mute-audio", true),
 		)
+		if proxyURL != "" {
+			opts = append(opts, chromedp.Flag("proxy-server", proxyURL))
+		}
 		if cfg.BlockImages {
 			opts = append(opts, chromedp.Flag("blink-settings", "imagesEnabled=false"))
 		}

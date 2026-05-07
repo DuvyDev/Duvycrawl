@@ -87,7 +87,7 @@ func NewEngine(
 	var browserRenderer render.Renderer
 	if renderingEnabled(renderingCfg) {
 		var err error
-		browserRenderer, err = render.NewBrowserRenderer(renderingCfg, cfg.UserAgent, logger)
+		browserRenderer, err = render.NewBrowserRenderer(renderingCfg, cfg.UserAgent, proxyURL, logger)
 		if err != nil {
 			logger.Warn("browser renderer disabled after initialization failure", "error", err)
 		} else {
@@ -95,6 +95,7 @@ func NewEngine(
 				"mode", renderingCfg.Mode,
 				"max_concurrency", renderingCfg.MaxConcurrency,
 				"remote", renderingCfg.BrowserWSURL != "",
+				"proxy", proxyURL,
 			)
 		}
 	}
