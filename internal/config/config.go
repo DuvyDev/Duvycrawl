@@ -219,7 +219,7 @@ func DefaultConfig() *Config {
 			PolitenessDelay:          1 * time.Second,
 			RandomDelay:              0,
 			MaxRetries:               3,
-			UserAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+			UserAgent:                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
 			MaxPageSizeKB:            512,
 			RespectRobots:            false,
 			ParallelismPerDomain:     4,
