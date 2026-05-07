@@ -293,7 +293,14 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 // GetQueue returns the current crawl queue status.
 func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
 	stats := h.frontier.Stats()
-	writeSuccess(w, stats)
+	renderBacklog := h.engine.RenderBacklogLen()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pending":         stats.Pending,
+		"domains":         stats.Domains,
+		"total_enqueued":   stats.Enqueued,
+		"total_dequeued":   stats.Dequeued,
+		"render_backlog":   renderBacklog,
+	})
 }
 
 // --- Image Search ---

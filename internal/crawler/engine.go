@@ -240,6 +240,13 @@ func (e *Engine) Stats() (crawled, errored int64) {
 	return e.pagesCrawled.Load(), e.pagesErrored.Load()
 }
 
+// RenderBacklogLen returns the number of URLs waiting in the browser render backlog.
+func (e *Engine) RenderBacklogLen() int {
+	e.renderMu.Lock()
+	defer e.renderMu.Unlock()
+	return len(e.renderBacklog)
+}
+
 // worker is the main loop for a single crawler worker goroutine.
 // The entire domain-selection logic happens in memory via the queue's
 // Dequeue method — no database round-trips in the scheduling hot path.
