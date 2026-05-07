@@ -505,6 +505,10 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 	return idfMap, nil
 }
 
+func (s *SQLiteStorage) TestFTSQuery(ctx context.Context, query string) (int, error) {
+	return s.countFTSCandidates(ctx, query)
+}
+
 func (s *SQLiteStorage) countFTSCandidates(ctx context.Context, ftsQuery string) (int, error) {
 	var total int
 	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pages_fts WHERE pages_fts MATCH ?`, ftsQuery).Scan(&total); err != nil {
@@ -637,8 +641,12 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			updatedAtStr   sql.NullString
 			snippetText    sql.NullString
 			clicksCount    int
+			schemaRating   sql.NullFloat64
+			schemaType     sql.NullString
+			schemaImage    sql.NullString
+			schemaAuthor   sql.NullString
+			schemaKeywords sql.NullString
 		)
-		var schemaRating sql.NullFloat64
 		if err := rows.Scan(
 			&candidate.ID,
 			&candidate.URL,
@@ -655,10 +663,10 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 			&updatedAtStr,
 			&candidate.sqlScore,
 			&candidate.contentLen,
-			&candidate.SchemaType,
-			&candidate.SchemaImage,
-			&candidate.SchemaAuthor,
-			&candidate.SchemaKeywords,
+			&schemaType,
+			&schemaImage,
+			&schemaAuthor,
+			&schemaKeywords,
 			&schemaRating,
 			&candidate.ReferringDomains,
 			&candidate.PageRank,
@@ -691,6 +699,18 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		}
 		if schemaRating.Valid {
 			candidate.SchemaRating = schemaRating.Float64
+		}
+		if schemaType.Valid {
+			candidate.SchemaType = schemaType.String
+		}
+		if schemaImage.Valid {
+			candidate.SchemaImage = schemaImage.String
+		}
+		if schemaAuthor.Valid {
+			candidate.SchemaAuthor = schemaAuthor.String
+		}
+		if schemaKeywords.Valid {
+			candidate.SchemaKeywords = schemaKeywords.String
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -819,8 +839,12 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			updatedAtStr   sql.NullString
 			snippetText    sql.NullString
 			clicksCount    int
+			schemaRating   sql.NullFloat64
+			schemaType     sql.NullString
+			schemaImage    sql.NullString
+			schemaAuthor   sql.NullString
+			schemaKeywords sql.NullString
 		)
-		var schemaRating sql.NullFloat64
 		if err := rows.Scan(
 			&candidate.ID,
 			&candidate.URL,
@@ -837,10 +861,10 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			&updatedAtStr,
 			&candidate.sqlScore,
 			&candidate.contentLen,
-			&candidate.SchemaType,
-			&candidate.SchemaImage,
-			&candidate.SchemaAuthor,
-			&candidate.SchemaKeywords,
+			&schemaType,
+			&schemaImage,
+			&schemaAuthor,
+			&schemaKeywords,
 			&schemaRating,
 			&candidate.ReferringDomains,
 			&candidate.PageRank,
@@ -870,6 +894,18 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		}
 		if schemaRating.Valid {
 			candidate.SchemaRating = schemaRating.Float64
+		}
+		if schemaType.Valid {
+			candidate.SchemaType = schemaType.String
+		}
+		if schemaImage.Valid {
+			candidate.SchemaImage = schemaImage.String
+		}
+		if schemaAuthor.Valid {
+			candidate.SchemaAuthor = schemaAuthor.String
+		}
+		if schemaKeywords.Valid {
+			candidate.SchemaKeywords = schemaKeywords.String
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -1540,17 +1576,23 @@ func buildFTSExactQuery(tokens []string) string {
 }
 
 func buildFTSMajorityQuery(tokens []string) string {
-	n := len(tokens)
-	if n < 3 || n > 6 {
-		return "" // Majority fallback only makes sense for 3-6 words.
+	var filtered []string
+	for _, t := range tokens {
+		if len([]rune(t)) > 3 {
+			filtered = append(filtered, t)
+		}
 	}
+	if len(filtered) < 3 || len(filtered) > 6 {
+		return "" // Majority fallback only makes sense for 3-6 significant words.
+	}
+	n := len(filtered)
 
 	var clauses []string
 	// Generate combinations of N-1 tokens. For 4 tokens, this generates 4 clauses of 3 tokens each.
 	// (A B C) OR (A B D) OR (A C D) OR (B C D)
 	for skip := 0; skip < n; skip++ {
 		var parts []string
-		for i, t := range tokens {
+		for i, t := range filtered {
 			if i == skip {
 				continue
 			}

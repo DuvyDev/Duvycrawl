@@ -135,7 +135,7 @@ seeds:
     recrawl_interval: 3h
   - url: "https://somoskudasai.com/"
     recrawl_interval: 3h
-  - url: "https://areajugones.sport.es/anime/"
+  - url: "https://areajugones.sport.es/"
     recrawl_interval: 3h
   - url: "https://www.justwatch.com/es"
     recrawl_interval: 72h
@@ -150,6 +150,10 @@ seeds:
   - url: "https://www.subrayado.com.uy/"
     recrawl_interval: 2h
   - url: "https://ladiaria.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://www.marca.com/"
+    recrawl_interval: 2h
+  - url: "https://www.espn.com.uy/"
     recrawl_interval: 2h
   - url: "https://www.infobae.com/"
     recrawl_interval: 1h
@@ -213,6 +217,14 @@ seeds:
     recrawl_interval: 24h
   - url: "https://www.crunchyroll.com/es-es/"
     recrawl_interval: 168h
+  - url: "https://www4.animeflv.net/"
+    recrawl_interval: 12h
+  - url: "https://jkanime.net/"
+    recrawl_interval: 12h
+  - url: "https://tvymanga3.com/"
+    recrawl_interval: 12h
+  - url: "https://myanimelist.net/"
+    recrawl_interval: 24h
 
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
