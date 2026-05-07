@@ -83,6 +83,27 @@ crawler:
     tick_interval: 10m
     seed_recrawl_interval: 24h
 
+# Optional JavaScript rendering fallback.
+# Keep disabled by default: regular HTTP crawling is much cheaper and remains
+# the primary path. Enable only when you also provide a local Chromium/Chrome
+# executable or a remote CDP endpoint such as a browser sidecar in Docker.
+rendering:
+  enabled: false
+  # auto = render only weak HTTP results, force = render all HTML, disabled = off
+  mode: auto
+  # Docker sidecar example: ws://browser:3000
+  browser_ws_url: ""
+  # Local dev override, e.g. C:\Program Files\Google\Chrome\Application\chrome.exe
+  executable_path: ""
+  max_concurrency: 2
+  timeout: 20s
+  wait_after_load: 1200ms
+  max_html_size_kb: 2048
+  min_text_chars: 200
+  min_links: 1
+  render_on_status_codes: [403, 503]
+  block_images: true
+
 # Seed URLs are the starting points for the crawler.
 # Each URL can have its own recrawl_interval. If omitted, the scheduler's
 # seed_recrawl_interval is used.

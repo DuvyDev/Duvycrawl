@@ -20,12 +20,14 @@ import (
 
 // FetchResult contains the raw result of an HTTP fetch operation.
 type FetchResult struct {
-	StatusCode  int
-	Body        []byte
-	ContentType string
-	FinalURL    string // After redirects
-	Duration    time.Duration
-	Truncated   bool // True if body exceeded max size and was truncated
+	StatusCode   int
+	Body         []byte
+	ContentType  string
+	FinalURL     string // After redirects
+	Duration     time.Duration
+	Truncated    bool // True if body exceeded max size and was truncated
+	Mode         string
+	RenderReason string
 }
 
 // Fetcher handles HTTP requests for downloading web pages.
@@ -212,6 +214,7 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 	host := parsedURL.Hostname()
 
 	var lastErr error
+	var lastResult *FetchResult
 
 	for attempt := 0; attempt <= f.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -245,9 +248,15 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 
 		result, err := f.fetchOnce(ctx, targetURL)
 		lastErr = err
+		if result != nil {
+			lastResult = result
+		}
 
 		if err == nil {
 			if result.StatusCode == http.StatusTooManyRequests || result.StatusCode == http.StatusServiceUnavailable {
+				if attempt == f.maxRetries {
+					return result, nil
+				}
 				f.logger.Warn("throttled response, backing off",
 					"url", targetURL,
 					"status", result.StatusCode,
@@ -265,6 +274,9 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			}
 			f.recordThrottle(host)
 		}
+	}
+	if lastResult != nil && lastErr == nil {
+		return lastResult, nil
 	}
 
 	return nil, fmt.Errorf("after %d attempts: %w", f.maxRetries+1, lastErr)
@@ -316,6 +328,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 			ContentType: contentType,
 			FinalURL:    resp.Request.URL.String(),
 			Duration:    duration,
+			Mode:        "http",
 		}, fmt.Errorf("unsupported content type: %s", contentType)
 	}
 
@@ -346,6 +359,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 		FinalURL:    resp.Request.URL.String(),
 		Duration:    duration,
 		Truncated:   truncated,
+		Mode:        "http",
 	}, nil
 }
 

@@ -31,8 +31,12 @@ var contentMigrations = []string{
 		schema_keywords    TEXT    NOT NULL DEFAULT '',
 		schema_rating      REAL,
 		referring_domains  INTEGER NOT NULL DEFAULT 0,
-		pagerank           REAL    NOT NULL DEFAULT 1.0
+		pagerank           REAL    NOT NULL DEFAULT 1.0,
+		fetch_mode         TEXT    NOT NULL DEFAULT 'http',
+		render_reason      TEXT    NOT NULL DEFAULT ''
 	)`,
+	`ALTER TABLE pages ADD COLUMN fetch_mode TEXT NOT NULL DEFAULT 'http'`,
+	`ALTER TABLE pages ADD COLUMN render_reason TEXT NOT NULL DEFAULT ''`,
 
 	// --- Performance indexes ---
 	`CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain)`,

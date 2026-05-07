@@ -1,5 +1,4 @@
-// Package config handles loading and validating application configuration
-// from YAML files and environment variables.
+// Package config handles loading and validating application configuration from YAML files.
 package config
 
 import (
@@ -14,12 +13,43 @@ import (
 // Config holds the complete application configuration.
 type Config struct {
 	Crawler       CrawlerConfig       `yaml:"crawler"`
+	Rendering     RenderingConfig     `yaml:"rendering"`
 	Storage       StorageConfig       `yaml:"storage"`
 	API           APIConfig           `yaml:"api"`
 	Logging       LoggingConfig       `yaml:"logging"`
 	Seeds         []SeedURLConfig     `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
 	Embedder      EmbedderConfig      `yaml:"embedder"`
+}
+
+// RenderingConfig controls optional JavaScript rendering via a real browser.
+type RenderingConfig struct {
+	// Enabled turns on browser fallback. HTTP fetching remains the default path.
+	Enabled bool `yaml:"enabled"`
+	// Mode controls when rendering is used: "auto" renders only weak HTTP results,
+	// "force" renders every HTML page, and "disabled" disables rendering.
+	Mode string `yaml:"mode"`
+	// BrowserWSURL is an optional remote Chrome DevTools Protocol websocket URL.
+	// In Docker this should usually point at a browser sidecar.
+	BrowserWSURL string `yaml:"browser_ws_url"`
+	// ExecutablePath optionally points to a local Chrome/Chromium executable.
+	ExecutablePath string `yaml:"executable_path"`
+	// MaxConcurrency limits simultaneous browser tabs globally.
+	MaxConcurrency int `yaml:"max_concurrency"`
+	// Timeout is the hard limit for a single rendered navigation.
+	Timeout time.Duration `yaml:"timeout"`
+	// WaitAfterLoad allows SPAs to hydrate after DOMContentLoaded.
+	WaitAfterLoad time.Duration `yaml:"wait_after_load"`
+	// MaxHTMLSizeKB caps the rendered HTML kept in memory.
+	MaxHTMLSizeKB int `yaml:"max_html_size_kb"`
+	// MinTextChars is the minimum parsed visible text before HTTP is considered useful.
+	MinTextChars int `yaml:"min_text_chars"`
+	// MinLinks is the minimum useful link count before HTTP is considered useful.
+	MinLinks int `yaml:"min_links"`
+	// RenderOnStatusCodes are non-2xx HTTP statuses worth retrying with a browser.
+	RenderOnStatusCodes []int `yaml:"render_on_status_codes"`
+	// BlockImages disables image loading in the browser to save bandwidth and memory.
+	BlockImages bool `yaml:"block_images"`
 }
 
 // CrawlerConfig controls the crawling behavior.
@@ -205,6 +235,20 @@ func DefaultConfig() *Config {
 				SeedRecrawlInterval: 24 * time.Hour,
 			},
 		},
+		Rendering: RenderingConfig{
+			Enabled:             false,
+			Mode:                "auto",
+			BrowserWSURL:        "",
+			ExecutablePath:      "",
+			MaxConcurrency:      2,
+			Timeout:             20 * time.Second,
+			WaitAfterLoad:       1200 * time.Millisecond,
+			MaxHTMLSizeKB:       2048,
+			MinTextChars:        200,
+			MinLinks:            1,
+			RenderOnStatusCodes: []int{403, 503},
+			BlockImages:         true,
+		},
 		Storage: StorageConfig{
 			DBPath: "./data/duvycrawl.db",
 		},
@@ -304,6 +348,34 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.MaxIdleConnsPerHost < 1 {
 		return fmt.Errorf("crawler.max_idle_conns_per_host must be >= 1, got %d", c.Crawler.MaxIdleConnsPerHost)
+	}
+
+	validRenderModes := map[string]bool{"auto": true, "force": true, "disabled": true}
+	if !validRenderModes[c.Rendering.Mode] {
+		return fmt.Errorf("rendering.mode must be one of [auto, force, disabled], got %q", c.Rendering.Mode)
+	}
+	if c.Rendering.MaxConcurrency < 1 {
+		return fmt.Errorf("rendering.max_concurrency must be >= 1, got %d", c.Rendering.MaxConcurrency)
+	}
+	if c.Rendering.Timeout < time.Second {
+		return fmt.Errorf("rendering.timeout must be >= 1s, got %s", c.Rendering.Timeout)
+	}
+	if c.Rendering.WaitAfterLoad < 0 {
+		return fmt.Errorf("rendering.wait_after_load must be >= 0, got %s", c.Rendering.WaitAfterLoad)
+	}
+	if c.Rendering.MaxHTMLSizeKB < 1 {
+		return fmt.Errorf("rendering.max_html_size_kb must be >= 1, got %d", c.Rendering.MaxHTMLSizeKB)
+	}
+	if c.Rendering.MinTextChars < 0 {
+		return fmt.Errorf("rendering.min_text_chars must be >= 0, got %d", c.Rendering.MinTextChars)
+	}
+	if c.Rendering.MinLinks < 0 {
+		return fmt.Errorf("rendering.min_links must be >= 0, got %d", c.Rendering.MinLinks)
+	}
+	for _, statusCode := range c.Rendering.RenderOnStatusCodes {
+		if statusCode < 100 || statusCode > 599 {
+			return fmt.Errorf("rendering.render_on_status_codes contains invalid HTTP status %d", statusCode)
+		}
 	}
 	if c.Storage.DBPath == "" {
 		return fmt.Errorf("storage.db_path must not be empty")

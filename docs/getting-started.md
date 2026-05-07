@@ -56,9 +56,17 @@ Edit `.env` and set the required values:
 TUNNEL_TOKEN=your_cloudflare_tunnel_token
 SITE_URL=https://search.yourdomain.com
 CRAWLER_API=http://duvycrawl:8080/api/v1
+```
 
-# Proxy (enabled by default via Warp)
-PROXY_URL=socks5://warp:1080
+Crawler settings such as proxy and JavaScript rendering are configured in YAML (`configs/default.yaml` or your mounted config):
+
+```yaml
+crawler:
+  proxy_url: "socks5://warp:1080"
+
+rendering:
+  enabled: true
+  browser_ws_url: "ws://browser:3000"
 ```
 
 ```bash
@@ -81,7 +89,6 @@ Your search engine will be available at `SITE_URL` (e.g. `https://search.yourdom
 | `TUNNEL_TOKEN` | Yes | — | Cloudflare Tunnel token |
 | `SITE_URL` | Yes | — | Public URL of the search UI |
 | `CRAWLER_API` | Yes | — | Internal crawler API URL |
-| `PROXY_URL` | No | `socks5://warp:1080` | Proxy for crawler traffic |
 | `TZ` | No | `UTC` | Timezone |
 | `APP_PORT` | No | `8800` | Local debug port for Suvy |
 | `DDG_ENABLED` | No | `true` | Enable DuckDuckGo fallback |
@@ -107,9 +114,6 @@ go build -o duvycrawl .
 
 # Run with custom config
 ./duvycrawl -config configs/custom.yaml
-
-# Run with SOCKS5 proxy
-PROXY_URL=socks5://localhost:1080 ./duvycrawl
 
 # Don't auto-start the crawler (API only)
 ./duvycrawl -no-start

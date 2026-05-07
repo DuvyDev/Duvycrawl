@@ -140,7 +140,7 @@ The crawler API is **not** exposed to the internet — only Suvy can reach it in
   - Gzip automático habilitado.
 - **Retry con backoff**: reintentos automáticos con espera creciente;
   no reintenta errores 4xx (excepto 429 Too Many Requests).
-- **Proxy HTTP/SOCKS5** soportado vía `PROXY_URL` environment variable.
+- **Proxy HTTP/SOCKS5** soportado vía `crawler.proxy_url` en YAML.
 - **Headers realistas**: `Accept-Encoding`, `Sec-Fetch-*`, `Upgrade-Insecure-Requests`,
   simulando un navegador real.
 

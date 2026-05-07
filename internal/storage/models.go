@@ -19,9 +19,11 @@ type Page struct {
 	Language          string    `json:"language"`          // ISO 639-1 code (es, en, pt...)
 	Region            string    `json:"region"`            // Country code from TLD (uy, es, ar...)
 	StatusCode        int       `json:"status_code"`
-	ContentHash       string    `json:"content_hash"`           // SHA-256 of content for change detection
-	URLFingerprint    string    `json:"url_fingerprint"`        // Structural fingerprint for deduplication
-	PublishedAt       time.Time `json:"published_at,omitempty"` // Article publication date
+	ContentHash       string    `json:"content_hash"`            // SHA-256 of content for change detection
+	URLFingerprint    string    `json:"url_fingerprint"`         // Structural fingerprint for deduplication
+	FetchMode         string    `json:"fetch_mode,omitempty"`    // http or browser
+	RenderReason      string    `json:"render_reason,omitempty"` // Why browser rendering was used
+	PublishedAt       time.Time `json:"published_at,omitempty"`  // Article publication date
 	CrawledAt         time.Time `json:"crawled_at"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`

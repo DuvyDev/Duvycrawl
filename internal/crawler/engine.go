@@ -16,6 +16,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
+	"github.com/DuvyDev/Duvycrawl/internal/render"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
@@ -40,17 +41,19 @@ type embedJob struct {
 // Engine is the main crawler orchestrator. It manages a pool of worker
 // goroutines that fetch, parse, and store web pages.
 type Engine struct {
-	cfg         *config.CrawlerConfig
-	store       storage.Storage
-	batchWriter *storage.BatchWriter
-	frontier    *frontier.Frontier
-	fetcher     *Fetcher
-	parser      *Parser
-	robots      *RobotsCache
-	limiter     *ratelimit.DomainLimiter
-	domainStats *DomainStatsCollector
-	embedder    *embedder.Client
-	logger      *slog.Logger
+	cfg          *config.CrawlerConfig
+	store        storage.Storage
+	batchWriter  *storage.BatchWriter
+	frontier     *frontier.Frontier
+	fetcher      *Fetcher
+	renderingCfg config.RenderingConfig
+	renderer     render.Renderer
+	parser       *Parser
+	robots       *RobotsCache
+	limiter      *ratelimit.DomainLimiter
+	domainStats  *DomainStatsCollector
+	embedder     *embedder.Client
+	logger       *slog.Logger
 
 	status  atomic.Value // EngineStatus
 	cancel  context.CancelFunc
@@ -78,14 +81,32 @@ func NewEngine(
 	domainStats *DomainStatsCollector,
 	embedClient *embedder.Client,
 	proxyURL string,
+	renderingCfg config.RenderingConfig,
 	logger *slog.Logger,
 ) *Engine {
+	var browserRenderer render.Renderer
+	if renderingEnabled(renderingCfg) {
+		var err error
+		browserRenderer, err = render.NewBrowserRenderer(renderingCfg, cfg.UserAgent, logger)
+		if err != nil {
+			logger.Warn("browser renderer disabled after initialization failure", "error", err)
+		} else {
+			logger.Info("browser renderer enabled",
+				"mode", renderingCfg.Mode,
+				"max_concurrency", renderingCfg.MaxConcurrency,
+				"remote", renderingCfg.BrowserWSURL != "",
+			)
+		}
+	}
+
 	e := &Engine{
 		cfg:            cfg,
 		store:          store,
 		batchWriter:    batchWriter,
 		frontier:       front,
 		fetcher:        NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, proxyURL, logger),
+		renderingCfg:   renderingCfg,
+		renderer:       browserRenderer,
 		parser:         NewParser(),
 		robots:         NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:        limiter,
@@ -171,6 +192,11 @@ func (e *Engine) Stop() {
 	if e.fetcher != nil {
 		if err := e.fetcher.Close(); err != nil {
 			e.logger.Warn("fetcher close failed", "error", err)
+		}
+	}
+	if e.renderer != nil {
+		if err := e.renderer.Close(); err != nil {
+			e.logger.Warn("renderer close failed", "error", err)
 		}
 	}
 
@@ -282,10 +308,22 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Skip non-2xx responses.
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
+		if ok, reason := shouldRenderStatus(e.renderingCfg, result); ok {
+			rendered, renderErr := e.renderJob(ctx, logger, job.URL, reason)
+			if renderErr == nil {
+				result = rendered
+			} else {
+				logger.Warn("browser render failed after non-2xx HTTP response", "reason", reason, "error", renderErr)
+			}
+		}
+	}
+
+	if result.StatusCode < 200 || result.StatusCode >= 300 {
 		logger.Warn("non-2xx response",
 			"status_code", result.StatusCode,
 			"content_type", result.ContentType,
 			"final_url", result.FinalURL,
+			"fetch_mode", result.Mode,
 		)
 		// Don't waste retries on permanent client errors (4xx except 429).
 		if result.StatusCode >= 400 && result.StatusCode < 500 && result.StatusCode != http.StatusTooManyRequests {
@@ -315,6 +353,18 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	if err != nil {
 		e.retryOrFail(job, logger, "parse failed", err)
 		return
+	}
+
+	if ok, reason := shouldRenderParsed(e.renderingCfg, result, parsed); ok {
+		rendered, renderErr := e.renderJob(ctx, logger, result.FinalURL, reason)
+		if renderErr != nil {
+			logger.Warn("browser render failed after weak HTTP parse", "reason", reason, "error", renderErr)
+		} else if renderedParsed, parseErr := e.parser.Parse(rendered.Body, rendered.ContentType, rendered.FinalURL); parseErr != nil {
+			logger.Warn("rendered HTML parse failed, keeping HTTP parse", "reason", reason, "error", parseErr)
+		} else {
+			result = rendered
+			parsed = renderedParsed
+		}
 	}
 
 	// Compute content hash for change detection.
@@ -349,6 +399,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		StatusCode:        result.StatusCode,
 		ContentHash:       contentHash,
 		URLFingerprint:    urlFingerprint,
+		FetchMode:         result.Mode,
+		RenderReason:      result.RenderReason,
 		PublishedAt:       parsed.PublishedAt,
 		CrawledAt:         time.Now().UTC(),
 		SchemaType:        parsed.SchemaType,
@@ -367,6 +419,8 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 		"title", page.Title,
 		"lang", page.Language,
 		"region", region,
+		"fetch_mode", result.Mode,
+		"render_reason", result.RenderReason,
 		"links_found", len(parsed.Links),
 		"images_found", len(parsed.Images),
 		"duration", result.Duration,
@@ -415,6 +469,27 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 
 	// Update domain stats (async, in-memory accumulator).
 	e.domainStats.Record(job.Domain, result.Duration)
+}
+
+func (e *Engine) renderJob(ctx context.Context, logger *slog.Logger, targetURL, reason string) (*FetchResult, error) {
+	if e.renderer == nil {
+		return nil, fmt.Errorf("renderer unavailable")
+	}
+	logger.Info("rendering page with browser", "reason", reason, "render_url", targetURL)
+	rendered, err := e.renderer.Render(ctx, targetURL)
+	if err != nil {
+		return nil, err
+	}
+	return &FetchResult{
+		StatusCode:   rendered.StatusCode,
+		Body:         rendered.Body,
+		ContentType:  rendered.ContentType,
+		FinalURL:     rendered.FinalURL,
+		Duration:     rendered.Duration,
+		Truncated:    rendered.Truncated,
+		Mode:         "browser",
+		RenderReason: reason,
+	}, nil
 }
 
 // enqueueDiscoveredLinks adds newly found URLs to the frontier.

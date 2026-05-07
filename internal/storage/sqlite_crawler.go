@@ -16,8 +16,8 @@ import (
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
@@ -30,6 +30,8 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 			status_code      = excluded.status_code,
 			content_hash     = excluded.content_hash,
 			url_fingerprint  = excluded.url_fingerprint,
+			fetch_mode       = excluded.fetch_mode,
+			render_reason    = excluded.render_reason,
 			published_at     = COALESCE(excluded.published_at, pages.published_at),
 			crawled_at       = excluded.crawled_at,
 			updated_at       = CURRENT_TIMESTAMP,
@@ -50,12 +52,15 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	if page.SchemaRating > 0 {
 		schemaRating = page.SchemaRating
 	}
+	if page.FetchMode == "" {
+		page.FetchMode = "http"
+	}
 
 	_, err := s.writeContentDB.ExecContext(ctx, query,
 		page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
 		page.Content, page.Language, page.Region,
 		page.StatusCode, page.ContentHash, page.URLFingerprint,
-		publishedAt, page.CrawledAt,
+		page.FetchMode, page.RenderReason, publishedAt, page.CrawledAt,
 		page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
 		page.SchemaAuthor, page.SchemaKeywords, schemaRating,
 	)
@@ -67,17 +72,17 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 
 // GetPageByURL retrieves a single page by its URL.
 func (s *SQLiteStorage) GetPageByURL(ctx context.Context, url string) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE url = ?", url)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE url = ?", url)
 }
 
 // GetPageByFingerprint retrieves a single page by its structural fingerprint.
 func (s *SQLiteStorage) GetPageByFingerprint(ctx context.Context, fingerprint string) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE url_fingerprint = ? LIMIT 1", fingerprint)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE url_fingerprint = ? LIMIT 1", fingerprint)
 }
 
 // GetPageByID retrieves a single page by its database ID.
 func (s *SQLiteStorage) GetPageByID(ctx context.Context, id int64) (*Page, error) {
-	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE id = ?", id)
+	return s.getPage(ctx, "SELECT id, url, domain, title, h1, h2, description, content, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, created_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating FROM pages WHERE id = ?", id)
 }
 
 func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Page, error) {
@@ -89,6 +94,7 @@ func (s *SQLiteStorage) getPage(ctx context.Context, query string, arg any) (*Pa
 	err := s.readContentDB.QueryRowContext(ctx, query, arg).Scan(
 		&p.ID, &p.URL, &p.Domain, &p.Title, &p.H1, &p.H2, &p.Description,
 		&p.Content, &p.StatusCode, &p.ContentHash, &p.URLFingerprint,
+		&p.FetchMode, &p.RenderReason,
 		&publishedAt, &crawledAt, &createdAt, &updatedAt,
 		&p.SchemaType, &p.SchemaTitle, &p.SchemaDescription, &p.SchemaImage,
 		&p.SchemaAuthor, &p.SchemaKeywords, &schemaRating,

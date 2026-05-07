@@ -35,6 +35,19 @@ services:
       timeout: 5s
       retries: 3
 
+  # ─── Ollama ───────────────────────────────
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    restart: always
+    ports:
+      - 11434:11434
+    volumes:
+      - ./ollama:/root/.ollama
+    networks:
+      - duvycrawl
+
+
   # ─── Crawler Service ──────────────────────
   duvycrawl:
     image: ghcr.io/duvydev/duvycrawl:latest
@@ -42,7 +55,9 @@ services:
     restart: unless-stopped
     environment:
       - TZ=${TZ}
-      - PROXY_URL=${PROXY_URL}
+      - RENDERING_ENABLED=${RENDERING_ENABLED:-false}
+      - RENDERING_MODE=${RENDERING_MODE:-auto}
+      - BROWSER_WS_URL=${BROWSER_WS_URL:-}
     volumes:
       - ./crawl/data:/app/data
       - ./crawl/configs:/app/configs:ro
@@ -57,6 +72,20 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+
+  # ─── Browser Renderer ─────────────────────
+  # Starts with the normal compose stack. It is only used by the crawler when
+  # rendering.enabled=true and rendering.browser_ws_url points to this service.
+  browser:
+    image: ghcr.io/browserless/chromium:latest
+    container_name: duvycrawl-browser
+    restart: unless-stopped
+    shm_size: "1gb"
+    environment:
+      - CONCURRENT=3
+      - TIMEOUT=30000
+    networks:
+      - duvycrawl
 
   # ─── Search Engine ────────────────────────
   suvy:
@@ -84,6 +113,14 @@ services:
       MAP_TILER_ENABLED: ${MAP_TILER_ENABLED}
       MAP_TILER_API_KEY: ${MAP_TILER_API_KEY}
       NOMINATIM_CACHE_TTL_DAYS: ${NOMINATIM_CACHE_TTL_DAYS}
+
+      # AI Summary
+      AI_SUMMARY_ENABLED: ${AI_SUMMARY_ENABLED}
+      AI_SUMMARY_BASE_URL: ${AI_SUMMARY_BASE_URL}
+      AI_SUMMARY_API_KEY: ${AI_SUMMARY_API_KEY}
+      AI_SUMMARY_MODEL: ${AI_SUMMARY_MODEL}
+      AI_SUMMARY_CACHE_TTL_MINUTES: ${AI_SUMMARY_CACHE_TTL_MINUTES}
+
     volumes:
       - ./suvy/data:/app/data
     networks:

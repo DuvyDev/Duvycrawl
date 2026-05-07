@@ -57,14 +57,11 @@ go build -o duvycrawl .
 
 # Run with custom config
 ./duvycrawl -config configs/custom.yaml
-
-# Run with proxy
-PROXY_URL=socks5://localhost:1080 ./duvycrawl
 ```
 
 ## Configuration
 
-Duvycrawl uses a YAML config file (`configs/default.yaml`) for crawler settings, and a `.env` file for deployment-specific values (proxy, tunnel token, URLs).
+Duvycrawl uses a YAML config file (`configs/default.yaml`) for crawler settings, including proxy and rendering. The `.env` file is only for compose/deployment values used by surrounding services.
 
 ### `.env` file
 
@@ -75,7 +72,6 @@ Copy `.env.example` to `.env` and adjust:
 | `TUNNEL_TOKEN` | Yes | Cloudflare Tunnel token |
 | `SITE_URL` | Yes | Public URL of the search UI |
 | `CRAWLER_API` | Yes | Internal crawler API URL (default: `http://duvycrawl:8080/api/v1`) |
-| `PROXY_URL` | No | SOCKS5/HTTP proxy for crawler traffic (default: `socks5://warp:1080`) |
 | `TZ` | No | Timezone (default: `UTC`) |
 | `APP_PORT` | No | Local debug port for the search UI |
 | `DDG_ENABLED` | No | Enable DuckDuckGo fallback results |
@@ -92,7 +88,7 @@ Copy `.env.example` to `.env` and adjust:
 crawler:
   workers: 400
   max_depth: 1
-  seed_domains_only: true
+  proxy_url: "socks5://warp:1080"
   auto_start: true
 
 storage:
@@ -107,20 +103,24 @@ See [Configuration](./docs/configuration.md) for all options.
 
 ### Proxy
 
-Set `PROXY_URL` in `.env` to route crawler traffic through a proxy:
+Set `crawler.proxy_url` in YAML to route crawler traffic through a proxy:
 
-```env
+```yaml
 # Cloudflare Warp (default in docker-compose)
-PROXY_URL=socks5://warp:1080
+crawler:
+  proxy_url: "socks5://warp:1080"
 
 # Custom SOCKS5 with remote DNS
-PROXY_URL=socks5h://proxy.example.com:1080
+crawler:
+  proxy_url: "socks5h://proxy.example.com:1080"
 
 # HTTP proxy
-PROXY_URL=http://proxy.example.com:8080
+crawler:
+  proxy_url: "http://proxy.example.com:8080"
 
-# No proxy (empty or unset)
-PROXY_URL=
+# No proxy
+crawler:
+  proxy_url: ""
 ```
 
 ## API Endpoints
