@@ -266,10 +266,16 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var startingDepth int
+	cfg := h.engine.Config()
+	if cfg.MaxDepth > cfg.APIMaxDepth {
+		startingDepth = cfg.MaxDepth - cfg.APIMaxDepth
+	}
+
 	var queued int
 	if len(urlsToEnqueue) > 0 {
 		var err error
-		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, 0, baseScore)
+		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, startingDepth, baseScore)
 		if err != nil {
 			h.logger.Error("failed to enqueue URLs", "error", err, "count", len(urlsToEnqueue))
 			writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")

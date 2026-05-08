@@ -70,6 +70,8 @@ type CrawlerConfig struct {
 	Workers int `yaml:"workers"`
 	// MaxDepth is the maximum link-follow depth from seed pages.
 	MaxDepth int `yaml:"max_depth"`
+	// APIMaxDepth is the maximum link-follow depth for URLs enqueued via the API.
+	APIMaxDepth int `yaml:"api_max_depth"`
 	// RequestTimeout is the maximum duration for a single HTTP request.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
 	// PolitenessDelay is the minimum wait between requests to the same domain.
@@ -229,6 +231,7 @@ func DefaultConfig() *Config {
 		Crawler: CrawlerConfig{
 			Workers:                  100,
 			MaxDepth:                 3,
+			APIMaxDepth:              2,
 			RequestTimeout:           15 * time.Second,
 			PolitenessDelay:          1 * time.Second,
 			RandomDelay:              0,
@@ -387,6 +390,9 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.MaxDepth < 0 {
 		return fmt.Errorf("crawler.max_depth must be >= 0, got %d", c.Crawler.MaxDepth)
+	}
+	if c.Crawler.APIMaxDepth < 0 {
+		return fmt.Errorf("crawler.api_max_depth must be >= 0, got %d", c.Crawler.APIMaxDepth)
 	}
 	if c.Crawler.RequestTimeout < 1*time.Second {
 		return fmt.Errorf("crawler.request_timeout must be >= 1s, got %s", c.Crawler.RequestTimeout)

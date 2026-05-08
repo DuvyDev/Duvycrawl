@@ -143,6 +143,11 @@ func NewEngine(
 	return e
 }
 
+// Config returns the engine's crawler configuration.
+func (e *Engine) Config() *config.CrawlerConfig {
+	return e.cfg
+}
+
 // Start launches the worker pool and begins crawling.
 // It is non-blocking and returns immediately. Use Stop() to shut down.
 func (e *Engine) Start(ctx context.Context) {
