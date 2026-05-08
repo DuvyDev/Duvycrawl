@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -327,6 +328,32 @@ func Load(path string) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file %q: %w", path, err)
+	}
+
+	// Load additional seeds from the "seeds" subdirectory if it exists.
+	seedsDir := filepath.Join(filepath.Dir(path), "seeds")
+	if info, err := os.Stat(seedsDir); err == nil && info.IsDir() {
+		files, err := os.ReadDir(seedsDir)
+		if err == nil {
+			for _, f := range files {
+				if f.IsDir() || (!strings.HasSuffix(f.Name(), ".yaml") && !strings.HasSuffix(f.Name(), ".yml")) {
+					continue
+				}
+
+				seedPath := filepath.Join(seedsDir, f.Name())
+				seedData, err := os.ReadFile(seedPath)
+				if err != nil {
+					continue
+				}
+
+				var extra struct {
+					Seeds []SeedURLConfig `yaml:"seeds"`
+				}
+				if err := yaml.Unmarshal(seedData, &extra); err == nil {
+					cfg.Seeds = append(cfg.Seeds, extra.Seeds...)
+				}
+			}
+		}
 	}
 
 	if err := cfg.validate(); err != nil {

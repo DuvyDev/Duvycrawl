@@ -1,0 +1,68 @@
+# Seed URLs: Uruguay News, Cinema, Banking & Services
+seeds:
+  - url: "https://www.elpais.com.uy/"
+    recrawl_interval: 1h
+  - url: "https://www.telenoche.com.uy/"
+    recrawl_interval: 1h
+  - url: "https://www.montevideo.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://www.subrayado.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://elobservador.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://ladiaria.com.uy/"
+    recrawl_interval: 2h
+  - url: "https://www.banifox.com/"
+    recrawl_interval: 48h
+  - url: "https://vientos.uy/"
+    recrawl_interval: 48h
+  - url: "https://dripster.uy/"
+    recrawl_interval: 48h
+  - url: "https://thotcomputacion.com.uy/"
+    recrawl_interval: 48h
+  - url: "https://loi.com.uy/"
+    recrawl_interval: 48h
+  - url: "https://www.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://www.movie.com.uy/home"
+    recrawl_interval: 72h
+  - url: "https://www.lifecinemas.com.uy/"
+    recrawl_interval: 72h
+  - url: "https://cinesopera.com/"
+    recrawl_interval: 72h
+  - url: "https://www.grupocine.com.uy/"
+    recrawl_interval: 72h
+  - url: "https://www.disco.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.eldorado.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.brou.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.midinero.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.oca.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://prexcard.com/"
+    recrawl_interval: 168h
+  - url: "https://www.tiendainglesa.com.uy/supermercado"
+    recrawl_interval: 168h
+  - url: "https://www.tata.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.geant.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.devoto.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://1122.com.uy/"
+    recrawl_interval: 24h
+  - url: "https://sucive.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://www.uruguayconcursa.gub.uy/"
+    recrawl_interval: 24h
+  - url: "https://tienda.farmashop.com.uy/"
+    recrawl_interval: 24h
+  - url: "https://ues.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://correo.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://dac.com.uy/"
+    recrawl_interval: 168h

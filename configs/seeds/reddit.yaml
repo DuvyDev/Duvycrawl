@@ -1,0 +1,36 @@
+# Seed URLs: Reddit Communities
+seeds:
+  - url: "https://www.reddit.com/news/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/uruguay/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/monte_video/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/argentina/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/gaming/"
+    recrawl_interval: 40m
+  - url: "https://www.reddit.com/r/pcmasterrace/"
+    recrawl_interval: 30m
+  - url: "https://www.reddit.com/r/Selfhosted/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/LocalLLM/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/privacy/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/sysadmin/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/firefox/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/buildapc/"
+    recrawl_interval: 3h
+  - url: "https://www.reddit.com/r/Warframe/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/marvelrivals/"
+    recrawl_interval: 1h
+  - url: "https://www.reddit.com/r/DestinyTheGame/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/hytale/"
+    recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/linux_gaming/"
+    recrawl_interval: 2h

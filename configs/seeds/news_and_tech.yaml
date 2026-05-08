@@ -1,0 +1,38 @@
+# Seed URLs: Technology, AI & General News
+seeds:
+  - url: "https://news.ycombinator.com/"
+    recrawl_interval: 15m
+  - url: "https://www.mozilla.org/es-ES/"
+    recrawl_interval: 72h
+  - url: "https://www.xataka.com/"
+    recrawl_interval: 3h
+  - url: "https://www.justwatch.com/es"
+    recrawl_interval: 72h
+  - url: "https://www.imdb.com/es-es/"
+    recrawl_interval: 72h
+  - url: "https://www.infobae.com/"
+    recrawl_interval: 1h
+  - url: "https://www.meneame.net/"
+    recrawl_interval: 1h
+  - url: "https://www.cronica.com.ar/"
+    recrawl_interval: 1h
+  - url: "https://distrowatch.com/"
+    recrawl_interval: 72h
+  - url: "https://www.phoronix.com/"
+    recrawl_interval: 72h
+  - url: "https://openrouter.ai/"
+    recrawl_interval: 72h
+  - url: "https://opencode.ai/"
+    recrawl_interval: 72h
+  - url: "https://hub.docker.com/"
+    recrawl_interval: 72h
+  - url: "https://github.com/trending"
+    recrawl_interval: 24h
+  - url: "https://www.mindstudio.ai/"
+    recrawl_interval: 24h
+  - url: "https://artificialanalysis.ai/"
+    recrawl_interval: 24h
+  - url: "https://www.datacamp.com/"
+    recrawl_interval: 24h
+  - url: "https://benchlm.ai/"
+    recrawl_interval: 24h
