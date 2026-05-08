@@ -104,7 +104,7 @@ func run() error {
 		store.WithEmbedder(embedClient)
 	}
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Crawler.ProxyURL, cfg.Rendering, logger)
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Rendering, logger)
 
 	sched := scheduler.New(store, front, cfg.Crawler.Scheduler, logger)
 

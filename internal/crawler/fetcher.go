@@ -2,20 +2,15 @@ package crawler
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
-	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/net/proxy"
 )
 
 // FetchResult contains the raw result of an HTTP fetch operation.
@@ -35,12 +30,11 @@ type FetchResult struct {
 // adaptive per-host backoff for throttled responses, and an optimized
 // connection pool for high-throughput crawling.
 type Fetcher struct {
-	client        *http.Client
+	proxyManager  *ProxyManager
 	userAgent     string
 	maxBodySizeKB int
 	maxRetries    int
 	logger        *slog.Logger
-	dnsCache      *DNSCache
 
 	hostBackoffMu sync.Mutex
 	hostBackoff   map[string]*hostBackoffEntry
@@ -99,108 +93,20 @@ func (f *Fetcher) recordThrottle(host string) {
 }
 
 // NewFetcher creates a new HTTP fetcher with the given configuration.
-func NewFetcher(userAgent string, timeout time.Duration, maxBodySizeKB, maxRetries, maxIdleConnsPerHost int, disableCookies bool, proxyURL string, logger *slog.Logger) *Fetcher {
-	baseDialer := &net.Dialer{
-		Timeout:   10 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			Renegotiation:      tls.RenegotiateOnceAsClient,
-			MinVersion:         tls.VersionTLS12,
-		},
-		TLSHandshakeTimeout:   10 * time.Second,
-		MaxIdleConns:          1000,
-		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
-		MaxConnsPerHost:       maxIdleConnsPerHost,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: timeout,
-		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    false,
-		ForceAttemptHTTP2:     true,
-	}
-
-	var dnsCache *DNSCache
-	if proxyURL != "" {
-		parsedProxy, err := url.Parse(proxyURL)
-		if err == nil {
-			// SOCKS5 proxy (including socks5h:// for remote DNS resolution).
-			if parsedProxy.Scheme == "socks5" || parsedProxy.Scheme == "socks5h" {
-				dialer, err := proxy.FromURL(parsedProxy, proxy.Direct)
-				if err == nil {
-					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-						return dialer.Dial(network, addr)
-					}
-					logger.Info("using socks5 proxy", "url", proxyURL)
-				} else {
-					logger.Warn("failed to create socks5 dialer, ignoring proxy", "url", proxyURL, "error", err)
-				}
-			} else {
-				transport.Proxy = http.ProxyURL(parsedProxy)
-				logger.Info("using http proxy", "url", proxyURL)
-			}
-		} else {
-			logger.Warn("invalid proxy URL, ignoring", "url", proxyURL, "error", err)
-		}
-	} else {
-		dnsCache = NewDNSCache(5*time.Minute, baseDialer, logger)
-		transport.DialContext = dnsCache.DialContext
-	}
-
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("stopped after 10 redirects")
-			}
-			// Preserve headers on redirect (like Colly does).
-			if len(via) > 0 {
-				lastReq := via[len(via)-1]
-				for k, v := range lastReq.Header {
-					// Skip headers that should not be blindly forwarded.
-					if k == "Cookie" {
-						continue
-					}
-					req.Header[k] = v
-				}
-				// Only copy Authorization if same host (security).
-				if lastReq.URL.Host == req.URL.Host {
-					if auth := lastReq.Header.Get("Authorization"); auth != "" {
-						req.Header.Set("Authorization", auth)
-					}
-				}
-			}
-			return nil
-		},
-	}
-
-	if !disableCookies {
-		jar, _ := cookiejar.New(nil)
-		client.Jar = jar
-		logger.Info("cookie jar enabled")
-	} else {
-		logger.Info("cookie jar disabled")
-	}
-
+func NewFetcher(userAgent string, maxBodySizeKB, maxRetries int, proxyManager *ProxyManager, logger *slog.Logger) *Fetcher {
 	return &Fetcher{
-		client:        client,
+		proxyManager:  proxyManager,
 		userAgent:     userAgent,
 		maxBodySizeKB: maxBodySizeKB,
 		maxRetries:    maxRetries,
 		logger:        logger.With("component", "fetcher"),
 		hostBackoff:   initHostBackoff(),
-		dnsCache:      dnsCache,
 	}
 }
 
-// Close releases resources held by the fetcher (e.g. DNS cache janitor).
+// Close releases resources held by the fetcher.
 func (f *Fetcher) Close() error {
-	if f.dnsCache != nil {
-		f.dnsCache.Close()
-	}
+	// ProxyManager handles closing DNS caches.
 	return nil
 }
 
@@ -246,7 +152,8 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			}
 		}
 
-		result, err := f.fetchOnce(ctx, targetURL)
+		pClient := f.proxyManager.GetClient()
+		result, err := f.fetchOnce(ctx, pClient.Client, targetURL)
 		lastErr = err
 		if result != nil {
 			lastResult = result
@@ -273,6 +180,9 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 				return nil, err
 			}
 			f.recordThrottle(host)
+		} else if err != nil {
+			// Mark proxy as down if there's a network-level error (e.g. connection refused)
+			f.proxyManager.MarkDown(pClient)
 		}
 	}
 	if lastResult != nil && lastErr == nil {
@@ -282,8 +192,8 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 	return nil, fmt.Errorf("after %d attempts: %w", f.maxRetries+1, lastErr)
 }
 
-// fetchOnce performs a single HTTP GET request.
-func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult, error) {
+// fetchOnce performs a single HTTP GET request using the provided client.
+func (f *Fetcher) fetchOnce(ctx context.Context, client *http.Client, targetURL string) (*FetchResult, error) {
 	start := time.Now()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
@@ -311,7 +221,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, targetURL string) (*FetchResult
 	req.Header.Set("Sec-Fetch-Site", "none")
 	req.Header.Set("Sec-Fetch-User", "?1")
 
-	resp, err := f.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching %q: %w", targetURL, err)
 	}

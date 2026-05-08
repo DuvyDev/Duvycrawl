@@ -14,13 +14,13 @@ crawler:
   # This makes crawl patterns less predictable and helps avoid blocks.
   random_delay: 1000ms
   # Maximum retry attempts for failed requests
-  max_retries: 3
+  max_retries: 2
   # User-Agent string sent with every request.
   # Must match a real browser UA for anti-bot bypass.
   # DO NOT use bot-like identifiers (Googlebot, crawler, etc.).
   # NOTE: Some WAFs block macOS UAs while allowing Windows ones. If you see
   # unexpected 403s, try switching to a current Windows Chrome UA.
-  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
   # Maximum page size to download (in KB)
   max_page_size_kb: 512
   # Whether to respect robots.txt directives
@@ -37,7 +37,13 @@ crawler:
   # Proxy configuration.
   # Supports: http://, https://, socks5://, socks5h://
   # WARP example: socks5://warp:1080
-  proxy_url: ""
+  # The crawler prioritizes them in order and automatically fails over.
+  # Use "direct" as an entry to allow non-proxied connections.
+  proxy_urls:
+    - "socks5://warp:1080"
+    - "direct"
+  # How often the background health monitor checks proxies.
+  proxy_check_interval: 60s
   # How often per-domain crawl statistics are flushed from memory to SQLite.
   # Shorter intervals = fresher stats but more DB writes.
   # Longer intervals = fewer writes but possible data loss on crash.
@@ -76,8 +82,9 @@ crawler:
         weight: 5.0
       - term: "warframe"
         weight: 5.0
-      - term: "destiny 2"
+      - term: "destiny"
         weight: 5.0
+
   # Scheduler controls how often seed URLs are re-crawled.
   scheduler:
     tick_interval: 10m
@@ -176,8 +183,20 @@ seeds:
     recrawl_interval: 2h
   - url: "https://www.subrayado.com.uy/"
     recrawl_interval: 2h
+  - url: "https://elobservador.com.uy/"
+    recrawl_interval: 2h
   - url: "https://ladiaria.com.uy/"
     recrawl_interval: 2h
+  - url: "https://www.banifox.com/"
+    recrawl_interval: 48h
+  - url: "https://vientos.uy/"
+    recrawl_interval: 48h
+  - url: "https://dripster.uy/"
+    recrawl_interval: 48h
+  - url: "https://thotcomputacion.com.uy/"
+    recrawl_interval: 48h
+  - url: "https://loi.com.uy/"
+    recrawl_interval: 48h
   - url: "https://www.marca.com/"
     recrawl_interval: 2h
   - url: "https://www.espn.com.uy/"
@@ -189,7 +208,9 @@ seeds:
   - url: "https://www.cronica.com.ar/"
     recrawl_interval: 1h
   - url: "https://www.fandom.com/"
-    recrawl_interval: 8h
+    recrawl_interval: 24h
+  - url: "https://www.gamingonlinux.com/"
+    recrawl_interval: 2h
   - url: "https://www.warframe.com/es"
     recrawl_interval: 168h
   - url: "https://overframe.gg/"
@@ -204,7 +225,7 @@ seeds:
     recrawl_interval: 168h
   - url: "https://steamdb.info/"
     recrawl_interval: 168h
-  - url: "https://protondb.com/"
+  - url: "https://www.protondb.com/"
     recrawl_interval: 168h
   - url: "https://distrowatch.com/"
     recrawl_interval: 72h
@@ -231,6 +252,14 @@ seeds:
   - url: "https://www.disco.com.uy/"
     recrawl_interval: 168h
   - url: "https://www.eldorado.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.brou.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.midinero.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://www.oca.com.uy/"
+    recrawl_interval: 168h
+  - url: "https://prexcard.com/"
     recrawl_interval: 168h
   - url: "https://www.tiendainglesa.com.uy/supermercado"
     recrawl_interval: 168h

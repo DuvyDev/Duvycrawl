@@ -95,8 +95,12 @@ type CrawlerConfig struct {
 	// connections to keep per host. Higher values improve throughput when
 	// crawling the same domains repeatedly.
 	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
-	// ProxyURL is an optional HTTP/HTTPS proxy URL.
-	ProxyURL string `yaml:"proxy_url"`
+	// ProxyURLs is a list of HTTP/HTTPS/SOCKS5 proxy URLs.
+	// The crawler prioritizes them in order and automatically fails over.
+	// Use "direct" as an entry to allow non-proxied connections.
+	ProxyURLs []string `yaml:"proxy_urls"`
+	// ProxyCheckInterval is how often the background health monitor checks proxies.
+	ProxyCheckInterval time.Duration `yaml:"proxy_check_interval"`
 	// DomainStatsFlushInterval controls how often per-domain crawl statistics
 	// are flushed from memory to SQLite. Shorter intervals = more writes but
 	// fresher stats. Longer intervals = fewer writes but possible data loss on
@@ -225,7 +229,8 @@ func DefaultConfig() *Config {
 			ParallelismPerDomain:     4,
 			DisableCookies:           false,
 			MaxIdleConnsPerHost:      100,
-			ProxyURL:                 "",
+			ProxyURLs:                nil,
+			ProxyCheckInterval:       60 * time.Second,
 			DomainStatsFlushInterval: 30 * time.Second,
 			AutoStart:                true,
 			ScoringStrategy:          "adaptive",
@@ -362,6 +367,9 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.MaxIdleConnsPerHost < 1 {
 		return fmt.Errorf("crawler.max_idle_conns_per_host must be >= 1, got %d", c.Crawler.MaxIdleConnsPerHost)
+	}
+	if len(c.Crawler.ProxyURLs) > 0 && c.Crawler.ProxyCheckInterval < 1*time.Second {
+		return fmt.Errorf("crawler.proxy_check_interval must be >= 1s, got %s", c.Crawler.ProxyCheckInterval)
 	}
 
 	validRenderModes := map[string]bool{"auto": true, "force": true, "disabled": true}

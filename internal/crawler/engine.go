@@ -56,6 +56,7 @@ type Engine struct {
 	batchWriter  *storage.BatchWriter
 	frontier     *frontier.Frontier
 	fetcher      *Fetcher
+	proxyManager *ProxyManager
 	renderingCfg config.RenderingConfig
 	renderer     render.Renderer
 	parser       *Parser
@@ -94,14 +95,16 @@ func NewEngine(
 	limiter *ratelimit.DomainLimiter,
 	domainStats *DomainStatsCollector,
 	embedClient *embedder.Client,
-	proxyURL string,
 	renderingCfg config.RenderingConfig,
 	logger *slog.Logger,
 ) *Engine {
+	pm := NewProxyManager(cfg.ProxyURLs, cfg.ProxyCheckInterval, cfg.RequestTimeout, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, logger)
+
 	var browserRenderer render.Renderer
 	if renderingEnabled(renderingCfg) {
 		var err error
-		browserRenderer, err = render.NewBrowserRenderer(renderingCfg, cfg.UserAgent, proxyURL, logger)
+		primaryProxy := pm.PrimaryProxyURL()
+		browserRenderer, err = render.NewBrowserRenderer(renderingCfg, cfg.UserAgent, primaryProxy, logger)
 		if err != nil {
 			logger.Warn("browser renderer disabled after initialization failure", "error", err)
 		} else {
@@ -109,7 +112,7 @@ func NewEngine(
 				"mode", renderingCfg.Mode,
 				"max_concurrency", renderingCfg.MaxConcurrency,
 				"remote", renderingCfg.BrowserWSURL != "",
-				"proxy", proxyURL,
+				"primary_proxy", primaryProxy,
 			)
 		}
 	}
@@ -119,7 +122,8 @@ func NewEngine(
 		store:          store,
 		batchWriter:    batchWriter,
 		frontier:       front,
-		fetcher:        NewFetcher(cfg.UserAgent, cfg.RequestTimeout, cfg.MaxPageSizeKB, cfg.MaxRetries, cfg.MaxIdleConnsPerHost, cfg.DisableCookies, proxyURL, logger),
+		proxyManager:   pm,
+		fetcher:        NewFetcher(cfg.UserAgent, cfg.MaxPageSizeKB, cfg.MaxRetries, pm, logger),
 		renderingCfg:   renderingCfg,
 		renderer:       browserRenderer,
 		parser:         NewParser(),
@@ -160,6 +164,9 @@ func (e *Engine) Start(ctx context.Context) {
 		"max_retries", e.cfg.MaxRetries,
 		"disable_cookies", e.cfg.DisableCookies,
 	)
+
+	// Start proxy health monitor
+	e.proxyManager.StartMonitor(ctx)
 
 	// Launch workers.
 	for i := range e.cfg.Workers {
@@ -203,6 +210,10 @@ func (e *Engine) Stop() {
 		if err := e.batchWriter.Flush(); err != nil {
 			e.logger.Warn("final batch flush failed", "error", err)
 		}
+	}
+
+	if e.proxyManager != nil {
+		e.proxyManager.StopMonitor()
 	}
 
 	if e.fetcher != nil {
@@ -613,7 +624,8 @@ func (e *Engine) processRenderBacklogItem(ctx context.Context, logger *slog.Logg
 	}
 	if err != nil {
 		logger.Warn("browser render failed for backlog item", "error", err)
-		e.pagesErrored.Add(1)
+		// Re-enqueue the job for retry on fetch failure (proxy down, timeout, etc)
+		e.retryOrFail(job, logger, "browser render failed", err)
 		return
 	}
 	if rendered.StatusCode < 200 || rendered.StatusCode >= 300 {
