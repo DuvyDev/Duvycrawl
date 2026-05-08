@@ -295,11 +295,11 @@ func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
 	stats := h.frontier.Stats()
 	renderBacklog := h.engine.RenderBacklogLen()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pending":         stats.Pending,
-		"domains":         stats.Domains,
-		"total_enqueued":   stats.Enqueued,
-		"total_dequeued":   stats.Dequeued,
-		"render_backlog":   renderBacklog,
+		"pending":        stats.Pending,
+		"domains":        stats.Domains,
+		"total_enqueued": stats.Enqueued,
+		"total_dequeued": stats.Dequeued,
+		"render_backlog": renderBacklog,
 	})
 }
 
