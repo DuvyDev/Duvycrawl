@@ -59,11 +59,13 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, proxyURL s
 	var allocCtx context.Context
 	var cancel context.CancelFunc
 
+	sanitizedProxy := sanitizeProxyURL(proxyURL)
+
 	if cfg.BrowserWSURL != "" {
 		wsURL := cfg.BrowserWSURL
-		if proxyURL != "" {
+		if sanitizedProxy != "" {
 			launchJSON, _ := json.Marshal(map[string]interface{}{
-				"args": []string{"--proxy-server=" + proxyURL},
+				"args": []string{"--proxy-server=" + sanitizedProxy},
 			})
 			wsURL = fmt.Sprintf("%s?launch=%s", wsURL, base64.StdEncoding.EncodeToString(launchJSON))
 		}
@@ -78,8 +80,8 @@ func NewBrowserRenderer(cfg config.RenderingConfig, userAgent string, proxyURL s
 			chromedp.Flag("disable-sync", true),
 			chromedp.Flag("mute-audio", true),
 		)
-		if proxyURL != "" {
-			opts = append(opts, chromedp.Flag("proxy-server", proxyURL))
+		if sanitizedProxy != "" {
+			opts = append(opts, chromedp.Flag("proxy-server", sanitizedProxy))
 		}
 		if cfg.BlockImages {
 			opts = append(opts, chromedp.Flag("blink-settings", "imagesEnabled=false"))
@@ -233,4 +235,14 @@ func (r *BrowserRenderer) Close() error {
 		r.cancel()
 	}
 	return nil
+}
+
+// sanitizeProxyURL converts Go-style proxy URLs to Chromium-compatible ones.
+// Specifically, it maps "socks5h://" (SOCKS5 with remote DNS) to "socks5://"
+// because Chromium does not recognize the 'h' suffix in its command-line flags.
+func sanitizeProxyURL(proxyURL string) string {
+	if strings.HasPrefix(proxyURL, "socks5h://") {
+		return "socks5://" + strings.TrimPrefix(proxyURL, "socks5h://")
+	}
+	return proxyURL
 }
