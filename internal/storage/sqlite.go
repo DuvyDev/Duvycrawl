@@ -62,7 +62,8 @@ type searchQuery struct {
 	lowered        string
 	normalized     string
 	compact        string
-	tokens         []string
+	tokens         []string   // All significant tokens (for Go-side scoring)
+	ftsTokens      []string   // Stopword-filtered tokens (for FTS5 query building)
 	fragments      []string
 	navTerm        string
 	domainLike     string

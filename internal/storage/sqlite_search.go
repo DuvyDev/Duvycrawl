@@ -37,19 +37,26 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	)
 
 	// --- FTS modes: try phrase → proximity → exact → majority (N-1) → prefix → relaxed ---
+	// Phrase and proximity use full tokens (they match exact sequences where
+	// stopwords matter). All other modes use ftsTokens (stopword-filtered)
+	// to avoid AND-intersecting massive posting lists.
 	plans := []struct {
 		mode     searchMode
 		ftsQuery string
 	}{
 		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.tokens)},
 		{mode: searchModeFTSProximity, ftsQuery: buildFTSProximityQuery(q.tokens)},
-		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.tokens)},
-		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q.tokens)},
-		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.tokens)},
-		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q.tokens)},
-		{mode: searchModeFTSCore2, ftsQuery: buildFTSCore2Query(q.tokens)},
-		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.tokens)},
+		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.ftsTokens)},
+		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q.ftsTokens)},
+		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.ftsTokens)},
+		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q.ftsTokens)},
+		{mode: searchModeFTSCore2, ftsQuery: buildFTSCore2Query(q.ftsTokens)},
+		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.ftsTokens)},
 	}
+
+	// Per-plan timeout: prevent one slow FTS query from eating the entire
+	// 10s search budget. This ensures we always reach relaxed fallbacks.
+	const perPlanTimeout = 2500 * time.Millisecond
 
 	for _, plan := range plans {
 		if searchCtx.Err() != nil {
@@ -59,21 +66,35 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 			continue
 		}
 
-		count, err := s.countFTSCandidates(searchCtx, plan.ftsQuery)
+		planCtx, planCancel := context.WithTimeout(searchCtx, perPlanTimeout)
+
+		count, err := s.countFTSCandidates(planCtx, plan.ftsQuery)
 		if err != nil {
+			planCancel()
 			if searchCtx.Err() != nil {
 				break
+			}
+			// Per-plan timeout — skip to next mode instead of failing.
+			if planCtx.Err() != nil {
+				s.logger.Debug("FTS plan timed out, skipping", "mode", plan.mode, "query", query)
+				continue
 			}
 			return nil, 0, fmt.Errorf("counting %s results for %q: %w", plan.mode, query, err)
 		}
 		if count == 0 {
+			planCancel()
 			continue
 		}
 
-		results, err := s.searchFTSCandidates(searchCtx, plan.mode, plan.ftsQuery, q, lang, candidateLimit)
+		results, err := s.searchFTSCandidates(planCtx, plan.mode, plan.ftsQuery, q, lang, candidateLimit)
+		planCancel()
 		if err != nil {
 			if searchCtx.Err() != nil {
 				break
+			}
+			if planCtx.Err() != nil {
+				s.logger.Debug("FTS plan timed out during search, skipping", "mode", plan.mode, "query", query)
+				continue
 			}
 			return nil, 0, fmt.Errorf("searching %s candidates for %q: %w", plan.mode, query, err)
 		}
@@ -110,8 +131,8 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 					mode     searchMode
 					ftsQuery string
 				}{
-					{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(qCorrect.tokens)},
-					{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(qCorrect.tokens)},
+					{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(qCorrect.ftsTokens)},
+					{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(qCorrect.ftsTokens)},
 				}
 
 				for _, plan := range fallbackPlans {
@@ -444,12 +465,18 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		}
 	}
 
+	// Filter stopwords for FTS query building. The full searchTokens are
+	// preserved for Go-side scoring (phrase matching, coverage, etc.).
+	ftsTokens := filterStopwords(searchTokens)
+
 	s.logger.Debug("search query debug",
 		"raw", query,
 		"navTerm", navTerm,
 		"domainLike", domainLike,
 		"navigational", navTerm != "" || domainLike != "",
 		"tokens", strings.Join(searchTokens, ","),
+		"ftsTokens", strings.Join(ftsTokens, ","),
+		"stopwordsRemoved", len(searchTokens)-len(ftsTokens),
 	)
 	return searchQuery{
 		raw:            query,
@@ -457,6 +484,7 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		normalized:     normalized,
 		compact:        strings.ReplaceAll(normalized, " ", ""),
 		tokens:         searchTokens,
+		ftsTokens:      ftsTokens,
 		fragments:      buildSearchFragments(searchTokens),
 		navTerm:        navTerm,
 		domainLike:     domainLike,
@@ -1608,6 +1636,53 @@ func normalizeSearchText(value string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// searchStopwords contains common function words in Spanish and English that
+// appear in a huge percentage of indexed documents. Including them in FTS5
+// AND queries forces SQLite to intersect massive posting lists, causing
+// timeouts on natural language queries like "que paso con tumangaonline?".
+//
+// These are only stripped from FTS5 MATCH expressions — the full token list
+// is preserved for Go-side scoring (phrase matching, coverage, etc.).
+var searchStopwords = map[string]struct{}{
+	// --- Spanish ---
+	"a": {}, "al": {}, "con": {}, "de": {}, "del": {}, "el": {}, "en": {},
+	"es": {}, "la": {}, "las": {}, "lo": {}, "los": {}, "le": {}, "les": {},
+	"me": {}, "mi": {}, "no": {}, "nos": {}, "o": {}, "por": {}, "que": {},
+	"se": {}, "si": {}, "sin": {}, "su": {}, "sus": {}, "te": {}, "tu": {},
+	"tus": {}, "un": {}, "una": {}, "y": {}, "ya": {},
+	"como": {}, "cual": {}, "donde": {}, "este": {}, "esta": {}, "esto": {},
+	"ese": {}, "esa": {}, "eso": {}, "para": {}, "pero": {},
+	"mas": {}, "muy": {}, "fue": {}, "hay": {}, "ser": {},
+	// --- English ---
+	"an": {}, "and": {}, "are": {}, "as": {}, "at": {}, "be": {}, "but": {},
+	"by": {}, "do": {}, "for": {}, "from": {}, "had": {}, "has": {}, "have": {},
+	"he": {}, "her": {}, "him": {}, "his": {}, "how": {}, "if": {}, "in": {},
+	"is": {}, "it": {}, "its": {}, "my": {}, "not": {}, "of": {}, "on": {},
+	"or": {}, "our": {}, "she": {}, "so": {}, "the": {}, "to": {}, "up": {},
+	"us": {}, "was": {}, "we": {}, "who": {}, "you": {},
+}
+
+// filterStopwords removes common function words from token lists to prevent
+// FTS5 from building enormous AND intersections. Always keeps at least one
+// token — if every token is a stopword, returns the originals unchanged.
+func filterStopwords(tokens []string) []string {
+	if len(tokens) <= 1 {
+		return tokens // Single-word queries should never be filtered.
+	}
+
+	filtered := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		if _, stop := searchStopwords[t]; !stop {
+			filtered = append(filtered, t)
+		}
+	}
+
+	if len(filtered) == 0 {
+		return tokens // All tokens are stopwords — keep originals.
+	}
+	return filtered
+}
+
 func normalizeDomainLikeQuery(query string) string {
 	value := strings.ToLower(strings.TrimSpace(query))
 	if value == "" {
@@ -2004,14 +2079,21 @@ func (s *SQLiteStorage) RecordClick(ctx context.Context, query string, url strin
 }
 
 func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, offset int) ([]ImageSearchResult, int, error) {
-	if query == "" {
+	q := s.newSearchQuery(query)
+	if q.normalized == "" || len(q.ftsTokens) == 0 {
+		return nil, 0, nil
+	}
+
+	// Use prefix query for images as it's forgiving and safe from FTS5 syntax errors.
+	ftsQuery := buildFTSPrefixQuery(q.ftsTokens)
+	if ftsQuery == "" {
 		return nil, 0, nil
 	}
 
 	// Count total matches.
 	var total int
 	countQuery := `SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH ?`
-	if err := s.searchContentDB.QueryRowContext(ctx, countQuery, query).Scan(&total); err != nil {
+	if err := s.searchContentDB.QueryRowContext(ctx, countQuery, ftsQuery).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("counting image results for %q: %w", query, err)
 	}
 
@@ -2030,7 +2112,7 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	LIMIT ? OFFSET ?
 	`
 
-	rows, err := s.searchContentDB.QueryContext(ctx, searchQuery, query, limit, offset)
+	rows, err := s.searchContentDB.QueryContext(ctx, searchQuery, ftsQuery, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("searching images for %q: %w", query, err)
 	}

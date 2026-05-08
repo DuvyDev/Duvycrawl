@@ -36,3 +36,17 @@ seeds:
     recrawl_interval: 24h
   - url: "https://benchlm.ai/"
     recrawl_interval: 24h
+  - url: "https://www.fosslinux.com/"
+    recrawl_interval: 48h
+  - url: "https://linustechtips.com/"
+    recrawl_interval: 24h
+  - url: "https://www.techspot.com/"
+    recrawl_interval: 24h
+  - url: "https://gamersnexus.net/"
+    recrawl_interval: 72h
+  - url: "https://www.xda-developers.com/"
+    recrawl_interval: 12h
+  - url: "https://es.kotaku.com/"
+    recrawl_interval: 12h
+  - url: "https://kotaku.com/"
+    recrawl_interval: 12h
