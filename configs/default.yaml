@@ -153,6 +153,8 @@ seeds:
     recrawl_interval: 2h
   - url: "https://www.reddit.com/r/hytale/"
     recrawl_interval: 2h
+  - url: "https://www.reddit.com/r/linux_gaming/"
+    recrawl_interval: 2h
   - url: "https://news.ycombinator.com/"
     recrawl_interval: 15m
   - url: "https://www.mozilla.org/es-ES/"
@@ -215,6 +217,10 @@ seeds:
     recrawl_interval: 168h
   - url: "https://overframe.gg/"
     recrawl_interval: 72h
+  - url: "https://www.curseforge.com/"
+    recrawl_interval: 72h
+  - url: "https://alecaframe.com/"
+    recrawl_interval: 168h
   - url: "https://hytale.com/"
     recrawl_interval: 24h
   - url: "https://wiki.warframe.com/"
