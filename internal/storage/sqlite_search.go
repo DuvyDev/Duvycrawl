@@ -47,11 +47,12 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.tokens)},
 		{mode: searchModeFTSProximity, ftsQuery: buildFTSProximityQuery(q.tokens)},
 		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.ftsTokens)},
-		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q.ftsTokens)},
+		{mode: searchModeFTSMajority, ftsQuery: buildFTSMajorityQuery(q)},
 		{mode: searchModeFTSPrefix, ftsQuery: buildFTSPrefixQuery(q.ftsTokens)},
-		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q.ftsTokens)},
-		{mode: searchModeFTSCore2, ftsQuery: buildFTSCore2Query(q.ftsTokens)},
-		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q.ftsTokens)},
+		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q)},
+		{mode: searchModeFTSCore2, ftsQuery: buildFTSCore2Query(q)},
+		{mode: searchModeFTSPrimary, ftsQuery: buildFTSPrimaryQuery(q)},
+		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q)},
 	}
 
 	// Per-plan timeout: prevent one slow FTS query from eating the entire
@@ -1757,6 +1758,27 @@ func isLanguagePathSegment(segment string) bool {
 	return langPathPattern.MatchString(segment)
 }
 
+// sortTokensByRelevance sorts FTS tokens by their Inverse Document Frequency (IDF).
+// The rarest, most specific words (highest IDF) come first. If IDF is equal
+// (e.g., both unknown or no map), it falls back to token length.
+func sortTokensByRelevance(tokens []string, idfMap map[string]float64) []string {
+	if len(tokens) == 0 {
+		return tokens
+	}
+	ordered := append([]string(nil), tokens...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		idfI := idfMap[ordered[i]]
+		idfJ := idfMap[ordered[j]]
+		// A small epsilon is used because float64 equality can be strict
+		if math.Abs(idfI-idfJ) > 0.001 {
+			return idfI > idfJ // Higher IDF first
+		}
+		// Fallback to length if IDF is identical
+		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
+	})
+	return ordered
+}
+
 func buildFTSPhraseQuery(tokens []string) string {
 	if len(tokens) == 0 {
 		return ""
@@ -1791,24 +1813,29 @@ func buildFTSExactQuery(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
-func buildFTSMajorityQuery(tokens []string) string {
-	var filtered []string
-	for _, t := range tokens {
-		if len([]rune(t)) > 3 {
-			filtered = append(filtered, t)
-		}
+func buildFTSMajorityQuery(q searchQuery) string {
+	tokens := q.ftsTokens
+	if len(tokens) < 3 {
+		return ""
 	}
-	if len(filtered) < 3 || len(filtered) > 6 {
-		return "" // Majority fallback only makes sense for 3-6 significant words.
+
+	ordered := sortTokensByRelevance(tokens, q.idfMap)
+	significant := ordered
+	if len(significant) > 6 {
+		significant = significant[:6] // Limit to top 6 most relevant words
 	}
-	n := len(filtered)
+
+	n := len(significant)
+	if n < 3 {
+		return ""
+	}
 
 	var clauses []string
 	// Generate combinations of N-1 tokens. For 4 tokens, this generates 4 clauses of 3 tokens each.
 	// (A B C) OR (A B D) OR (A C D) OR (B C D)
 	for skip := 0; skip < n; skip++ {
 		var parts []string
-		for i, t := range filtered {
+		for i, t := range significant {
 			if i == skip {
 				continue
 			}
@@ -1835,29 +1862,16 @@ func buildFTSPrefixQuery(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
-func buildFTSCoreQuery(tokens []string) string {
+func buildFTSCoreQuery(q searchQuery) string {
+	tokens := q.ftsTokens
 	if len(tokens) <= 3 {
 		return "" // Only useful for queries with > 3 words
 	}
 
-	var filtered []string
-	for _, t := range tokens {
-		if len([]rune(t)) > 3 {
-			filtered = append(filtered, t)
-		}
-	}
-	if len(filtered) == 0 {
-		filtered = tokens
-	}
-
-	ordered := append([]string(nil), filtered...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
-	})
-
+	ordered := sortTokensByRelevance(tokens, q.idfMap)
 	core := ordered
 	if len(core) > 3 {
-		core = core[:3] // Take the 3 longest words
+		core = core[:3] // Take the 3 most relevant words
 	}
 
 	parts := make([]string, 0, len(core))
@@ -1868,29 +1882,16 @@ func buildFTSCoreQuery(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
-func buildFTSCore2Query(tokens []string) string {
+func buildFTSCore2Query(q searchQuery) string {
+	tokens := q.ftsTokens
 	if len(tokens) <= 2 {
 		return "" // Only useful for queries with > 2 words
 	}
 
-	var filtered []string
-	for _, t := range tokens {
-		if len([]rune(t)) > 3 {
-			filtered = append(filtered, t)
-		}
-	}
-	if len(filtered) == 0 {
-		filtered = tokens
-	}
-
-	ordered := append([]string(nil), filtered...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
-	})
-
+	ordered := sortTokensByRelevance(tokens, q.idfMap)
 	core := ordered
 	if len(core) > 2 {
-		core = core[:2] // Take the 2 longest words
+		core = core[:2] // Take the 2 most relevant words
 	}
 
 	parts := make([]string, 0, len(core))
@@ -1901,29 +1902,28 @@ func buildFTSCore2Query(tokens []string) string {
 	return strings.Join(parts, " ")
 }
 
-func buildFTSRelaxedQuery(tokens []string) string {
+func buildFTSPrimaryQuery(q searchQuery) string {
+	tokens := q.ftsTokens
 	if len(tokens) == 0 {
 		return ""
 	}
 
-	var filtered []string
-	for _, t := range tokens {
-		if len([]rune(t)) > 3 {
-			filtered = append(filtered, t)
-		}
-	}
-	if len(filtered) == 0 {
-		filtered = tokens
+	ordered := sortTokensByRelevance(tokens, q.idfMap)
+	primary := ordered[0]
+
+	return quoteFTS5Token(primary) + " OR " + escapeFTS5Token(primary) + "*"
+}
+
+func buildFTSRelaxedQuery(q searchQuery) string {
+	tokens := q.ftsTokens
+	if len(tokens) == 0 {
+		return ""
 	}
 
-	ordered := append([]string(nil), filtered...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
-	})
-
+	ordered := sortTokensByRelevance(tokens, q.idfMap)
 	significant := ordered
 	if len(significant) > 4 {
-		significant = significant[:4] // Limit OR fallback to top 4 longest words
+		significant = significant[:4] // Limit OR fallback to top 4 most relevant words
 	}
 
 	var parts []string

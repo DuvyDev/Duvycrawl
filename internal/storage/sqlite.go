@@ -54,6 +54,7 @@ const (
 	searchModeFTSPrefix    searchMode = "fts_prefix"
 	searchModeFTSCore      searchMode = "fts_core"
 	searchModeFTSCore2     searchMode = "fts_core2"
+	searchModeFTSPrimary   searchMode = "fts_primary"
 	searchModeFTSRelaxed   searchMode = "fts_relaxed"
 )
 
