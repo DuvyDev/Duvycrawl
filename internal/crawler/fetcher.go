@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -196,8 +197,15 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			f.recordThrottle(host)
 		} else if err != nil {
 			// Mark proxy as down if there's a network-level error (e.g. connection refused)
-			// Don't mark down for timeouts or cancellations - they are often site-specific
-			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			// Don't mark down for timeouts, cancellations, or target-specific drops (EOF, connection reset)
+			// because they are often site-specific WAF/rate-limits and not the proxy's fault.
+			isTargetDrop := errors.Is(err, io.EOF) || 
+				errors.Is(err, io.ErrUnexpectedEOF) || 
+				errors.Is(err, syscall.ECONNRESET) ||
+				strings.HasSuffix(err.Error(), "EOF") ||
+				strings.Contains(err.Error(), "connection reset by peer")
+
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) && !isTargetDrop {
 				f.proxyManager.MarkDown(pClient)
 			}
 		}
