@@ -24,12 +24,19 @@ const (
 	StatusDown
 )
 
+const (
+	// ProxyFailThreshold is the number of consecutive fetch errors before a proxy
+	// is marked as down.
+	ProxyFailThreshold = 3
+)
+
 // ProxyClient holds a proxy URL, its associated HTTP client, and its current health status.
 type ProxyClient struct {
 	URL      string
 	IsDirect bool
 	Client   *http.Client
 	Status   atomic.Int32
+	Failures atomic.Int32
 	dnsCache *DNSCache
 }
 
@@ -252,12 +259,14 @@ func (pm *ProxyManager) checkProxy(ctx context.Context, p *ProxyClient) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 204 || resp.StatusCode == 200 {
+		pm.ResetFailures(p)
 		if oldStatus == StatusDown {
 			p.SetStatus(StatusHealthy)
 			pm.logger.Info("proxy recovered", "url", p.URL)
 		}
 	} else {
 		// Unexpected status but connection worked. We'll mark it healthy since the proxy is routing traffic.
+		pm.ResetFailures(p)
 		if oldStatus == StatusDown {
 			p.SetStatus(StatusHealthy)
 			pm.logger.Info("proxy recovered (with non-204 status)", "url", p.URL, "status", resp.StatusCode)
@@ -278,11 +287,31 @@ func (pm *ProxyManager) GetClient() *ProxyClient {
 }
 
 // MarkDown explicitly marks a proxy as down (e.g. if the fetcher detects a dial error).
+// It uses a failure threshold to avoid marking down proxies on isolated errors.
 func (pm *ProxyManager) MarkDown(p *ProxyClient) {
-	if p.GetStatus() == StatusHealthy {
-		p.SetStatus(StatusDown)
-		pm.logger.Warn("proxy marked down by fetcher", "url", p.URL)
+	if p.IsDirect {
+		return // Never mark direct connection as down via fetcher errors
 	}
+
+	fails := p.Failures.Add(1)
+	if fails >= ProxyFailThreshold && p.GetStatus() == StatusHealthy {
+		p.SetStatus(StatusDown)
+		pm.logger.Warn("proxy marked down by fetcher (threshold reached)",
+			"url", p.URL,
+			"consecutive_failures", fails,
+		)
+	} else if p.GetStatus() == StatusHealthy {
+		pm.logger.Debug("proxy fetch error recorded",
+			"url", p.URL,
+			"consecutive_failures", fails,
+			"threshold", ProxyFailThreshold,
+		)
+	}
+}
+
+// ResetFailures clears the consecutive failure counter for a proxy.
+func (pm *ProxyManager) ResetFailures(p *ProxyClient) {
+	p.Failures.Store(0)
 }
 
 // PrimaryProxyURL returns the URL of the highest priority proxy for use with chromedp.

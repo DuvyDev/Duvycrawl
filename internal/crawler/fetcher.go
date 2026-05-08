@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -162,6 +163,7 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 		if err == nil {
 			if result.StatusCode == http.StatusTooManyRequests || result.StatusCode == http.StatusServiceUnavailable {
 				if attempt == f.maxRetries {
+					f.proxyManager.ResetFailures(pClient)
 					return result, nil
 				}
 				f.logger.Warn("throttled response, backing off",
@@ -171,6 +173,7 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 				f.recordThrottle(host)
 				continue
 			}
+			f.proxyManager.ResetFailures(pClient)
 			f.recordSuccess(host)
 			return result, nil
 		}
@@ -182,7 +185,10 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			f.recordThrottle(host)
 		} else if err != nil {
 			// Mark proxy as down if there's a network-level error (e.g. connection refused)
-			f.proxyManager.MarkDown(pClient)
+			// Don't mark down for timeouts or cancellations - they are often site-specific
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				f.proxyManager.MarkDown(pClient)
+			}
 		}
 	}
 	if lastResult != nil && lastErr == nil {
