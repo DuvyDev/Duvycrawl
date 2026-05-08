@@ -11,6 +11,7 @@ import (
 
 	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/abadojack/whatlanggo"
 	"github.com/saintfish/chardet"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding/htmlindex"
@@ -89,6 +90,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 
 	// --- Language detection ---
 	// Priority: <html lang="..."> > <meta http-equiv="Content-Language"> > <meta name="language">
+	// > URL-path pattern (e.g. /es/, /en/) > subdomain pattern (e.g. es.example.com)
 	if lang, exists := doc.Find("html").Attr("lang"); exists {
 		result.Language = normalizeLanguage(lang)
 	}
@@ -105,6 +107,9 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 				result.Language = normalizeLanguage(content)
 			}
 		})
+	}
+	if result.Language == "" {
+		result.Language = detectLanguageFromURL(baseURL)
 	}
 
 	// Extract <title>.
@@ -265,6 +270,18 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// Truncate content to a reasonable size (100KB of text).
 	if len(result.Content) > 100*1024 {
 		result.Content = result.Content[:100*1024]
+	}
+
+	// Content-based language detection as last-resort fallback.
+	// Uses statistical n-gram analysis (whatlanggo) on visible text content.
+	if result.Language == "" && len(result.Content) > 50 {
+		sample := result.Content
+		if len(sample) > 500 {
+			sample = sample[:500]
+		}
+		if info := whatlanggo.Detect(sample); info.IsReliable() {
+			result.Language = whatlanggo.LangToString(info.Lang)
+		}
 	}
 
 	// Extract links.
@@ -488,6 +505,42 @@ func normalizeLanguage(raw string) string {
 		return ""
 	}
 	return raw
+}
+
+// detectLanguageFromURL attempts to detect the page language from common
+// i18n URL patterns: path segments like /es/ or /en/ and subdomains like
+// es.example.com. Returns empty string if no pattern is found.
+func detectLanguageFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+
+	// Check first path segment: /es/, /en/page, /pt-BR/article → "es", "en", "pt"
+	if parsed.Path != "" {
+		segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(segments) > 0 {
+			candidate := normalizeLanguage(segments[0])
+			if candidate != "" {
+				return candidate
+			}
+		}
+	}
+
+	// Check subdomain: es.example.com → "es", en.wikipedia.org → "en"
+	host := strings.ToLower(parsed.Hostname())
+	if host != "" {
+		parts := strings.Split(host, ".")
+		if len(parts) >= 2 {
+			// Check if the first subdomain part is a 2-3 letter code
+			candidate := normalizeLanguage(parts[0])
+			if candidate != "" && candidate != "www" && candidate != "m" {
+				return candidate
+			}
+		}
+	}
+
+	return ""
 }
 
 // extractImages finds all <img> and og:image tags in the document and

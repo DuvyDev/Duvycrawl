@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Crawler       CrawlerConfig       `yaml:"crawler"`
 	Rendering     RenderingConfig     `yaml:"rendering"`
+	Scoring       ScoringConfig       `yaml:"scoring"`
 	Storage       StorageConfig       `yaml:"storage"`
 	API           APIConfig           `yaml:"api"`
 	Logging       LoggingConfig       `yaml:"logging"`
@@ -201,6 +202,14 @@ type SearchIntentsConfig struct {
 	PlatformDomains []string `yaml:"platform_domains"`
 }
 
+// ScoringConfig controls search result scoring boosts, particularly for
+// language-aware ranking on multilingual websites.
+type ScoringConfig struct {
+	LanguageBoost          float64 `yaml:"language_boost"`
+	SecondaryLanguageBoost float64 `yaml:"secondary_language_boost"`
+	SecondaryLanguage      string  `yaml:"secondary_language"`
+}
+
 // EmbedderConfig controls the Ollama semantic embeddings client.
 type EmbedderConfig struct {
 	Enabled bool   `yaml:"enabled"`
@@ -303,6 +312,11 @@ func DefaultConfig() *Config {
 				"etsy", "amazon", "aliexpress", "ebay", "mercadolibre", "newegg",
 				"bestbuy", "walmart", "target",
 			},
+		},
+		Scoring: ScoringConfig{
+			LanguageBoost:          3000.0,
+			SecondaryLanguageBoost: 1500.0,
+			SecondaryLanguage:      "en",
 		},
 		Embedder: EmbedderConfig{
 			Enabled: false,

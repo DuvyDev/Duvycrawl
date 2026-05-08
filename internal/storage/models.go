@@ -215,3 +215,10 @@ type InterestTermRecord struct {
 	Source   string  `json:"source"`
 	Language string  `json:"language,omitempty"`
 }
+
+// ScoringConfig controls search result scoring boosts for language-aware ranking.
+type ScoringConfig struct {
+	LanguageBoost          float64
+	SecondaryLanguageBoost float64
+	SecondaryLanguage      string
+}

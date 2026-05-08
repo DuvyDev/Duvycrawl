@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -160,7 +161,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, fmt.Errorf("search timed out before collecting candidates for %q: %w", query, err)
 	}
 
-	reranked := rerankSearchCandidates(candidates, q, lang)
+	reranked := s.rerankSearchCandidates(candidates, q, lang)
 
 	// --- Semantic re-ranking via embeddings (if Ollama is available) ---
 	if len(reranked) > 0 && s.embedder != nil {
@@ -195,6 +196,14 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 				})
 			}
 		}
+	}
+
+	// --- Intra-domain language promotion ---
+	// Within each domain, ensure the user's preferred language variant ranks
+	// highest. This fixes the common problem where /en/, /es/, /pt/ variants
+	// of the same multilingual site compete for the top slots.
+	if lang != "" {
+		reranked = promoteLanguagePerDomain(reranked, lang, s.scoringCfg.SecondaryLanguage)
 	}
 
 	if len(reranked) == 0 {
@@ -548,9 +557,11 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		" + CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 1500.0 ELSE 0 END" +
 		" + CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 800.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 2000.0 ELSE 0 END" +
+		// Language homepage: domain.com/es, domain.com/en, etc.
+		" + CASE WHEN LOWER(p.url) GLOB LOWER('https://' || p.domain || '/[a-z][a-z]') THEN 1200.0 ELSE 0 END" +
 		" + CASE WHEN LOWER(p.url) LIKE ? THEN 100.0 ELSE 0 END" +
-		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 1 THEN 500.0 ELSE 0 END" +
-		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) BETWEEN 2 AND 3 THEN 150.0 ELSE 0 END" +
+		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 2 THEN 500.0 ELSE 0 END" +
+		" + CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) = 3 THEN 350.0 ELSE 0 END" +
 		" + MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))"
 
 	urlContains := "%" + query.lowered + "%"
@@ -577,8 +588,18 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	}
 
 	if lang != "" {
-		scoreExpr += " + CASE WHEN p.language = ? THEN 35.0 ELSE 0 END"
+		sqlLangBoost := s.scoringCfg.LanguageBoost * 0.1
+		if sqlLangBoost <= 0 {
+			sqlLangBoost = 35.0
+		}
+		scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlLangBoost)
 		args = append(args, lang)
+		// Secondary language boost at SQL level too
+		if s.scoringCfg.SecondaryLanguageBoost > 0 && lang != s.scoringCfg.SecondaryLanguage {
+			sqlSecBoost := s.scoringCfg.SecondaryLanguageBoost * 0.1
+			scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlSecBoost)
+			args = append(args, s.scoringCfg.SecondaryLanguage)
+		}
 	}
 
 	searchSQL := fmt.Sprintf(`
@@ -753,8 +774,32 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		titleLike = navLike
 	}
 
-	querySQL := `
-		SELECT
+	// Build the navigational SQL with language boosts using config values.
+	navLangBoost := s.scoringCfg.LanguageBoost * 0.1
+	if navLangBoost <= 0 {
+		navLangBoost = 20.0
+	}
+	navScoreExpr := fmt.Sprintf(`
+			(
+				CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 1500.0 ELSE 0 END
+				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 800.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 2000.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.url) GLOB LOWER('https://' || p.domain || '/[a-z][a-z]') THEN 1200.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.url) LIKE ? THEN 220.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.title) LIKE ? THEN 160.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
+				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
+				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 500.0 ELSE 0 END
+				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
+				+ CASE WHEN ? != '' AND p.language = ? THEN %.1f ELSE 0 END
+			) AS sql_score`, navLangBoost)
+
+	if s.scoringCfg.SecondaryLanguageBoost > 0 && lang != "" && lang != s.scoringCfg.SecondaryLanguage {
+		navSecBoost := s.scoringCfg.SecondaryLanguageBoost * 0.1
+		navScoreExpr = fmt.Sprintf(`%s + CASE WHEN ? != '' AND p.language = ? THEN %.1f ELSE 0 END`, navScoreExpr, navSecBoost)
+	}
+
+	querySQL := fmt.Sprintf(`SELECT
 			p.id,
 			p.url,
 			p.title,
@@ -771,18 +816,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			p.crawled_at,
 			p.published_at,
 			p.updated_at,
-			(
-				CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 1500.0 ELSE 0 END
-				+ CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 800.0 ELSE 0 END
-				+ CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 2000.0 ELSE 0 END
-				+ CASE WHEN LOWER(p.url) LIKE ? THEN 220.0 ELSE 0 END
-				+ CASE WHEN LOWER(p.title) LIKE ? THEN 160.0 ELSE 0 END
-				+ CASE WHEN LOWER(p.h1) LIKE ? THEN 120.0 ELSE 0 END
-				+ CASE WHEN LOWER(p.h2) LIKE ? THEN 100.0 ELSE 0 END
-				+ CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 3 THEN 500.0 ELSE 0 END
-				+ MAX(0.0, 20.0 - 0.2 * (JULIANDAY('now') - JULIANDAY(SUBSTR(p.crawled_at, 1, 10))))
-				+ CASE WHEN ? != '' AND p.language = ? THEN 20.0 ELSE 0 END
-			) AS sql_score,
+			%s,
 			LENGTH(p.content) AS content_len,
 			p.schema_type,
 			p.schema_image,
@@ -804,7 +838,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 			OR LOWER(p.h2) LIKE ?
 		ORDER BY (sql_score + COALESCE(sc.clicks, 0) * 150.0) DESC, p.crawled_at DESC
 		LIMIT ?
-	`
+	`, navScoreExpr)
 
 	args := []any{
 		domainExact,
@@ -817,6 +851,11 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		titleLike,
 		lang,
 		lang,
+	}
+	if s.scoringCfg.SecondaryLanguageBoost > 0 && lang != "" && lang != s.scoringCfg.SecondaryLanguage {
+		args = append(args, s.scoringCfg.SecondaryLanguage, s.scoringCfg.SecondaryLanguage)
+	}
+	args = append(args,
 		query.raw,
 		domainExact,
 		domainExact,
@@ -827,7 +866,7 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 		titleLike,
 		titleLike,
 		limit,
-	}
+	)
 
 	rows, err := s.searchContentDB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -929,10 +968,10 @@ func fuzzyLanguageSQL(lang string) string {
 	return " + CASE WHEN p.language = ? THEN 20.0 ELSE 0 END"
 }
 
-func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string) []searchCandidate {
+func (s *SQLiteStorage) rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lang string) []searchCandidate {
 	reranked := make([]searchCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		score, keep := scoreSearchCandidate(candidate, query, lang)
+		score, keep := s.scoreSearchCandidate(candidate, query, lang)
 		if !keep {
 			continue
 		}
@@ -958,7 +997,7 @@ func rerankSearchCandidates(candidates []searchCandidate, query searchQuery, lan
 	return reranked
 }
 
-func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string) (float64, bool) {
+func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang string) (float64, bool) {
 	titleNorm := normalizeSearchText(candidate.Title)
 	h1Norm := normalizeSearchText(candidate.H1)
 	h2Norm := normalizeSearchText(candidate.H2)
@@ -1058,7 +1097,9 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 		score -= 160.0
 	}
 	if lang != "" && candidate.Language == lang {
-		score += 60.0
+		score += s.scoringCfg.LanguageBoost
+	} else if lang != "" && s.scoringCfg.SecondaryLanguageBoost > 0 && lang != s.scoringCfg.SecondaryLanguage && candidate.Language == s.scoringCfg.SecondaryLanguage {
+		score += s.scoringCfg.SecondaryLanguageBoost
 	}
 	score += searchFreshnessScore(candidate.CrawledAt, candidate.publishedAtTime)
 	score += searchContentLengthScore(candidate.contentLen)
@@ -1144,6 +1185,83 @@ func scoreSearchCandidate(candidate searchCandidate, query searchQuery, lang str
 	}
 
 	return score, true
+}
+
+// promoteLanguagePerDomain reorders search results so that within each domain,
+// the variant in the user's preferred language ranks first. This solves the
+// problem of multilingual sites (e.g. warframe.com/en, warframe.com/es,
+// warframe.com/pt) where non-preferred language variants crowd out the
+// user's language.
+//
+// Groups results by effective domain, then within each group moves the
+// best-matching-language result to the front. English acts as a secondary
+// fallback when available.
+func promoteLanguagePerDomain(candidates []searchCandidate, lang string, secondaryLang string) []searchCandidate {
+	if len(candidates) <= 1 {
+		return candidates
+	}
+
+	// Group candidates by effective domain.
+	domainGroups := make(map[string][]int)
+	for i, c := range candidates {
+		info := classifySearchDomain(c.Domain)
+		d := info.effectiveDomain
+		if d == "" {
+			d = c.Domain
+		}
+		domainGroups[d] = append(domainGroups[d], i)
+	}
+
+	// For each domain group with 2+ results, promote the language match.
+	for _, indices := range domainGroups {
+		if len(indices) <= 1 {
+			continue
+		}
+
+		// Find the best match: primary language first, then secondary.
+		bestIdx := -1
+		bestScore := 0 // 2 = primary lang, 1 = secondary lang
+
+		for _, idx := range indices {
+			if candidates[idx].Language == lang {
+				if bestScore < 2 {
+					bestScore = 2
+					bestIdx = idx
+				}
+			} else if bestScore < 2 && secondaryLang != "" && candidates[idx].Language == secondaryLang {
+				if bestScore < 1 {
+					bestScore = 1
+					bestIdx = idx
+				}
+			}
+		}
+
+		// If we found a language match that isn't already first in the group,
+		// move it to the front of its domain's results.
+		if bestIdx >= 0 && bestIdx != indices[0] {
+			// Extract the best candidate from its current position.
+			best := candidates[bestIdx]
+
+			// Drop the bestIdx from candidates, shift everything down.
+			candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
+
+			// Figure out the correct insertion position: before the first
+			// non-language-matching result of this domain, but after any
+			// previously-promoted language results of different domains.
+			insertPos := indices[0]
+
+			// Re-calculate insertPos since array shifted after removal.
+			// If bestIdx < indices[0], indices[0] shifted by -1.
+			if bestIdx < indices[0] {
+				insertPos = indices[0] - 1
+			}
+
+			// Insert at position.
+			candidates = append(candidates[:insertPos], append([]searchCandidate{best}, candidates[insertPos:]...)...)
+		}
+	}
+
+	return candidates
 }
 
 // diversifyByDomain reorders search results so that one domain doesn't dominate
@@ -1543,7 +1661,25 @@ func isSearchHomepage(rawURL string) bool {
 	if parsed.RawQuery != "" || parsed.Fragment != "" {
 		return false
 	}
-	return parsed.Path == "" || parsed.Path == "/"
+	if parsed.Path == "" || parsed.Path == "/" {
+		return true
+	}
+	// Multilingual homepage: single path segment that is a language code
+	// (e.g. /es, /en, /pt-BR, /es-419). These ARE the root of the site
+	// for that language — they deserve the same homepage boosts.
+	path := strings.Trim(parsed.Path, "/")
+	if !strings.Contains(path, "/") && isLanguagePathSegment(path) {
+		return true
+	}
+	return false
+}
+
+// isLanguagePathSegment returns true if the segment looks like an ISO 639-1
+// language code, optionally with a region variant (e.g. "es", "en", "pt-BR").
+var langPathPattern = regexp.MustCompile(`^[a-z]{2}(-[a-zA-Z0-9]{2,4})?$`)
+
+func isLanguagePathSegment(segment string) bool {
+	return langPathPattern.MatchString(segment)
 }
 
 func buildFTSPhraseQuery(tokens []string) string {

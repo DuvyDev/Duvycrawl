@@ -117,6 +117,20 @@ rendering:
   render_on_status_codes: [403, 503]
   block_images: true
 
+# Search scoring boosts applied when the user provides a lang parameter.
+# These are critical for multilingual sites where the same domain has
+# pages in many languages (e.g. warframe.com/en, warframe.com/es).
+scoring:
+  # Boost added to a result when its detected language matches the search lang.
+  # This needs to be high enough to overcome domain-match and platform-intent
+  # boosts (which can be 8000-16000). Default: 3000.
+  language_boost: 3000.0
+  # Boost added to English results when the user searches in a non-English
+  # language. English acts as the universal fallback. Default: 1500.
+  secondary_language_boost: 1500.0
+  # The language code used as the secondary fallback. Default: "en".
+  secondary_language: "en"
+
 storage:
   # Directory to store the SQLite database files (content.db, crawler.db, graph.db)
   db_path: "./data"

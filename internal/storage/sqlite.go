@@ -39,6 +39,7 @@ type SQLiteStorage struct {
 	siteTypes       map[string]struct{}
 	platformDomains map[string]struct{}
 	spellChecker    *SpellChecker
+	scoringCfg      ScoringConfig
 }
 
 // ... skipped types, keeping them below ...
@@ -366,6 +367,18 @@ func (s *SQLiteStorage) WithSearchIntents(siteTypes, platformDomains []string) *
 	for _, p := range platformDomains {
 		s.platformDomains[strings.ToLower(p)] = struct{}{}
 	}
+	return s
+}
+
+// WithScoringConfig sets the search scoring configuration for language-aware ranking.
+func (s *SQLiteStorage) WithScoringConfig(cfg ScoringConfig) *SQLiteStorage {
+	if cfg.LanguageBoost <= 0 {
+		cfg.LanguageBoost = 3000.0
+	}
+	if cfg.SecondaryLanguage == "" {
+		cfg.SecondaryLanguage = "en"
+	}
+	s.scoringCfg = cfg
 	return s
 }
 

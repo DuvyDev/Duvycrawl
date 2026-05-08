@@ -1,5 +1,7 @@
 # Seed URLs: Reddit Communities
 seeds:
+  - url: "https://www.reddit.com/"
+    recrawl_interval: 30m
   - url: "https://www.reddit.com/news/"
     recrawl_interval: 1h
   - url: "https://www.reddit.com/r/uruguay/"

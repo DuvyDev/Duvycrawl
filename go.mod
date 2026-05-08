@@ -17,6 +17,7 @@ require (
 )
 
 require (
+	github.com/abadojack/whatlanggo v1.0.1 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
