@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// ErrUnsupportedContentType is returned when the fetched URL has a content type we don't want to process.
+var ErrUnsupportedContentType = errors.New("unsupported content type")
+
 // FetchResult contains the raw result of an HTTP fetch operation.
 type FetchResult struct {
 	StatusCode   int
@@ -178,6 +181,14 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL string) (*FetchResult, er
 			return result, nil
 		}
 
+		if errors.Is(err, ErrUnsupportedContentType) {
+			// The proxy worked perfectly and the server responded.
+			// This is not a fetch failure, but we shouldn't index it and shouldn't retry.
+			f.proxyManager.ResetFailures(pClient)
+			f.recordSuccess(host)
+			return nil, err
+		}
+
 		if result != nil && result.StatusCode >= 400 && result.StatusCode < 500 {
 			if result.StatusCode != http.StatusTooManyRequests {
 				return nil, err
@@ -245,7 +256,7 @@ func (f *Fetcher) fetchOnce(ctx context.Context, client *http.Client, targetURL 
 			FinalURL:    resp.Request.URL.String(),
 			Duration:    duration,
 			Mode:        "http",
-		}, fmt.Errorf("unsupported content type: %s", contentType)
+		}, fmt.Errorf("%w: %s", ErrUnsupportedContentType, contentType)
 	}
 
 	// Read body with size limit to prevent downloading huge files.

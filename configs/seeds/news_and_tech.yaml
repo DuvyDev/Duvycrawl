@@ -50,3 +50,13 @@ seeds:
     recrawl_interval: 12h
   - url: "https://kotaku.com/"
     recrawl_interval: 12h
+  - url: "https://www.gamerfocus.co/"
+    recrawl_interval: 12h
+  - url: "https://latam.ign.com/"
+    recrawl_interval: 2h
+  - url: "https://es.ign.com/"
+    recrawl_interval: 2h
+  - url: "https://www.ign.com/"
+    recrawl_interval: 2h
+  - url: "https://gamerant.com/"
+    recrawl_interval: 2h
