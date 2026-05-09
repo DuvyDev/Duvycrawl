@@ -1000,15 +1000,15 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 
 	// --- Authoritative source boost for informational queries ---
 	// Government (.gub/.gov) and educational (.edu) domains get a significant
-	// boost when they have URL path tokens matching the query. This ensures
-	// official sources rank above news articles for factual queries.
+	// boost when their URL path contains query tokens. This ensures official
+	// sources rank above news articles for factual/trámites queries, without
+	// boosting irrelevant gov pages that happen to share a common word.
 	if query.intent == intentInformational {
 		isGovOrEdu := strings.Contains(urlDomain, ".gub.") ||
 			strings.Contains(urlDomain, ".gov.") ||
 			strings.Contains(urlDomain, ".edu.")
 
 		if isGovOrEdu {
-			// Check if the URL path contains query tokens
 			pathLower := strings.ToLower(candidate.URL)
 			pathMatchCount := 0
 			for _, token := range query.tokens {
@@ -1017,16 +1017,10 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 				}
 			}
 
-			// Also check if title or description contains query tokens
-			titleMatchCount := 0
-			for _, token := range query.tokens {
-				if len(token) >= 3 && (strings.Contains(strings.ToLower(candidate.Title), token) ||
-					strings.Contains(strings.ToLower(candidate.Description), token)) {
-					titleMatchCount++
-				}
-			}
-
-			// Check if the PRIMARY (most specific) query token is in the URL path
+			// Check if the PRIMARY (most specific) query token is in the URL path.
+			// The primary token is the rarest/most informative word in the query.
+			// If it appears in a gov URL path, that's a strong relevance signal
+			// even if other tokens (like "uruguay") are not in the path.
 			primaryToken := ""
 			if len(query.tokens) > 0 {
 				ordered := sortTokensByRelevance(query.tokens, query.idfMap)
@@ -1036,29 +1030,30 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 			}
 			hasPrimaryInPath := primaryToken != "" && len(primaryToken) >= 3 && strings.Contains(pathLower, primaryToken)
 
-			// Only apply strong boost if the page has BOTH URL path matches
-			// AND title/description matches — this prevents irrelevant gov
-			// domains from being boosted just because they mention "uruguay".
-			totalMatches := pathMatchCount + titleMatchCount
-			if hasPrimaryInPath && totalMatches >= 2 {
-				// Very strong boost: official source + primary token in URL + multiple matches
-				totalScore += 3000.0 + float64(totalMatches)*600.0
-				if isSearchHomepage(candidate.URL) {
-					totalScore += 2000.0
-				}
-			} else if totalMatches >= 2 {
-				// Strong boost: official source + multiple query token matches
-				totalScore += 2000.0 + float64(totalMatches)*600.0
-				if isSearchHomepage(candidate.URL) {
-					totalScore += 2000.0
-				}
-			} else if totalMatches >= 1 {
-				// Moderate boost: gov domain with at least one match
-				totalScore += 800.0
-			} else {
-				// Small baseline boost for gov domains
-				totalScore += 200.0
+		if hasPrimaryInPath && pathMatchCount >= 2 {
+			// Very strong boost: primary token + multiple path matches
+			totalScore += 8000.0 + float64(pathMatchCount)*800.0
+			if isSearchHomepage(candidate.URL) {
+				totalScore += 2000.0
 			}
+		} else if hasPrimaryInPath {
+			// Strong boost: primary token in gov URL path (even if it's the only match).
+			// e.g. "cuando vence la patente uruguay" → sucive.gub.uy/consulta_patente
+			// "patente" is the primary token and it's in the path.
+			totalScore += 6000.0 + float64(pathMatchCount)*800.0
+			if isSearchHomepage(candidate.URL) {
+				totalScore += 2000.0
+			}
+		} else if pathMatchCount >= 2 {
+				// Moderate boost: multiple path matches but not the primary token
+				totalScore += 1000.0 + float64(pathMatchCount)*400.0
+			} else if pathMatchCount >= 1 {
+				// Small boost: one path match but not the primary token
+				// e.g. a gov page about "pasos" matching "paso" in "que paso con taringa"
+				totalScore += 400.0
+			}
+			// No baseline boost — if the URL path doesn't contain any query
+			// tokens, the gov domain is irrelevant to this query.
 		}
 	}
 
