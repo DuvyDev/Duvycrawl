@@ -42,54 +42,7 @@ type SQLiteStorage struct {
 	scoringCfg      ScoringConfig
 }
 
-// ... skipped types, keeping them below ...
-type searchMode string
-
-const (
-	searchModeNavigational searchMode = "navigational"
-	searchModeFTSPhrase    searchMode = "fts_phrase"
-	searchModeFTSProximity searchMode = "fts_proximity"
-	searchModeFTSExact     searchMode = "fts_exact"
-	searchModeFTSMajority  searchMode = "fts_majority"
-	searchModeFTSPrefix    searchMode = "fts_prefix"
-	searchModeFTSCore      searchMode = "fts_core"
-	searchModeFTSCore2     searchMode = "fts_core2"
-	searchModeFTSPrimary   searchMode = "fts_primary"
-	searchModeFTSRelaxed   searchMode = "fts_relaxed"
-)
-
-type searchQuery struct {
-	raw            string
-	lowered        string
-	normalized     string
-	compact        string
-	tokens         []string   // All significant tokens (for Go-side scoring)
-	ftsTokens      []string   // Stopword-filtered tokens (for FTS5 query building)
-	fragments      []string
-	navTerm        string
-	domainLike     string
-	navigational   bool
-	siteTypeIntent string // e.g. "wiki", "docs", "blog" — detected from query tokens
-	platformIntent string // e.g. "reddit", "youtube" — detected from query tokens
-	idfMap         map[string]float64
-}
-
-type searchCandidate struct {
-	SearchResult
-	H1              string
-	H2              string
-	BodyPreview     string
-	sqlScore        float64
-	contentLen      int
-	mode            searchMode
-	publishedAtTime time.Time
-}
-
-type searchDomainInfo struct {
-	effectiveDomain string
-	rootLabel       string
-	isRootDomain    bool
-}
+// Search types are defined in sqlite_search.go
 
 var searchTextNormalizer = transform.Chain(
 	norm.NFD,
