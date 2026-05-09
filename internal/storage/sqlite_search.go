@@ -1003,10 +1003,7 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 	// boost when they have URL path tokens matching the query. This ensures
 	// official sources rank above news articles for factual queries.
 	if query.intent == intentInformational {
-		isGovOrEdu := strings.HasSuffix(urlDomain, ".gub.uy") ||
-			strings.HasSuffix(urlDomain, ".gov.uy") ||
-			strings.HasSuffix(urlDomain, ".edu.uy") ||
-			strings.Contains(urlDomain, ".gub.") ||
+		isGovOrEdu := strings.Contains(urlDomain, ".gub.") ||
 			strings.Contains(urlDomain, ".gov.") ||
 			strings.Contains(urlDomain, ".edu.")
 
