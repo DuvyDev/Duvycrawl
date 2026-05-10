@@ -314,6 +314,7 @@ func DefaultConfig() *Config {
 				"wordpress", "blogger", "wix", "squarespace", "weebly", "shopify",
 				"etsy", "amazon", "aliexpress", "ebay", "mercadolibre", "newegg",
 				"bestbuy", "walmart", "target",
+				"wikipedia", "npm", "pypi", "docker", "nuget",
 			},
 		},
 		Scoring: ScoringConfig{

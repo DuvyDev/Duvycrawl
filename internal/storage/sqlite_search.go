@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/DuvyDev/Duvycrawl/internal/sitehints"
 	"golang.org/x/net/publicsuffix"
 	"golang.org/x/text/transform"
 	_ "modernc.org/sqlite"
@@ -1156,14 +1157,15 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 		}
 	}
 
-	// --- Platform intent boost ---
+	// --- Platform intent boost (hub-aware via sitehints) ---
 	// When the query contains a platform name (e.g. "reddit", "youtube"),
-	// strongly boost results from that platform's domain.
+	// boost results from that platform's domain. Hub pages (subreddit roots,
+	// repo roots, channel pages) get a significantly higher boost than deep
+	// sub-pages (individual posts, releases, videos).
 	if query.platformIntent != "" {
 		if domainInfo.rootLabel == query.platformIntent {
 			// Skip the platform boost for user profile pages — they are thin
 			// content (avatar + name) and rarely what the user is searching for.
-			// This mirrors how Google de-prioritizes /user/, /profile/, etc.
 			urlLower := strings.ToLower(candidate.URL)
 			isProfilePage := strings.Contains(urlLower, "/user/") ||
 				strings.Contains(urlLower, "/profile/") ||
@@ -1174,13 +1176,30 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 				strings.Contains(urlLower, "/accounts/")
 
 			if !isProfilePage {
-				totalScore += 16000.0
+				// Use sitehints to classify the URL as hub or sub-page.
+				hint := sitehints.Classify(candidate.URL, query.platformIntent)
+
+				if hint.IsHub {
+					// Hub pages (subreddit root, repo root, channel) get the
+					// maximum platform boost + their specific hub bonus.
+					totalScore += 16000.0 + hint.HubBoost
+				} else {
+					// Non-hub pages get the base platform boost minus a depth
+					// penalty based on how deep the page is. This ensures
+					// subreddit posts still appear but below the subreddit root.
+					basePlatformBoost := 16000.0 - hint.DepthPenalty
+					if basePlatformBoost < 10000.0 {
+						basePlatformBoost = 10000.0 // floor to keep platform results relevant
+					}
+					totalScore += basePlatformBoost
+				}
+
 				if isSearchHomepage(candidate.URL) {
 					totalScore += 4000.0
 				}
+
 				// Extra boost when the remaining search tokens appear in the URL
 				// (e.g. "warframe reddit" → /r/Warframe/ contains "warframe").
-				// This ensures subreddit/forum/topic pages rank highest.
 				if len(query.tokens) > 0 {
 					urlAvg, _, _ := searchTokenCoverage(query.tokens, urlTokens)
 					if urlAvg > 0 {
