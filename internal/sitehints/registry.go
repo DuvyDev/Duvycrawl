@@ -54,6 +54,7 @@ var platformRules = []*platformRule{
 			// /r/{subreddit} with exactly 2 segments → hub
 			if len(parts) == 2 && strings.EqualFold(parts[0], "r") {
 				m.IsHub = true
+				m.HubName = strings.ToLower(parts[1])
 				m.HubBoost = hubBoostLarge
 				return m
 			}
@@ -104,6 +105,7 @@ var platformRules = []*platformRule{
 			// /{owner}/{repo} exactly → hub (repo root)
 			if len(parts) == 2 {
 				m.IsHub = true
+				m.HubName = strings.ToLower(parts[1])
 				m.HubBoost = hubBoostLarge
 				return m
 			}
@@ -111,6 +113,7 @@ var platformRules = []*platformRule{
 			// /{owner} exactly → user/org profile, slight hub
 			if len(parts) == 1 {
 				m.IsHub = true
+				m.HubName = strings.ToLower(parts[0])
 				m.HubBoost = hubBoostMedium
 				return m
 			}
@@ -162,12 +165,14 @@ var platformRules = []*platformRule{
 			// /@channel or /c/channel or /channel/id or /user/name → hub
 			if strings.HasPrefix(first, "@") && len(parts) <= 2 {
 				m.IsHub = true
+				m.HubName = strings.ToLower(strings.TrimPrefix(first, "@"))
 				m.HubBoost = hubBoostLarge
 				return m
 			}
 			if (strings.EqualFold(first, "c") || strings.EqualFold(first, "channel") || strings.EqualFold(first, "user")) && len(parts) >= 2 {
 				if len(parts) <= 3 { // /c/name or /c/name/videos
 					m.IsHub = true
+					m.HubName = strings.ToLower(parts[1])
 					m.HubBoost = hubBoostLarge
 					return m
 				}
@@ -298,6 +303,7 @@ var platformRules = []*platformRule{
 			// /{owner}/{repo} → hub
 			if len(parts) == 2 {
 				m.IsHub = true
+				m.HubName = strings.ToLower(parts[1])
 				m.HubBoost = hubBoostLarge
 				return m
 			}
@@ -345,6 +351,11 @@ var platformRules = []*platformRule{
 				}
 				if len(parts) == hubLen {
 					m.IsHub = true
+					if isScoped {
+						m.HubName = strings.ToLower(parts[1] + "/" + parts[2])
+					} else {
+						m.HubName = strings.ToLower(parts[1])
+					}
 					m.HubBoost = hubBoostLarge
 					return m
 				}
@@ -372,6 +383,7 @@ var platformRules = []*platformRule{
 			if len(parts) >= 2 && strings.EqualFold(parts[0], "project") {
 				if len(parts) == 2 {
 					m.IsHub = true
+					m.HubName = strings.ToLower(parts[1])
 					m.HubBoost = hubBoostLarge
 					return m
 				}
@@ -447,6 +459,7 @@ var platformRules = []*platformRule{
 			// /{channel} → hub (streamer page)
 			if len(parts) == 1 {
 				m.IsHub = true
+				m.HubName = strings.ToLower(parts[0])
 				m.HubBoost = hubBoostLarge
 				return m
 			}
@@ -533,6 +546,7 @@ var platformRules = []*platformRule{
 			if len(parts) >= 2 && strings.EqualFold(parts[0], "packages") {
 				if len(parts) == 2 {
 					m.IsHub = true
+					m.HubName = strings.ToLower(parts[1])
 					m.HubBoost = hubBoostLarge
 					return m
 				}

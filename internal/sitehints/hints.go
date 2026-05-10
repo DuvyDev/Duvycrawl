@@ -25,6 +25,12 @@ type HubMatch struct {
 	// within the platform (e.g. a subreddit root, a GitHub repo root).
 	IsHub bool
 
+	// HubName is the platform-specific identifier of the hub resource,
+	// lowercased for comparison. For Reddit this is the subreddit name
+	// (e.g. "warframe"), for GitHub the repo name (e.g. "chromium"), etc.
+	// Empty for non-hub pages.
+	HubName string
+
 	// HubBoost is the additional score to apply when IsHub is true.
 	// Hub pages should rank above individual content pages from the same platform.
 	HubBoost float64

@@ -1183,6 +1183,19 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 					// Hub pages (subreddit root, repo root, channel) get the
 					// maximum platform boost + their specific hub bonus.
 					totalScore += 16000.0 + hint.HubBoost
+
+					// NEW: Exact HubName match boost.
+					// If the user search tokens contain the exact HubName (e.g. "warframe"
+					// in "warframe reddit"), we give it a massive extra boost to
+					// prioritize the official hub over related hubs (like /r/memeframe).
+					if hint.HubName != "" {
+						for _, tok := range query.tokens {
+							if strings.EqualFold(tok, hint.HubName) {
+								totalScore += 30000.0
+								break
+							}
+						}
+					}
 				} else {
 					// Non-hub pages get the base platform boost minus a depth
 					// penalty based on how deep the page is. This ensures
