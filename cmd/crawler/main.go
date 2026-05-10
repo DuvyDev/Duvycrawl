@@ -1,6 +1,3 @@
-// Duvycrawl is a personal web crawler designed to power a custom search engine.
-// It crawls web pages, indexes them using SQLite FTS5, and exposes a REST API
-// for searching and controlling the crawler from a frontend application.
 package main
 
 import (
@@ -36,6 +33,7 @@ func run() error {
 	// --- Parse CLI Flags ---
 	configPath := flag.String("config", "configs/default.yaml", "path to YAML configuration file")
 	noStart := flag.Bool("no-start", false, "override auto_start in config: do not start crawler on launch")
+	adminPort := flag.Int("admin-port", 8081, "port for the crawler admin API")
 	flag.Parse()
 
 	// --- Load Configuration ---
@@ -44,30 +42,22 @@ func run() error {
 		return fmt.Errorf("loading configuration: %w", err)
 	}
 
-	// --no-start flag overrides auto_start from config.
 	autoStart := cfg.Crawler.AutoStart && !*noStart
 
 	// --- Initialize Logger ---
 	logger := initLogger(cfg.Logging)
-	logger.Info("Duvycrawl starting",
+	logger.Info("Duvycrawl Engine starting",
 		"config", *configPath,
 		"workers", cfg.Crawler.Workers,
 		"db_path", cfg.Storage.DBPath,
-		"api_addr", cfg.API.Addr(),
 	)
 
 	// --- Initialize Storage ---
 	ctx := context.Background()
-	store, err := storage.NewSQLiteStorage(ctx, cfg.Storage.DBPath, logger)
+	store, err := storage.NewSQLiteStorage(ctx, cfg.Storage.DBPath, storage.ModeCrawler, logger)
 	if err != nil {
 		return fmt.Errorf("initializing storage: %w", err)
 	}
-	store.WithSearchIntents(cfg.SearchIntents.SiteTypes, cfg.SearchIntents.PlatformDomains)
-	store.WithScoringConfig(storage.ScoringConfig{
-		LanguageBoost:          cfg.Scoring.LanguageBoost,
-		SecondaryLanguageBoost: cfg.Scoring.SecondaryLanguageBoost,
-		SecondaryLanguage:      cfg.Scoring.SecondaryLanguage,
-	})
 	defer store.Close()
 
 	// --- Initialize Scorer ---
@@ -88,7 +78,6 @@ func run() error {
 			logger,
 		)
 	}
-	logger.Info("scoring strategy", "strategy", scoringEngine.Name())
 
 	// --- Initialize Components ---
 	crawlQueue := queue.New()
@@ -102,7 +91,6 @@ func run() error {
 	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)
 	defer domainStats.Stop()
 
-	// Initialize Ollama embedder for semantic search (optional — falls back to lexical-only if unavailable).
 	var embedClient *embedder.Client
 	if cfg.Embedder.Enabled {
 		embedClient = embedder.NewClient(cfg.Embedder)
@@ -113,14 +101,16 @@ func run() error {
 
 	sched := scheduler.New(store, front, cfg.Crawler.Scheduler, logger)
 
-	apiServer := api.NewServer(&cfg.API, store, engine, front, logger)
+	// Admin API Server
+	cfg.API.Port = *adminPort
+	adminServer := api.NewServer(&cfg.API, store, engine, front, logger)
 
-	// --- Seed Bloom filter from existing DB pages ---
+	// --- Seed Bloom filter ---
 	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {
 		logger.Warn("failed to seed bloom filter", "error", err)
 	}
 
-	// --- Seed URLs from config ---
+	// --- Seed URLs ---
 	if err := seedURLsFromConfig(ctx, cfg, store, front, logger); err != nil {
 		return fmt.Errorf("seeding urls from config: %w", err)
 	}
@@ -133,32 +123,23 @@ func run() error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// --- Start Components ---
-
-	// Start the periodic wake goroutine so workers unblock when rate limiter
-	// slots free up even if no new URLs are being enqueued.
 	crawlQueue.StartPeriodicWake(ctx)
-
-	// Start the scheduler in a goroutine.
 	go sched.Start(ctx)
 
-	// Start the crawler engine if auto-start is enabled.
 	if autoStart {
 		engine.Start(ctx)
 	} else {
-		logger.Info("crawler not auto-started, use API to start: POST /api/v1/crawler/start")
+		logger.Info("crawler not auto-started, use Admin API to start: POST /api/v1/crawler/start")
 	}
 
-	// Start the API server in a goroutine.
 	errCh := make(chan error, 1)
 	go func() {
-		if err := apiServer.Start(); err != nil && err != http.ErrServerClosed {
-			errCh <- fmt.Errorf("API server error: %w", err)
+		if err := adminServer.Start(); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("Admin API server error: %w", err)
 		}
 	}()
 
-	logger.Info("Duvycrawl is running",
-		"api", apiServer.Addr(),
-	)
+	logger.Info("Crawler Engine is running", "admin_api", adminServer.Addr())
 
 	// --- Wait for Shutdown Signal ---
 	select {
@@ -168,25 +149,15 @@ func run() error {
 		logger.Error("component error, initiating shutdown", "error", err)
 	}
 
-	// --- Graceful Shutdown ---
 	logger.Info("initiating graceful shutdown...")
-
-	// Stop the crawler engine first (wait for in-progress pages).
 	engine.Stop()
-
-	// Stop the scheduler.
 	sched.Stop()
+	adminServer.Shutdown(context.Background())
 
-	// Shutdown the API server.
-	if err := apiServer.Shutdown(context.Background()); err != nil {
-		logger.Error("API server shutdown error", "error", err)
-	}
-
-	logger.Info("Duvycrawl shut down gracefully")
+	logger.Info("Crawler Engine shut down gracefully")
 	return nil
 }
 
-// initLogger configures the slog logger based on configuration.
 func initLogger(cfg config.LoggingConfig) *slog.Logger {
 	var level slog.Level
 	switch cfg.Level {
@@ -215,8 +186,6 @@ func initLogger(cfg config.LoggingConfig) *slog.Logger {
 	return slog.New(handler)
 }
 
-// seedBloomFilter loads all already-crawled URLs from the database and marks
-// them in the in-memory Bloom filter so they are not re-enqueued as new.
 func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue, logger *slog.Logger) error {
 	urls, fingerprints, err := store.GetAllPageURLs(ctx)
 	if err != nil {
@@ -230,7 +199,6 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 		marked += 2
 	}
 
-	// Also seed from discovered resources (non-HTML assets crawled for link discovery).
 	discURLs, discFingerprints, err := store.GetAllDiscoveredURLs(ctx)
 	if err != nil {
 		logger.Warn("failed to seed bloom filter from discovered resources", "error", err)
@@ -242,32 +210,24 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 		}
 	}
 
-	logger.Info("bloom filter seeded from database",
-		"urls", len(urls),
-		"discovered", len(discURLs),
-		"marked", marked,
-	)
+	logger.Info("bloom filter seeded from database", "urls", len(urls), "discovered", len(discURLs), "marked", marked)
 	return nil
 }
 
-// seedURLsFromConfig persists seed URLs from the config into the database
-// and enqueues them into the frontier. Each seed gets its own recrawl interval.
 func seedURLsFromConfig(ctx context.Context, cfg *config.Config, store storage.Storage, front *frontier.Frontier, logger *slog.Logger) error {
 	if len(cfg.Seeds) == 0 {
-		logger.Info("no seed urls configured")
 		return nil
 	}
 
 	defaultInterval := int(cfg.Crawler.Scheduler.SeedRecrawlInterval.Seconds())
 	if defaultInterval <= 0 {
-		defaultInterval = 86400 // 24h fallback
+		defaultInterval = 86400
 	}
 
 	enqueued := 0
 	for _, seedCfg := range cfg.Seeds {
 		domain := frontier.ExtractDomain(seedCfg.URL)
 		if domain == "" {
-			logger.Warn("skipping invalid seed url", "url", seedCfg.URL)
 			continue
 		}
 
@@ -283,21 +243,14 @@ func seedURLsFromConfig(ctx context.Context, cfg *config.Config, store storage.S
 		}
 
 		if err := store.UpsertSeedURL(ctx, seed); err != nil {
-			logger.Warn("failed to persist seed url", "url", seedCfg.URL, "error", err)
 			continue
 		}
 
-		if err := front.Add(ctx, seedCfg.URL, 0, storage.PrioritySeed); err != nil {
-			logger.Warn("failed to enqueue seed url", "url", seedCfg.URL, "error", err)
-			continue
+		if err := front.Add(ctx, seedCfg.URL, 0, storage.PrioritySeed); err == nil {
+			enqueued++
 		}
-
-		enqueued++
 	}
 
-	logger.Info("seed urls configured",
-		"count", len(cfg.Seeds),
-		"enqueued", enqueued,
-	)
+	logger.Info("seed urls configured", "count", len(cfg.Seeds), "enqueued", enqueued)
 	return nil
 }

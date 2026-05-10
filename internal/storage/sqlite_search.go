@@ -79,6 +79,19 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		return nil, 0, nil
 	}
 
+	// Cache Key: query + lang + domain + schemaType + offset + limit
+	cacheKey := fmt.Sprintf("q:%s|l:%s|d:%s|s:%s|o:%d|lim:%d", q.normalized, lang, domain, schemaType, offset, limit)
+	if s.cache != nil {
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			if res, ok := cached.(struct {
+				results []SearchResult
+				total   int
+			}); ok {
+				return res.results, res.total, nil
+			}
+		}
+	}
+
 	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -150,9 +163,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		candidates = mergeSearchCandidates(candidates, results)
 		total += count
 
-		// For informational queries, always try all plans to ensure
-		// broader retrieval (relaxed queries may find relevant pages that
-		// exact queries miss). For navigational queries, early exit is fine.
+		// For navigational queries, early exit once we have enough.
 		if q.intent == intentNavigational && len(candidates) >= candidateLimit {
 			break
 		}
@@ -163,6 +174,17 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		navCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
 		if err == nil {
 			candidates = mergeSearchCandidates(candidates, navCandidates)
+		}
+	}
+
+	// --- Domain-match retrieval for informational queries ---
+	// When query tokens match a domain root label (e.g. "tienda inglesa supermercado"
+	// → "tiendainglesa.com.uy"), ensure those pages are in the candidate set even if
+	// the FTS AND query didn't match them (thin SPA pages with minimal content).
+	if q.intent == intentInformational && len(q.tokens) >= 2 {
+		domainCandidates, err := s.searchDomainMatchCandidates(searchCtx, q, lang, min(candidateLimit, 30))
+		if err == nil {
+			candidates = mergeSearchCandidates(candidates, domainCandidates)
 		}
 	}
 
@@ -262,6 +284,13 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		results = append(results, candidate.SearchResult)
 	}
 
+	if s.cache != nil {
+		s.cache.SetWithTTL(cacheKey, struct {
+			results []SearchResult
+			total   int
+		}{results, total}, 10, 5*time.Minute)
+	}
+
 	return results, total, nil
 }
 
@@ -327,8 +356,24 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		}
 	}
 
-	// Filter stopwords — tokens used for scoring are stopword-filtered
-	allTokensFiltered := filterStopwords(allTokens)
+	// Filter stopwords — tokens used for scoring are stopword-filtered.
+	// Context-aware: when the query contains media keywords (serie, tv, pelicula,
+	// film, movie, show, anime, manga), preserve short stopwords that could be
+	// titles (e.g. "from" in "from serie tv" — the TV series "From").
+	mediaContext := false
+	mediaKeywords := map[string]struct{}{
+		"serie": {}, "series": {}, "tv": {}, "pelicula": {}, "peliculas": {},
+		"film": {}, "films": {}, "movie": {}, "movies": {}, "show": {}, "shows": {},
+		"anime": {}, "manga": {}, "dorama": {}, "novela": {}, "novelas": {},
+		"documental": {}, "documentales": {}, "documentary": {},
+	}
+	for _, tok := range allTokens {
+		if _, ok := mediaKeywords[tok]; ok {
+			mediaContext = true
+			break
+		}
+	}
+	allTokensFiltered := filterStopwordsContext(allTokens, mediaContext)
 
 	// Filter out the platform and site-type names from search tokens.
 	// The platform name is used for domain filtering and boost, not for
@@ -348,6 +393,10 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		// Query was only a platform or site-type word (e.g. "reddit" or "wiki")
 		searchTokens = allTokensFiltered
 	}
+
+	// Compound word splitting: "tiendainglesa" → "tienda" + "inglesa"
+	// For tokens ≥ 7 chars, try all 2-way splits and validate against FTS vocab.
+	searchTokens = s.splitCompoundTokens(searchTokens)
 
 	// Intent classification
 	intent := classifyQueryIntent(query, searchTokens, domainLike, navTerm, platformIntent)
@@ -426,13 +475,30 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 
 	idfMap := make(map[string]float64, len(tokens))
 	defaultIDF := math.Log(totalDocs / 1.0)
+
+	var missingTokens []string
+
 	for _, t := range tokens {
+		if s.cache != nil {
+			if cachedIDF, ok := s.cache.Get("idf:" + t); ok {
+				idfMap[t] = cachedIDF.(float64)
+				continue
+			}
+		}
+		missingTokens = append(missingTokens, t)
+	}
+
+	if len(missingTokens) == 0 {
+		return idfMap, nil
+	}
+
+	for _, t := range missingTokens {
 		idfMap[t] = defaultIDF
 	}
 
-	placeholders := make([]string, len(tokens))
-	args := make([]any, len(tokens))
-	for i, t := range tokens {
+	placeholders := make([]string, len(missingTokens))
+	args := make([]any, len(missingTokens))
+	for i, t := range missingTokens {
 		placeholders[i] = "?"
 		args[i] = t
 	}
@@ -449,7 +515,20 @@ func (s *SQLiteStorage) getSearchIDFMap(ctx context.Context, tokens []string) (m
 		var term string
 		var docCount float64
 		if err := rows.Scan(&term, &docCount); err == nil && docCount > 0 {
-			idfMap[term] = math.Log(totalDocs / docCount)
+			val := math.Log(totalDocs / docCount)
+			idfMap[term] = val
+			if s.cache != nil {
+				s.cache.SetWithTTL("idf:"+term, val, 1, 24*time.Hour)
+			}
+		}
+	}
+
+	// Cache default IDF for tokens that weren't found to avoid re-querying
+	for _, t := range missingTokens {
+		if val, ok := idfMap[t]; ok && val == defaultIDF {
+			if s.cache != nil {
+				s.cache.SetWithTTL("idf:"+t, val, 1, 24*time.Hour)
+			}
 		}
 	}
 
@@ -633,10 +712,16 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 func buildSQLScoreExpr(query searchQuery, domainExact, domainPrefix, titleExact, titlePrefix, titleContains, lang string) string {
 	base := "0.0"
 
-	// Title matching (same for both intents)
-	base += " + CASE WHEN LOWER(p.title) = ? THEN 500.0 ELSE 0 END"
-	base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 300.0 ELSE 0 END"
-	base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 180.0 ELSE 0 END"
+	// Title matching — strong signal for navigational, moderate for informational
+	if query.intent == intentNavigational {
+		base += " + CASE WHEN LOWER(p.title) = ? THEN 2000.0 ELSE 0 END"
+		base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 1200.0 ELSE 0 END"
+		base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 800.0 ELSE 0 END"
+	} else {
+		base += " + CASE WHEN LOWER(p.title) = ? THEN 500.0 ELSE 0 END"
+		base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 300.0 ELSE 0 END"
+		base += " + CASE WHEN LOWER(p.title) LIKE ? THEN 180.0 ELSE 0 END"
+	}
 
 	if query.intent == intentNavigational {
 		// Navigational: strong domain and homepage signals
@@ -648,7 +733,6 @@ func buildSQLScoreExpr(query searchQuery, domainExact, domainPrefix, titleExact,
 		// Informational: moderate domain signal, no massive homepage boost
 		base += " + CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 100.0 ELSE 0 END"
 		base += " + CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 50.0 ELSE 0 END"
-		// Government domains get a small baseline boost for informational queries
 		base += " + CASE WHEN LOWER(p.domain) LIKE '%.gub.%' OR LOWER(p.domain) LIKE '%.gov.%' THEN 80.0 ELSE 0 END"
 	}
 
@@ -801,6 +885,130 @@ func (s *SQLiteStorage) searchNavigationalCandidates(ctx context.Context, query 
 	}
 
 	return candidates, nil
+}
+
+// searchDomainMatchCandidates finds pages whose domain root label contains query tokens.
+// This ensures domain-matching pages (like tiendainglesa.com.uy for "tienda inglesa")
+// are in the candidate set even if the FTS AND query didn't match them.
+func (s *SQLiteStorage) searchDomainMatchCandidates(ctx context.Context, query searchQuery, lang string, limit int) ([]searchCandidate, error) {
+	if limit <= 0 || len(query.tokens) < 2 {
+		return nil, nil
+	}
+
+	// Build CASE expressions to count how many tokens match the domain.
+	// Include siteTypeIntent token (e.g. "tienda") since it was removed from
+	// query.tokens but is part of the brand/domain name we're looking for.
+	domainMatchTokens := make([]string, 0, len(query.tokens)+1)
+	domainMatchTokens = append(domainMatchTokens, query.tokens...)
+	if query.siteTypeIntent != "" && len(query.siteTypeIntent) >= 3 {
+		domainMatchTokens = append(domainMatchTokens, query.siteTypeIntent)
+	}
+
+	var caseClauses []string
+	var args []any
+	for _, token := range domainMatchTokens {
+		if len(token) >= 3 {
+			caseClauses = append(caseClauses, "CASE WHEN LOWER(p.domain) LIKE ? THEN 1 ELSE 0 END")
+			args = append(args, "%"+token+"%")
+		}
+	}
+	if len(caseClauses) < 2 {
+		return nil, nil
+	}
+
+	// Require at least 2 tokens to match the domain
+	matchCountExpr := "(" + strings.Join(caseClauses, " + ") + ")"
+	whereExpr := matchCountExpr + " >= 2"
+
+	// Use a subquery to avoid duplicating CASE expressions and their args
+	querySQL := fmt.Sprintf(`SELECT id, url, title, h1, h2, description, snippet, domain, language, region, crawled_at, published_at, updated_at, sql_score, content_len, schema_type, schema_image, schema_author, schema_keywords, schema_rating, referring_domains, pagerank, clicks
+FROM (
+	SELECT p.id, p.url, p.title, p.h1, p.h2, p.description,
+		CASE WHEN p.description != '' THEN SUBSTR(p.description, 1, 240) ELSE '' END AS snippet,
+		p.domain, p.language, p.region, p.crawled_at, p.published_at, p.updated_at,
+		500.0 AS sql_score, LENGTH(p.content) AS content_len,
+		p.schema_type, p.schema_image, p.schema_author, p.schema_keywords,
+		p.schema_rating, p.referring_domains, COALESCE(p.pagerank, 1.0) AS pagerank,
+		0 AS clicks,
+		%s AS match_count
+	FROM pages p
+	WHERE %s
+)
+ORDER BY match_count DESC, crawled_at DESC
+LIMIT ?`, matchCountExpr, whereExpr)
+
+	// Duplicate args: matchCountExpr appears in both SELECT and WHERE inside the subquery
+	doubledArgs := make([]any, 0, len(args)*2+1)
+	doubledArgs = append(doubledArgs, args...) // for SELECT match_count
+	doubledArgs = append(doubledArgs, args...) // for WHERE match_count >= 2
+	doubledArgs = append(doubledArgs, limit)
+
+	rows, err := s.searchContentDB.QueryContext(ctx, querySQL, doubledArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("querying domain-match candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []searchCandidate
+	for rows.Next() {
+		var (
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			updatedAtStr   sql.NullString
+			snippetText    sql.NullString
+			schemaRating   sql.NullFloat64
+			schemaType     sql.NullString
+			schemaImage    sql.NullString
+			schemaAuthor   sql.NullString
+			schemaKeywords sql.NullString
+		)
+		if err := rows.Scan(
+			&candidate.ID, &candidate.URL, &candidate.Title, &candidate.H1, &candidate.H2,
+			&candidate.Description, &snippetText, &candidate.Domain, &candidate.Language,
+			&candidate.Region, &crawledAt, &publishedAtStr, &updatedAtStr, &candidate.sqlScore,
+			&candidate.contentLen, &schemaType, &schemaImage, &schemaAuthor, &schemaKeywords,
+			&schemaRating, &candidate.ReferringDomains, &candidate.PageRank, new(int),
+		); err != nil {
+			return nil, fmt.Errorf("scanning domain-match candidate: %w", err)
+		}
+		candidate.Snippet = snippetText.String
+		candidate.mode = searchModeFTSRelaxed
+		if crawledAt.Valid {
+			candidate.CrawledAt = crawledAt.Time
+		}
+		if publishedAtStr.Valid && publishedAtStr.String != "" {
+			t := parseFlexibleTime(publishedAtStr.String)
+			if !t.IsZero() {
+				candidate.publishedAtTime = t
+				candidate.PublishedAt = &t
+			}
+		}
+		if updatedAtStr.Valid && updatedAtStr.String != "" {
+			t := parseFlexibleTime(updatedAtStr.String)
+			if !t.IsZero() {
+				candidate.UpdatedAt = &t
+			}
+		}
+		if schemaRating.Valid {
+			candidate.SchemaRating = schemaRating.Float64
+		}
+		if schemaType.Valid {
+			candidate.SchemaType = schemaType.String
+		}
+		if schemaImage.Valid {
+			candidate.SchemaImage = schemaImage.String
+		}
+		if schemaAuthor.Valid {
+			candidate.SchemaAuthor = schemaAuthor.String
+		}
+		if schemaKeywords.Valid {
+			candidate.SchemaKeywords = schemaKeywords.String
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	return candidates, rows.Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,7 +1220,9 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 			pathLower := strings.ToLower(candidate.URL)
 			pathMatchCount := 0
 			for _, token := range query.tokens {
-				if len(token) >= 3 && strings.Contains(pathLower, token) {
+				// Exclude numeric tokens (years like "2026") from path match count
+				// to avoid inflating matches for irrelevant gov pages.
+				if len(token) >= 3 && !isNumericToken(token) && strings.Contains(pathLower, token) {
 					pathMatchCount++
 				}
 			}
@@ -1028,23 +1238,47 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 					primaryToken = ordered[0]
 				}
 			}
-			hasPrimaryInPath := primaryToken != "" && len(primaryToken) >= 3 && strings.Contains(pathLower, primaryToken)
+			hasPrimaryInPath := primaryToken != "" && len(primaryToken) >= 3 && !isNumericToken(primaryToken) && strings.Contains(pathLower, primaryToken)
 
-		if hasPrimaryInPath && pathMatchCount >= 2 {
-			// Very strong boost: primary token + multiple path matches
-			totalScore += 8000.0 + float64(pathMatchCount)*800.0
-			if isSearchHomepage(candidate.URL) {
-				totalScore += 2000.0
+			// Check primary token specificity: if the primary token's IDF is not
+			// significantly higher than the second token's, it's a generic word
+			// (e.g. "mundial" in "mundial futbol 2026") and the gov boost should
+			// be reduced. Only strongly boost when the primary token is clearly
+			// the most specific term (like "patente" in "cuando vence la patente").
+			primaryIsSpecific := true
+			if hasPrimaryInPath && len(query.tokens) >= 2 && len(query.idfMap) >= 2 {
+				ordered := sortTokensByRelevance(query.tokens, query.idfMap)
+				if len(ordered) >= 2 {
+					primaryIDF := query.idfMap[ordered[0]]
+					secondIDF := query.idfMap[ordered[1]]
+					// If primary is less than 1.5x the second token's IDF, it's
+					// not specific enough for a strong gov boost.
+					if primaryIDF < secondIDF*1.5 {
+						primaryIsSpecific = false
+					}
+				}
 			}
-		} else if hasPrimaryInPath {
-			// Strong boost: primary token in gov URL path (even if it's the only match).
-			// e.g. "cuando vence la patente uruguay" → sucive.gub.uy/consulta_patente
-			// "patente" is the primary token and it's in the path.
-			totalScore += 6000.0 + float64(pathMatchCount)*800.0
-			if isSearchHomepage(candidate.URL) {
-				totalScore += 2000.0
-			}
-		} else if pathMatchCount >= 2 {
+
+			if hasPrimaryInPath && pathMatchCount >= 2 && primaryIsSpecific {
+				// Very strong boost: specific primary token + multiple path matches
+				totalScore += 8000.0 + float64(pathMatchCount)*800.0
+				if isSearchHomepage(candidate.URL) {
+					totalScore += 2000.0
+				}
+			} else if hasPrimaryInPath && primaryIsSpecific {
+				// Strong boost: specific primary token in gov URL path.
+				// e.g. "cuando vence la patente uruguay" → sucive.gub.uy/consulta_patente
+				totalScore += 6000.0 + float64(pathMatchCount)*800.0
+				if isSearchHomepage(candidate.URL) {
+					totalScore += 2000.0
+				}
+			} else if hasPrimaryInPath && pathMatchCount >= 2 {
+				// Moderate boost: non-specific primary token but multiple path matches
+				totalScore += 2000.0 + float64(pathMatchCount)*400.0
+			} else if hasPrimaryInPath {
+				// Weak boost: non-specific primary token, single path match
+				totalScore += 800.0
+			} else if pathMatchCount >= 2 {
 				// Moderate boost: multiple path matches but not the primary token
 				totalScore += 1000.0 + float64(pathMatchCount)*400.0
 			} else if pathMatchCount >= 1 {
@@ -1054,6 +1288,33 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 			}
 			// No baseline boost — if the URL path doesn't contain any query
 			// tokens, the gov domain is irrelevant to this query.
+		}
+	}
+
+	// --- Domain brand match boost for informational queries ---
+	// When query tokens match the domain root label (e.g. "el dorado supermercado"
+	// → "eldorado.com.uy"), this is a strong navigational signal even for
+	// informational queries. Apply directly to totalScore (not weighted).
+	if query.intent == intentInformational && len(query.tokens) > 0 && domainInfo.rootLabel != "" {
+		rootLower := strings.ToLower(domainInfo.rootLabel)
+		rootLen := len([]rune(rootLower))
+		brandTokens := make([]string, 0, len(query.tokens)+1)
+		brandTokens = append(brandTokens, query.tokens...)
+		if query.siteTypeIntent != "" && len(query.siteTypeIntent) >= 3 {
+			brandTokens = append(brandTokens, query.siteTypeIntent)
+		}
+		matchedTokens := 0
+		for _, token := range brandTokens {
+			tokenLen := len([]rune(token))
+			if tokenLen >= 3 && strings.Contains(rootLower, token) && tokenLen*100/rootLen >= 40 {
+				matchedTokens++
+			}
+		}
+		if matchedTokens >= 2 {
+			totalScore += float64(matchedTokens) * 2000.0
+			if matchedTokens == len(brandTokens) {
+				totalScore += 5000.0
+			}
 		}
 	}
 
@@ -1163,7 +1424,7 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 				strings.HasSuffix(urlDomain, ".gov.uy") ||
 				strings.Contains(urlDomain, ".gub.") ||
 				strings.Contains(urlDomain, ".gov.")
-			
+
 			if isGovOrEdu {
 				// Softer penalty for gov domains
 				score *= 0.75 + coverageRatio*0.25 // e.g., 0.33 coverage → score *= 0.83
@@ -1242,6 +1503,33 @@ func scoreURLSignal(query searchQuery, rawURL string, domainInfo searchDomainInf
 			score += 150.0
 		} else if strings.Contains(urlDomain, ".gub.") || strings.Contains(urlDomain, ".gov.") {
 			score += 80.0
+		}
+	}
+
+	// Domain root label matching: "eldorado.com.uy" → rootLabel "eldorado" matches token "dorado"
+	// This catches navigational queries where the brand name is in the domain.
+	// Requires token to be ≥60% of root label length to avoid false matches
+	// (e.g. "supermercadosenuruguay" should NOT match "supermercado").
+	if len(query.tokens) > 0 && domainInfo.rootLabel != "" {
+		rootLower := strings.ToLower(domainInfo.rootLabel)
+		rootLen := len([]rune(rootLower))
+		urlBrandTokens := make([]string, 0, len(query.tokens)+1)
+		urlBrandTokens = append(urlBrandTokens, query.tokens...)
+		if query.siteTypeIntent != "" && len(query.siteTypeIntent) >= 3 {
+			urlBrandTokens = append(urlBrandTokens, query.siteTypeIntent)
+		}
+		matchedInDomain := 0
+		for _, token := range urlBrandTokens {
+			tokenLen := len([]rune(token))
+			if tokenLen >= 3 && strings.Contains(rootLower, token) && tokenLen*100/rootLen >= 40 {
+				matchedInDomain++
+			}
+		}
+		if matchedInDomain > 0 {
+			score += float64(matchedInDomain) * 400.0
+			if matchedInDomain >= 2 {
+				score += 800.0
+			}
 		}
 	}
 
@@ -1522,15 +1810,36 @@ var searchStopwords = map[string]struct{}{
 }
 
 func filterStopwords(tokens []string) []string {
+	return filterStopwordsContext(tokens, false)
+}
+
+func filterStopwordsContext(tokens []string, mediaContext bool) []string {
 	if len(tokens) <= 1 {
 		return tokens
 	}
 
+	// In media context, preserve stopwords that are commonly used as
+	// movie/TV show titles (e.g. "From", "The", "It", "You", "We").
+	mediaTitleStopwords := map[string]struct{}{
+		"from": {}, "the": {}, "it": {}, "you": {}, "we": {},
+		"her": {}, "him": {}, "us": {}, "me": {}, "my": {},
+		"up": {}, "in": {}, "on": {}, "el": {}, "la": {},
+		"lo": {}, "los": {}, "las": {}, "un": {}, "una": {},
+		"su": {}, "si": {}, "no": {}, "ya": {},
+	}
+
 	filtered := make([]string, 0, len(tokens))
 	for _, t := range tokens {
-		if _, stop := searchStopwords[t]; !stop {
-			filtered = append(filtered, t)
+		if _, stop := searchStopwords[t]; stop {
+			if mediaContext {
+				if _, ok := mediaTitleStopwords[t]; ok {
+					filtered = append(filtered, t)
+					continue
+				}
+			}
+			continue
 		}
+		filtered = append(filtered, t)
 	}
 
 	if len(filtered) == 0 {
@@ -1829,15 +2138,15 @@ func buildFTSCoreQuery(q searchQuery) string {
 
 	ordered := sortTokensByRelevance(tokens, q.idfMap)
 	core := ordered
-	if len(core) > 3 {
-		core = core[:3]
+	if len(core) > 2 {
+		core = core[:2]
 	}
 
 	parts := make([]string, 0, len(core))
 	for _, token := range core {
 		parts = append(parts, quoteFTS5Token(token))
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(parts, " AND ")
 }
 
 func buildFTSRelaxedQuery(q searchQuery) string {
@@ -1879,6 +2188,15 @@ func escapeFTS5Token(token string) string {
 	return strings.ReplaceAll(token, `"`, `""`)
 }
 
+func isNumericToken(token string) bool {
+	for _, r := range token {
+		if !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return len(token) > 0
+}
+
 func sortTokensByRelevance(tokens []string, idfMap map[string]float64) []string {
 	if len(tokens) == 0 {
 		return tokens
@@ -1893,6 +2211,108 @@ func sortTokensByRelevance(tokens []string, idfMap map[string]float64) []string 
 		return len([]rune(ordered[i])) > len([]rune(ordered[j]))
 	})
 	return ordered
+}
+
+// splitCompoundTokens splits compound words like "tiendainglesa" into "tienda" + "inglesa"
+// by validating splits against the FTS5 vocabulary. Only applies to tokens ≥ 12 chars
+// to avoid splitting normal words like "inglesa" or "montevideo".
+func (s *SQLiteStorage) splitCompoundTokens(tokens []string) []string {
+	// Collect tokens that are long enough to be compound words
+	candidates := make([]string, 0)
+	for _, tok := range tokens {
+		if len([]rune(tok)) >= 12 {
+			candidates = append(candidates, tok)
+		}
+	}
+	if len(candidates) == 0 {
+		return tokens
+	}
+
+	// Generate all possible subwords from 2-way splits
+	type split struct {
+		left, right string
+	}
+	tokenSplits := make(map[string][]split) // original token → possible splits
+	subwordSet := make(map[string]struct{})
+	for _, tok := range candidates {
+		runes := []rune(tok)
+		for i := 3; i <= len(runes)-3; i++ {
+			left := string(runes[:i])
+			right := string(runes[i:])
+			tokenSplits[tok] = append(tokenSplits[tok], split{left, right})
+			subwordSet[left] = struct{}{}
+			subwordSet[right] = struct{}{}
+		}
+	}
+
+	// Query FTS vocab to check which subwords actually exist in the index.
+	// Also check if the original compound tokens themselves are real words —
+	// if so, we should NOT split them (e.g. "supermercado" is a real word).
+	subwords := make([]string, 0, len(subwordSet)+len(candidates))
+	for w := range subwordSet {
+		subwords = append(subwords, w)
+	}
+	for _, tok := range candidates {
+		subwords = append(subwords, tok)
+	}
+
+	knownWords := make(map[string]struct{})
+	if len(subwords) > 0 {
+		// Build batch query
+		placeholders := make([]string, len(subwords))
+		args := make([]any, len(subwords))
+		for i, w := range subwords {
+			placeholders[i] = "?"
+			args[i] = w
+		}
+		query := fmt.Sprintf(`SELECT term FROM pages_fts_vocab WHERE term IN (%s)`, strings.Join(placeholders, ","))
+		rows, err := s.searchContentDB.QueryContext(context.Background(), query, args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var term string
+				if err := rows.Scan(&term); err == nil {
+					knownWords[term] = struct{}{}
+				}
+			}
+		}
+	}
+
+	// Identify compound tokens that are real words themselves — skip splitting them
+	skipSplit := make(map[string]bool)
+	for _, tok := range candidates {
+		if _, ok := knownWords[tok]; ok {
+			skipSplit[tok] = true
+		}
+	}
+
+	// Replace compound tokens with their split parts if both halves are known
+	result := make([]string, 0, len(tokens)+4)
+	for _, tok := range tokens {
+		splits, ok := tokenSplits[tok]
+		if !ok || skipSplit[tok] {
+			result = append(result, tok)
+			continue
+		}
+		// Find best split: prefer longer left part (greedy left-to-right)
+		bestLeft, bestRight := "", ""
+		for _, sp := range splits {
+			_, lok := knownWords[sp.left]
+			_, rok := knownWords[sp.right]
+			if lok && rok {
+				if len([]rune(sp.left)) > len([]rune(bestLeft)) {
+					bestLeft = sp.left
+					bestRight = sp.right
+				}
+			}
+		}
+		if bestLeft != "" && bestRight != "" {
+			result = append(result, bestLeft, bestRight)
+		} else {
+			result = append(result, tok)
+		}
+	}
+	return result
 }
 
 // ---------------------------------------------------------------------------

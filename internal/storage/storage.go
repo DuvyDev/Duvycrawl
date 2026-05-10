@@ -75,6 +75,9 @@ type Storage interface {
 	// EnqueueURLs adds multiple URLs to the crawl queue in a single transaction.
 	EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 
+	// EnqueueURLsDirectly adds multiple URLs with a base priority directly without going through the frontier.
+	EnqueueURLsDirectly(ctx context.Context, urls []string, depth int, baseScore float64) (int, error)
+
 	// DequeueURLs atomically claims up to `limit` pending jobs from the queue,
 	// ordered by priority (descending). Claimed jobs are marked as in_progress.
 	DequeueURLs(ctx context.Context, limit int) ([]*CrawlJob, error)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -342,6 +343,50 @@ func (s *SQLiteStorage) EnqueueURLs(ctx context.Context, jobs []*CrawlJob) error
 	}
 
 	return tx.Commit()
+}
+
+// EnqueueURLsDirectly adds multiple URLs with a base priority directly to the queue.
+// This is used by the API when the frontier is not available (API-only mode).
+func (s *SQLiteStorage) EnqueueURLsDirectly(ctx context.Context, urls []string, depth int, baseScore float64) (int, error) {
+	if len(urls) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.crawlerDB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("beginning direct enqueue transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO crawl_queue (url, domain, depth, score, status) VALUES (?, ?, ?, ?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("preparing direct enqueue statement: %w", err)
+	}
+	defer stmt.Close()
+
+	enqueued := 0
+	for _, u := range urls {
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.Hostname() == "" {
+			continue
+		}
+		domain := strings.TrimPrefix(parsed.Hostname(), "www.")
+
+		res, err := stmt.ExecContext(ctx, u, domain, depth, baseScore, JobStatusPending)
+		if err != nil {
+			return 0, fmt.Errorf("enqueuing URL %q: %w", u, err)
+		}
+		affected, _ := res.RowsAffected()
+		if affected > 0 {
+			enqueued++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing direct enqueue transaction: %w", err)
+	}
+
+	return enqueued, nil
 }
 
 // DequeueURLs atomically claims up to `limit` pending jobs from the queue.

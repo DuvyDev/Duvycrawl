@@ -12,6 +12,7 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/urlfilter"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/abadojack/whatlanggo"
+	"github.com/go-shiori/go-readability"
 	"github.com/saintfish/chardet"
 	"golang.org/x/net/html/charset"
 	"golang.org/x/text/encoding/htmlindex"
@@ -219,51 +220,94 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		}
 	})
 
-	// Extract visible text content.
-	// Remove non-content elements: scripts, styles, navigation, chrome, ads, etc.
-	doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
+	// Extract visible text content using go-readability
+	parsedURL, _ := url.Parse(baseURL)
+	article, err := readability.FromReader(bytes.NewReader(htmlBody), parsedURL)
 
-	// Remove common content noise: ads, sidebars, comments, widgets, code blocks, etc.
-	doc.Find(".ad, .ads, .advertisement, .ad-container, .google-ad, .sidebar, #sidebar, .comments, .comment-list, .comment-section, .related-posts, .newsletter, .cookie-banner, .popup, .modal, .social-share, .share-buttons, .author-bio, .toc, .table-of-contents, pre, code").Remove()
+	// Fallback mechanism if readability fails or returns empty/too short text
+	if err == nil && len(strings.TrimSpace(article.TextContent)) > 100 {
+		result.Content = normalizeWhitespace(article.TextContent)
 
-	// Get the text from the main content area.
-	// Try <main>, <article>, then fall back to <body>.
-	contentRoot := doc.Find("main, article, [role=main]").First()
-	if contentRoot.Length() == 0 {
-		contentRoot = doc.Find("body").First()
-	}
+		// Extract links from the readability content (prioritized content links)
+		if article.Content != "" {
+			contentDoc, err := goquery.NewDocumentFromReader(strings.NewReader(article.Content))
+			if err == nil {
+				contentDoc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
+					href, exists := s.Attr("href")
+					if !exists {
+						return
+					}
+					href = strings.TrimSpace(href)
+					if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
+						return
+					}
+					if rel, _ := s.Attr("rel"); strings.Contains(rel, "nofollow") {
+						return
+					}
 
-	result.H1 = extractHeadingText(contentRoot, "h1", 1200)
-	result.H2 = extractHeadingText(contentRoot, "h2", 2000)
+					resolved := resolveURL(base, href)
+					if resolved != "" && !isBinaryExtension(resolved) {
+						if parsedResolved, err := url.Parse(resolved); err == nil && !isDisallowedPath(parsedResolved.Path) {
+							if !seen[resolved] {
+								seen[resolved] = true
+								anchorText := strings.TrimSpace(s.Text())
+								if len(anchorText) > 500 {
+									anchorText = anchorText[:500]
+								}
+								// Prepend to Links to give them priority in the frontier
+								result.Links = append([]string{resolved}, result.Links...)
+								result.Anchors = append([]LinkAnchor{{URL: resolved, Anchor: anchorText}}, result.Anchors...)
+							}
+						}
+					}
+				})
+			}
+		}
 
-	var contentText string
-	shredditPost := doc.Find("shreddit-post").First()
-	if shredditPost.Length() > 0 {
-		textBody := shredditPost.Find("[slot='text-body']")
-		if textBody.Length() > 0 {
-			contentText = extractText(textBody)
-		} else {
-			contentText = extractText(shredditPost)
+		// If readability found a title, use it as fallback if we don't have H1
+		if result.H1 == "" && article.Title != "" {
+			result.H1 = article.Title
 		}
 	} else {
-		contentText = extractText(contentRoot)
-	}
+		// Fallback to the old heuristic if readability fails
+		doc.Find("script, style, noscript, nav, footer, header, iframe, svg, aside, form, button, input, select, textarea, label, fieldset, legend, dialog, menu, menuitem, template, slot, canvas, video, audio, source, track, map, area, object, embed, applet").Remove()
+		doc.Find(".ad, .ads, .advertisement, .ad-container, .google-ad, .sidebar, #sidebar, .comments, .comment-list, .comment-section, .related-posts, .newsletter, .cookie-banner, .popup, .modal, .social-share, .share-buttons, .author-bio, .toc, .table-of-contents, pre, code").Remove()
 
-	result.Content = normalizeWhitespace(contentText)
+		contentRoot := doc.Find("main, article, [role=main]").First()
+		if contentRoot.Length() == 0 {
+			contentRoot = doc.Find("body").First()
+		}
 
-	// Fallback for SPAs where dynamic content is empty but meta/schema data exists.
-	// Priority: og:description > schema_description > h1 + h2 headings.
-	if result.Content == "" {
-		if result.Description != "" {
-			result.Content = result.Description
-		} else if result.SchemaDescription != "" {
-			result.Content = result.SchemaDescription
-		} else if result.H1 != "" {
-			parts := []string{result.H1}
-			if result.H2 != "" {
-				parts = append(parts, result.H2)
+		result.H1 = extractHeadingText(contentRoot, "h1", 1200)
+		result.H2 = extractHeadingText(contentRoot, "h2", 2000)
+
+		var contentText string
+		shredditPost := doc.Find("shreddit-post").First()
+		if shredditPost.Length() > 0 {
+			textBody := shredditPost.Find("[slot='text-body']")
+			if textBody.Length() > 0 {
+				contentText = extractText(textBody)
+			} else {
+				contentText = extractText(shredditPost)
 			}
-			result.Content = strings.Join(parts, " ")
+		} else {
+			contentText = extractText(contentRoot)
+		}
+
+		result.Content = normalizeWhitespace(contentText)
+
+		if result.Content == "" {
+			if result.Description != "" {
+				result.Content = result.Description
+			} else if result.SchemaDescription != "" {
+				result.Content = result.SchemaDescription
+			} else if result.H1 != "" {
+				parts := []string{result.H1}
+				if result.H2 != "" {
+					parts = append(parts, result.H2)
+				}
+				result.Content = strings.Join(parts, " ")
+			}
 		}
 	}
 

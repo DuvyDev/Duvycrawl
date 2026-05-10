@@ -114,5 +114,28 @@ func (s *Scheduler) tick(ctx context.Context) {
 		s.logger.Warn("failed to reset stalled jobs", "error", err)
 	}
 
+	// Fetch manually enqueued jobs (e.g. from the Search API)
+	if manualJobs, err := s.store.DequeueURLs(ctx, 100); err != nil {
+		s.logger.Error("failed to dequeue manual jobs", "error", err)
+	} else if len(manualJobs) > 0 {
+		var rawURLs []string
+		var jobIDs []int64
+		for _, j := range manualJobs {
+			rawURLs = append(rawURLs, j.URL)
+			jobIDs = append(jobIDs, j.ID)
+		}
+
+		if added, err := s.frontier.AddBatchDirect(ctx, rawURLs, 0, storage.PriorityNormal); err != nil {
+			s.logger.Error("failed to enqueue manual jobs into frontier", "error", err)
+		} else {
+			s.logger.Info("loaded manual jobs from database", "fetched", len(manualJobs), "enqueued", added)
+		}
+
+		// Delete them from the database so we don't fetch them again (since the queue is in-memory now)
+		for _, id := range jobIDs {
+			s.store.CompleteJob(ctx, id, nil)
+		}
+	}
+
 	s.logger.Debug("scheduler tick complete")
 }

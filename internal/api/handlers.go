@@ -198,10 +198,16 @@ func (h *Handlers) GetStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	crawled, errored := h.engine.Stats()
+	var crawled, errored int64
+	engineStatus := crawler.StatusIdle
+	if h.engine != nil {
+		crawled, errored = h.engine.Stats()
+		engineStatus = h.engine.Status()
+	}
+
 	result := map[string]any{
 		"stats":         stats,
-		"engine_status": h.engine.Status(),
+		"engine_status": engineStatus,
 		"session": map[string]any{
 			"pages_crawled": crawled,
 			"pages_errored": errored,
@@ -267,15 +273,22 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var startingDepth int
-	cfg := h.engine.Config()
-	if cfg.MaxDepth > cfg.APIMaxDepth {
-		startingDepth = cfg.MaxDepth - cfg.APIMaxDepth
+	if h.engine != nil {
+		cfg := h.engine.Config()
+		if cfg.MaxDepth > cfg.APIMaxDepth {
+			startingDepth = cfg.MaxDepth - cfg.APIMaxDepth
+		}
 	}
 
 	var queued int
 	if len(urlsToEnqueue) > 0 {
 		var err error
-		queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, startingDepth, baseScore)
+		if h.frontier != nil {
+			queued, err = h.frontier.AddBatchDirect(r.Context(), urlsToEnqueue, startingDepth, baseScore)
+		} else {
+			// Without the frontier object, we write directly to the queue table
+			queued, err = h.store.EnqueueURLsDirectly(r.Context(), urlsToEnqueue, startingDepth, baseScore)
+		}
 		if err != nil {
 			h.logger.Error("failed to enqueue URLs", "error", err, "count", len(urlsToEnqueue))
 			writeError(w, http.StatusInternalServerError, "failed to enqueue URLs")
@@ -298,6 +311,10 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 
 // GetQueue returns the current crawl queue status.
 func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
+	if h.frontier == nil || h.engine == nil {
+		writeError(w, http.StatusNotImplemented, "queue stats not available in this mode")
+		return
+	}
 	stats := h.frontier.Stats()
 	renderBacklog := h.engine.RenderBacklogLen()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -413,9 +430,15 @@ func (h *Handlers) AddSeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also enqueue the URL immediately.
-	if err := h.frontier.Add(r.Context(), req.URL, 0, storage.PrioritySeed); err != nil {
-		h.logger.Warn("failed to enqueue seed url", "url", req.URL, "error", err)
+	// Also enqueue the URL immediately if frontier is available.
+	if h.frontier != nil {
+		if err := h.frontier.Add(r.Context(), req.URL, 0, storage.PrioritySeed); err != nil {
+			h.logger.Warn("failed to enqueue seed url", "url", req.URL, "error", err)
+		}
+	} else {
+		if _, err := h.store.EnqueueURLsDirectly(r.Context(), []string{req.URL}, 0, storage.PrioritySeed); err != nil {
+			h.logger.Warn("failed to enqueue seed url directly", "url", req.URL, "error", err)
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -448,6 +471,10 @@ func (h *Handlers) DeleteSeed(w http.ResponseWriter, r *http.Request) {
 
 // StartCrawler starts the crawler engine.
 func (h *Handlers) StartCrawler(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		writeError(w, http.StatusNotImplemented, "crawler not available in this mode")
+		return
+	}
 	if h.engine.Status() == crawler.StatusRunning {
 		writeError(w, http.StatusConflict, "crawler is already running")
 		return
@@ -462,6 +489,10 @@ func (h *Handlers) StartCrawler(w http.ResponseWriter, r *http.Request) {
 
 // StopCrawler stops the crawler engine.
 func (h *Handlers) StopCrawler(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		writeError(w, http.StatusNotImplemented, "crawler not available in this mode")
+		return
+	}
 	if h.engine.Status() != crawler.StatusRunning {
 		writeError(w, http.StatusConflict, "crawler is not running")
 		return
@@ -476,6 +507,10 @@ func (h *Handlers) StopCrawler(w http.ResponseWriter, r *http.Request) {
 
 // CrawlerStatus returns the current status of the crawler engine.
 func (h *Handlers) CrawlerStatus(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		writeError(w, http.StatusNotImplemented, "crawler not available in this mode")
+		return
+	}
 	crawled, errored := h.engine.Stats()
 
 	writeJSON(w, http.StatusOK, map[string]any{

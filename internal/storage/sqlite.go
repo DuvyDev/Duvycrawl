@@ -16,6 +16,17 @@ import (
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
 	_ "modernc.org/sqlite"
+
+	"github.com/DuvyDev/Duvycrawl/internal/cache"
+)
+
+// StorageMode determines which database connections are opened.
+type StorageMode int
+
+const (
+	ModeMonolith  StorageMode = iota // Opens everything with write permissions.
+	ModeSearchAPI                    // Opens content.db/graph.db as read-only, crawler.db with write (to enqueue URLs).
+	ModeCrawler                      // Opens everything with write permissions.
 )
 
 // SQLiteStorage implements the Storage interface using SQLite with FTS5
@@ -40,6 +51,7 @@ type SQLiteStorage struct {
 	platformDomains map[string]struct{}
 	spellChecker    *SpellChecker
 	scoringCfg      ScoringConfig
+	cache           *cache.Cache
 }
 
 // Search types are defined in sqlite_search.go
@@ -50,9 +62,9 @@ var searchTextNormalizer = transform.Chain(
 	norm.NFC,
 )
 
-// NewSQLiteStorage creates a new SQLite-backed storage.
+// NewSQLiteStorage creates a new SQLite-backed storage based on the provided mode.
 // It creates the database directory if needed and opens content.db, crawler.db, and graph.db.
-func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (*SQLiteStorage, error) {
+func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logger *slog.Logger) (*SQLiteStorage, error) {
 	// Ensure the directory exists.
 	// We treat dbPath as the base path. If it ends in .db, we use its directory.
 	dir := dbPath
@@ -81,94 +93,156 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 	}
 
 	// --- 1. Content DB (Search Engine Core) ---
-	writeContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", contentPath)
-	writeContentDB, err := openDB(writeContentDSN, 1, 1)
-	if err != nil {
-		return nil, fmt.Errorf("opening write content database: %w", err)
-	}
-	if err := configureWriteDB(ctx, writeContentDB); err != nil {
-		writeContentDB.Close()
-		return nil, fmt.Errorf("configuring write content database: %w", err)
-	}
-	if err := migrateDB(ctx, writeContentDB, contentMigrations); err != nil {
-		writeContentDB.Close()
-		return nil, fmt.Errorf("running content migrations: %w", err)
+	var err error
+	var writeContentDB *sql.DB
+	if mode == ModeMonolith || mode == ModeCrawler || mode == ModeSearchAPI {
+		writeContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", contentPath)
+		writeContentDB, err = openDB(writeContentDSN, 1, 1)
+		if err != nil {
+			return nil, fmt.Errorf("opening write content database: %w", err)
+		}
+		if err := configureWriteDB(ctx, writeContentDB); err != nil {
+			writeContentDB.Close()
+			return nil, fmt.Errorf("configuring write content database: %w", err)
+		}
+		if err := migrateDB(ctx, writeContentDB, contentMigrations); err != nil {
+			writeContentDB.Close()
+			return nil, fmt.Errorf("running content migrations: %w", err)
+		}
 	}
 
 	readContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", contentPath)
 	readContentDB, err := openDB(readContentDSN, 16, 8)
 	if err != nil {
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("opening read content database: %w", err)
 	}
 	if err := configureReadDB(ctx, readContentDB); err != nil {
 		readContentDB.Close()
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("configuring read content database: %w", err)
 	}
+
 	searchContentDB, err := openDB(readContentDSN, 8, 8)
 	if err != nil {
 		readContentDB.Close()
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("opening search content database: %w", err)
 	}
 	if err := configureReadDB(ctx, searchContentDB); err != nil {
 		searchContentDB.Close()
 		readContentDB.Close()
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("configuring search content database: %w", err)
 	}
 
 	// --- 2. Crawler DB (State Machine) ---
+	// The API needs write access to enqueue manual URLs.
 	crawlerDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&_loc=auto", crawlerPath)
 	crawlerDB, err := openDB(crawlerDSN, 1, 1) // Keep single writer for queue
 	if err != nil {
 		searchContentDB.Close()
 		readContentDB.Close()
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("opening crawler database: %w", err)
 	}
 	if err := configureWriteDB(ctx, crawlerDB); err != nil {
 		crawlerDB.Close()
 		searchContentDB.Close()
 		readContentDB.Close()
-		writeContentDB.Close()
+		if writeContentDB != nil {
+			writeContentDB.Close()
+		}
 		return nil, fmt.Errorf("configuring crawler database: %w", err)
 	}
-	if err := migrateDB(ctx, crawlerDB, crawlerMigrations); err != nil {
-		crawlerDB.Close()
-		searchContentDB.Close()
-		readContentDB.Close()
-		writeContentDB.Close()
-		return nil, fmt.Errorf("running crawler migrations: %w", err)
+	if mode == ModeMonolith || mode == ModeCrawler {
+		if err := migrateDB(ctx, crawlerDB, crawlerMigrations); err != nil {
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("running crawler migrations: %w", err)
+		}
 	}
 
 	// --- 3. Graph DB (Web Graph) ---
-	// _synchronous=OFF for extreme write speed on links, corruption here is acceptable as it can be rebuilt
-	graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OFF&_cache_size=-10000&_foreign_keys=ON&_loc=auto", graphPath)
-	graphDB, err := openDB(graphDSN, 1, 1)
+	var graphDB *sql.DB
+	if mode == ModeMonolith || mode == ModeCrawler {
+		// _synchronous=OFF for extreme write speed on links
+		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OFF&_cache_size=-10000&_foreign_keys=ON&_loc=auto", graphPath)
+		graphDB, err = openDB(graphDSN, 1, 1)
+		if err != nil {
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("opening graph database: %w", err)
+		}
+		if err := configureWriteDB(ctx, graphDB); err != nil {
+			graphDB.Close()
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("configuring graph database: %w", err)
+		}
+		if err := migrateDB(ctx, graphDB, graphMigrations); err != nil {
+			graphDB.Close()
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("running graph migrations: %w", err)
+		}
+	} else {
+		// Read-only connection for API to serve backlinks
+		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&mode=ro&_loc=auto", graphPath)
+		graphDB, err = openDB(graphDSN, 4, 2)
+		if err != nil {
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("opening read graph database: %w", err)
+		}
+		if err := configureReadDB(ctx, graphDB); err != nil {
+			graphDB.Close()
+			crawlerDB.Close()
+			searchContentDB.Close()
+			readContentDB.Close()
+			if writeContentDB != nil {
+				writeContentDB.Close()
+			}
+			return nil, fmt.Errorf("configuring read graph database: %w", err)
+		}
+	}
+
+	c, err := cache.NewCache(cache.Config{
+		NumCounters: 1e7,     // 10M keys
+		MaxCost:     1 << 29, // 512MB RAM max
+	}, logger)
 	if err != nil {
-		crawlerDB.Close()
-		searchContentDB.Close()
-		readContentDB.Close()
-		writeContentDB.Close()
-		return nil, fmt.Errorf("opening graph database: %w", err)
-	}
-	if err := configureWriteDB(ctx, graphDB); err != nil {
-		graphDB.Close()
-		crawlerDB.Close()
-		searchContentDB.Close()
-		readContentDB.Close()
-		writeContentDB.Close()
-		return nil, fmt.Errorf("configuring graph database: %w", err)
-	}
-	if err := migrateDB(ctx, graphDB, graphMigrations); err != nil {
-		graphDB.Close()
-		crawlerDB.Close()
-		searchContentDB.Close()
-		readContentDB.Close()
-		writeContentDB.Close()
-		return nil, fmt.Errorf("running graph migrations: %w", err)
+		return nil, fmt.Errorf("initializing ristretto cache: %w", err)
 	}
 
 	s := &SQLiteStorage{
@@ -180,6 +254,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, logger *slog.Logger) (
 		logger:          logger.With("component", "storage"),
 		dataDir:         dir,
 		spellChecker:    NewSpellChecker(logger),
+		cache:           c,
 	}
 
 	// Start loading the spell checker vocabulary and reload it every 2 hours
@@ -366,6 +441,10 @@ func (s *SQLiteStorage) Close() error {
 		if err := s.graphDB.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("closing graphDB: %w", err))
 		}
+	}
+
+	if s.cache != nil {
+		s.cache.Close()
 	}
 
 	if len(errs) > 0 {
