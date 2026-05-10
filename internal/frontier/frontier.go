@@ -366,11 +366,11 @@ func shouldDropQueryParam(key string) bool {
 		"auth", "sid", "phpsessid", "jsessionid",
 		"expires", "expiry", "exp",
 		// Sorting, filtering, and view state
-		"f", "filter", "sort", "order", "view", "layout", "theme",
+		"f", "filter", "sort", "order", "view", "layout", "theme", "feedviewtype", "feedsort", "sort_by", "sort_order", "dir", "direction", "mode", "type",
 		// Search queries (often lead to infinite crawler traps)
 		"q", "query", "s", "search",
 		// Referrers and timestamps
-		"ref", "source", "t":
+		"ref", "source", "t", "ref_src", "ref_url", "referer", "referrer", "context":
 		return true
 	}
 
