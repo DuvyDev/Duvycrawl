@@ -98,14 +98,63 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
 
+	// --- Phase 1: Retrieval ---
+	candidates, total, err := s.retrieveSearchCandidates(searchCtx, q, lang, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// --- Phase 2: Scoring ---
+	reranked := s.rerankSearchCandidates(candidates, q, lang)
+
+	// --- Phase 3: Semantic re-ranking ---
+	reranked = s.applySemanticReranking(searchCtx, reranked, q)
+
+	// --- Phase 4: Post-processing ---
+	if lang != "" {
+		reranked = promoteLanguagePerDomain(reranked, lang, s.scoringCfg.SecondaryLanguage)
+	}
+
+	reranked = filterAndDiversifyCandidates(reranked, domain, schemaType)
+
+	if domain != "" || schemaType != "" {
+		total = len(reranked)
+	} else if total < len(reranked) {
+		total = len(reranked)
+	}
+
+	if offset >= len(reranked) {
+		return []SearchResult{}, total, nil
+	}
+
+	end := min(offset+limit, len(reranked))
+
+	// Load body previews for final results
+	if err := s.loadResultBodies(searchCtx, reranked[offset:end]); err != nil {
+		s.logger.Warn("failed to load result bodies", "error", err)
+	}
+
+	results := make([]SearchResult, 0, end-offset)
+	for _, candidate := range reranked[offset:end] {
+		results = append(results, candidate.SearchResult)
+	}
+
+	if s.cache != nil {
+		s.cache.SetWithTTL(cacheKey, struct {
+			results []SearchResult
+			total   int
+		}{results, total}, 10, 5*time.Minute)
+	}
+
+	return results, total, nil
+}
+
+func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q searchQuery, lang string, limit int, offset int) ([]searchCandidate, int, error) {
 	candidateLimit := searchCandidateLimit(limit, offset)
 
-	var (
-		candidates []searchCandidate
-		total      int
-	)
+	var candidates []searchCandidate
+	var total int
 
-	// --- Phase 1: Retrieval via FTS ---
 	plans := []struct {
 		mode     searchMode
 		ftsQuery string
@@ -135,10 +184,10 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 				break
 			}
 			if planCtx.Err() != nil {
-				s.logger.Debug("FTS plan timed out, skipping", "mode", plan.mode, "query", query)
+				s.logger.Debug("FTS plan timed out, skipping", "mode", plan.mode, "query", q.raw)
 				continue
 			}
-			return nil, 0, fmt.Errorf("counting %s results for %q: %w", plan.mode, query, err)
+			return nil, 0, fmt.Errorf("counting %s results for %q: %w", plan.mode, q.raw, err)
 		}
 		if count == 0 {
 			planCancel()
@@ -152,10 +201,10 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 				break
 			}
 			if planCtx.Err() != nil {
-				s.logger.Debug("FTS plan timed out during search, skipping", "mode", plan.mode, "query", query)
+				s.logger.Debug("FTS plan timed out during search, skipping", "mode", plan.mode, "query", q.raw)
 				continue
 			}
-			return nil, 0, fmt.Errorf("searching %s candidates for %q: %w", plan.mode, query, err)
+			return nil, 0, fmt.Errorf("searching %s candidates for %q: %w", plan.mode, q.raw, err)
 		}
 		if len(results) == 0 {
 			continue
@@ -179,12 +228,6 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	// --- Platform diversity injection ---
-	// When the query has a platformIntent (e.g. "warframe reddit"), the FTS
-	// tokens are just ["warframe"]. BM25 will rank all pages containing
-	// "warframe" by text relevance — and platform domains like Reddit have
-	// hundreds of pages with identical boilerplate, monopolizing the LIMIT.
-	// This supplementary pass fetches the best non-platform results to ensure
-	// the Go re-ranking pipeline has diversity to work with.
 	if q.platformIntent != "" && searchCtx.Err() == nil {
 		diversityLimit := min(candidateLimit/3, 100)
 		if diversityLimit < 30 {
@@ -218,9 +261,6 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	// --- Domain-match retrieval for informational queries ---
-	// When query tokens match a domain root label (e.g. "tienda inglesa supermercado"
-	// → "tiendainglesa.com.uy"), ensure those pages are in the candidate set even if
-	// the FTS AND query didn't match them (thin SPA pages with minimal content).
 	if q.intent == intentInformational && len(q.tokens) >= 2 {
 		domainCandidates, err := s.searchDomainMatchCandidates(searchCtx, q, lang, min(candidateLimit, 30))
 		if err == nil {
@@ -229,50 +269,50 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	if err := searchCtx.Err(); err != nil && len(candidates) == 0 {
-		return nil, 0, fmt.Errorf("search timed out before collecting candidates for %q: %w", query, err)
+		return nil, 0, fmt.Errorf("search timed out before collecting candidates for %q: %w", q.raw, err)
 	}
 
-	// --- Phase 2: Scoring ---
-	reranked := s.rerankSearchCandidates(candidates, q, lang)
+	return candidates, total, nil
+}
 
-	// --- Phase 3: Semantic re-ranking (optional) ---
-	if len(reranked) > 0 && s.embedder != nil {
-		semanticCtx, semanticCancel := context.WithTimeout(searchCtx, 1200*time.Millisecond)
-		queryEmbedding, err := s.embedder.GenerateEmbeddingContext(semanticCtx, q.raw)
-		semanticCancel()
-		if err == nil && len(queryEmbedding) > 0 {
-			topN := min(len(reranked), 100)
-			pageIDs := make([]int64, 0, topN)
+func (s *SQLiteStorage) applySemanticReranking(searchCtx context.Context, reranked []searchCandidate, q searchQuery) []searchCandidate {
+	if len(reranked) == 0 || s.embedder == nil {
+		return reranked
+	}
+
+	semanticCtx, semanticCancel := context.WithTimeout(searchCtx, 1200*time.Millisecond)
+	queryEmbedding, err := s.embedder.GenerateEmbeddingContext(semanticCtx, q.raw)
+	semanticCancel()
+	if err == nil && len(queryEmbedding) > 0 {
+		topN := min(len(reranked), 100)
+		pageIDs := make([]int64, 0, topN)
+		for i := 0; i < topN; i++ {
+			pageIDs = append(pageIDs, reranked[i].ID)
+		}
+
+		embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
+		if err == nil && len(embs) > 0 {
 			for i := 0; i < topN; i++ {
-				pageIDs = append(pageIDs, reranked[i].ID)
-			}
-
-			embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
-			if err == nil && len(embs) > 0 {
-				for i := 0; i < topN; i++ {
-					emb, ok := embs[reranked[i].ID]
-					if !ok || len(emb.Embedding) == 0 {
-						continue
-					}
-					sim := cosineSimilarity(queryEmbedding, emb.Embedding)
-					semanticScore := sim * 10000.0
-					oldRank := reranked[i].Rank
-					reranked[i].Rank = oldRank*0.75 + semanticScore*0.25
+				emb, ok := embs[reranked[i].ID]
+				if !ok || len(emb.Embedding) == 0 {
+					continue
 				}
-				sort.SliceStable(reranked, func(i, j int) bool {
-					return reranked[i].Rank > reranked[j].Rank
-				})
+				sim := cosineSimilarity(queryEmbedding, emb.Embedding)
+				semanticScore := sim * 10000.0
+				oldRank := reranked[i].Rank
+				reranked[i].Rank = oldRank*0.75 + semanticScore*0.25
 			}
+			sort.SliceStable(reranked, func(i, j int) bool {
+				return reranked[i].Rank > reranked[j].Rank
+			})
 		}
 	}
+	return reranked
+}
 
-	// --- Phase 4: Post-processing ---
-	if lang != "" {
-		reranked = promoteLanguagePerDomain(reranked, lang, s.scoringCfg.SecondaryLanguage)
-	}
-
+func filterAndDiversifyCandidates(reranked []searchCandidate, domain string, schemaType string) []searchCandidate {
 	if len(reranked) == 0 {
-		return nil, 0, nil
+		return reranked
 	}
 
 	// Domain filter
@@ -302,36 +342,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		reranked = diversifyByDomain(reranked)
 	}
 
-	if domain != "" || schemaType != "" {
-		total = len(reranked)
-	} else if total < len(reranked) {
-		total = len(reranked)
-	}
-
-	if offset >= len(reranked) {
-		return []SearchResult{}, total, nil
-	}
-
-	end := min(offset+limit, len(reranked))
-
-	// Load body previews for final results
-	if err := s.loadResultBodies(searchCtx, reranked[offset:end]); err != nil {
-		s.logger.Warn("failed to load result bodies", "error", err)
-	}
-
-	results := make([]SearchResult, 0, end-offset)
-	for _, candidate := range reranked[offset:end] {
-		results = append(results, candidate.SearchResult)
-	}
-
-	if s.cache != nil {
-		s.cache.SetWithTTL(cacheKey, struct {
-			results []SearchResult
-			total   int
-		}{results, total}, 10, 5*time.Minute)
-	}
-
-	return results, total, nil
+	return reranked
 }
 
 // ---------------------------------------------------------------------------
@@ -1301,126 +1312,28 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 		totalScore += s.scoringCfg.SecondaryLanguageBoost
 	}
 
+	isHomepage := isSearchHomepage(candidate.URL)
+	urlLower := strings.ToLower(candidate.URL)
+	isProfilePage := strings.Contains(urlLower, "/user/") ||
+		strings.Contains(urlLower, "/profile/") ||
+		strings.Contains(urlLower, "/u/") ||
+		strings.Contains(urlLower, "/people/") ||
+		strings.Contains(urlLower, "/member/") ||
+		strings.Contains(urlLower, "/author/") ||
+		strings.Contains(urlLower, "/accounts/")
+
 	// --- Navigational absolute boosts ---
 	if query.intent == intentNavigational {
-		isHomepage := isSearchHomepage(candidate.URL)
-		domainPhrase := bestFieldPhraseScore(query.normalized, query.tokens, domainNorm, domainTokens)
-
-		// Detect user profile pages to skip massive navigational boosts.
-		urlLower := strings.ToLower(candidate.URL)
-		isProfilePage := strings.Contains(urlLower, "/user/") ||
-			strings.Contains(urlLower, "/profile/") ||
-			strings.Contains(urlLower, "/u/") ||
-			strings.Contains(urlLower, "/people/") ||
-			strings.Contains(urlLower, "/member/") ||
-			strings.Contains(urlLower, "/author/") ||
-			strings.Contains(urlLower, "/accounts/")
-
-		if query.domainLike != "" || query.navTerm != "" {
-			candidateDomain := strings.TrimPrefix(candidate.Domain, "www.")
-			matchDomain := query.domainLike
-			if matchDomain == "" {
-				matchDomain = query.navTerm
-			}
-			if candidateDomain == matchDomain {
-				if !isProfilePage {
-					totalScore += 8000.0
-					if isHomepage {
-						totalScore += 6000.0
-					}
-				}
-			} else if domainInfo.isRootDomain && domainInfo.rootLabel == matchDomain {
-				if !isProfilePage {
-					totalScore += 6000.0
-					if isHomepage {
-						totalScore += 5000.0
-					}
-				}
-			}
-		}
-
-		if isHomepage && domainPhrase >= 0.75 && !isProfilePage {
-			if domainInfo.isRootDomain {
-				totalScore += 15000.0
-			} else {
-				totalScore += 8000.0
-			}
-		}
+		totalScore += applyNavigationalBoosts(candidate, query, domainInfo, domainNorm, domainTokens, isProfilePage, isHomepage)
 	}
 
 	// --- Platform intent boost (hub-aware via sitehints) ---
-	// When the query contains a platform name (e.g. "reddit", "youtube"),
-	// boost results from that platform's domain. Hub pages (subreddit roots,
-	// repo roots, channel pages) get a significantly higher boost than deep
-	// sub-pages (individual posts, releases, videos).
 	if query.platformIntent != "" {
-		if domainInfo.rootLabel == query.platformIntent {
-			// Skip the platform boost for user profile pages — they are thin
-			// content (avatar + name) and rarely what the user is searching for.
-			urlLower := strings.ToLower(candidate.URL)
-			isProfilePage := strings.Contains(urlLower, "/user/") ||
-				strings.Contains(urlLower, "/profile/") ||
-				strings.Contains(urlLower, "/u/") ||
-				strings.Contains(urlLower, "/people/") ||
-				strings.Contains(urlLower, "/member/") ||
-				strings.Contains(urlLower, "/author/") ||
-				strings.Contains(urlLower, "/accounts/")
-
-			if !isProfilePage {
-				// Use sitehints to classify the URL as hub or sub-page.
-				hint := sitehints.Classify(candidate.URL, query.platformIntent)
-
-				if hint.IsHub {
-					// Hub pages (subreddit root, repo root, channel) get the
-					// maximum platform boost + their specific hub bonus.
-					totalScore += 16000.0 + hint.HubBoost
-
-					// NEW: Exact HubName match boost.
-					// If the user search tokens contain the exact HubName (e.g. "warframe"
-					// in "warframe reddit"), we give it a massive extra boost to
-					// prioritize the official hub over related hubs (like /r/memeframe).
-					if hint.HubName != "" {
-						for _, tok := range query.tokens {
-							if strings.EqualFold(tok, hint.HubName) {
-								totalScore += 30000.0
-								break
-							}
-						}
-					}
-				} else {
-					// Non-hub pages get the base platform boost minus a depth
-					// penalty based on how deep the page is. This ensures
-					// subreddit posts still appear but below the subreddit root.
-					basePlatformBoost := 16000.0 - hint.DepthPenalty
-					if basePlatformBoost < 10000.0 {
-						basePlatformBoost = 10000.0 // floor to keep platform results relevant
-					}
-					totalScore += basePlatformBoost
-				}
-
-				if isSearchHomepage(candidate.URL) {
-					totalScore += 4000.0
-				}
-
-				// Extra boost when the remaining search tokens appear in the URL
-				// (e.g. "warframe reddit" → /r/Warframe/ contains "warframe").
-				if len(query.tokens) > 0 {
-					urlAvg, _, _ := searchTokenCoverage(query.tokens, urlTokens)
-					if urlAvg > 0 {
-						totalScore += 3000.0 * urlAvg
-					}
-				}
-			} else {
-				// Profile pages get a small baseline platform match so they
-				// still appear for navigational queries, but well below
-				// actual content pages.
-				totalScore += 2000.0
-			}
-		}
+		totalScore += applyPlatformIntentBoosts(candidate, query, domainInfo, urlTokens, isProfilePage, isHomepage)
 	}
 
 	// --- Site-type intent boost ---
-	if query.siteTypeIntent != "" && isSearchHomepage(candidate.URL) {
+	if query.siteTypeIntent != "" && isHomepage {
 		typeInDomain := strings.Contains(candidate.Domain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.effectiveDomain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.rootLabel, query.siteTypeIntent)
@@ -1430,95 +1343,159 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 	}
 
 	// --- Authoritative source boost for informational queries ---
-	// Government (.gub/.gov) and educational (.edu) domains get a significant
-	// boost when their URL path contains query tokens. This ensures official
-	// sources rank above news articles for factual/trámites queries, without
-	// boosting irrelevant gov pages that happen to share a common word.
 	if query.intent == intentInformational {
-		isGovOrEdu := strings.Contains(urlDomain, ".gub.") ||
-			strings.Contains(urlDomain, ".gov.") ||
-			strings.Contains(urlDomain, ".edu.")
-
-		if isGovOrEdu {
-			pathLower := strings.ToLower(candidate.URL)
-			pathMatchCount := 0
-			for _, token := range query.tokens {
-				// Exclude numeric tokens (years like "2026") from path match count
-				// to avoid inflating matches for irrelevant gov pages.
-				if len(token) >= 3 && !isNumericToken(token) && strings.Contains(pathLower, token) {
-					pathMatchCount++
-				}
-			}
-
-			// Check if the PRIMARY (most specific) query token is in the URL path.
-			// The primary token is the rarest/most informative word in the query.
-			// If it appears in a gov URL path, that's a strong relevance signal
-			// even if other tokens (like "uruguay") are not in the path.
-			primaryToken := ""
-			if len(query.tokens) > 0 {
-				ordered := sortTokensByRelevance(query.tokens, query.idfMap)
-				if len(ordered) > 0 {
-					primaryToken = ordered[0]
-				}
-			}
-			hasPrimaryInPath := primaryToken != "" && len(primaryToken) >= 3 && !isNumericToken(primaryToken) && strings.Contains(pathLower, primaryToken)
-
-			// Check primary token specificity: if the primary token's IDF is not
-			// significantly higher than the second token's, it's a generic word
-			// (e.g. "mundial" in "mundial futbol 2026") and the gov boost should
-			// be reduced. Only strongly boost when the primary token is clearly
-			// the most specific term (like "patente" in "cuando vence la patente").
-			primaryIsSpecific := true
-			if hasPrimaryInPath && len(query.tokens) >= 2 && len(query.idfMap) >= 2 {
-				ordered := sortTokensByRelevance(query.tokens, query.idfMap)
-				if len(ordered) >= 2 {
-					primaryIDF := query.idfMap[ordered[0]]
-					secondIDF := query.idfMap[ordered[1]]
-					// If primary is less than 1.5x the second token's IDF, it's
-					// not specific enough for a strong gov boost.
-					if primaryIDF < secondIDF*1.5 {
-						primaryIsSpecific = false
-					}
-				}
-			}
-
-			if hasPrimaryInPath && pathMatchCount >= 2 && primaryIsSpecific {
-				// Very strong boost: specific primary token + multiple path matches
-				totalScore += 8000.0 + float64(pathMatchCount)*800.0
-				if isSearchHomepage(candidate.URL) {
-					totalScore += 2000.0
-				}
-			} else if hasPrimaryInPath && primaryIsSpecific {
-				// Strong boost: specific primary token in gov URL path.
-				// e.g. "cuando vence la patente uruguay" → sucive.gub.uy/consulta_patente
-				totalScore += 6000.0 + float64(pathMatchCount)*800.0
-				if isSearchHomepage(candidate.URL) {
-					totalScore += 2000.0
-				}
-			} else if hasPrimaryInPath && pathMatchCount >= 2 {
-				// Moderate boost: non-specific primary token but multiple path matches
-				totalScore += 2000.0 + float64(pathMatchCount)*400.0
-			} else if hasPrimaryInPath {
-				// Weak boost: non-specific primary token, single path match
-				totalScore += 800.0
-			} else if pathMatchCount >= 2 {
-				// Moderate boost: multiple path matches but not the primary token
-				totalScore += 1000.0 + float64(pathMatchCount)*400.0
-			} else if pathMatchCount >= 1 {
-				// Small boost: one path match but not the primary token
-				// e.g. a gov page about "pasos" matching "paso" in "que paso con taringa"
-				totalScore += 400.0
-			}
-			// No baseline boost — if the URL path doesn't contain any query
-			// tokens, the gov domain is irrelevant to this query.
-		}
+		totalScore += applyGovernmentSourceBoosts(candidate, query, urlDomain, isHomepage)
 	}
 
 	// --- Domain brand match boost for informational queries ---
-	// When query tokens match the domain root label (e.g. "el dorado supermercado"
-	// → "eldorado.com.uy"), this is a strong navigational signal even for
-	// informational queries. Apply directly to totalScore (not weighted).
-	if query.intent == intentInformational && len(query.tokens) > 0 && domainInfo.rootLabel != "" {
+	if query.intent == intentInformational {
+		totalScore += applyBrandMatchBoosts(query, domainInfo)
+	}
+
+	return totalScore, true
+}
+
+func applyNavigationalBoosts(candidate searchCandidate, query searchQuery, domainInfo searchDomainInfo, domainNorm string, domainTokens []string, isProfilePage bool, isHomepage bool) float64 {
+	var boost float64
+	domainPhrase := bestFieldPhraseScore(query.normalized, query.tokens, domainNorm, domainTokens)
+
+	if query.domainLike != "" || query.navTerm != "" {
+		candidateDomain := strings.TrimPrefix(candidate.Domain, "www.")
+		matchDomain := query.domainLike
+		if matchDomain == "" {
+			matchDomain = query.navTerm
+		}
+		if candidateDomain == matchDomain {
+			if !isProfilePage {
+				boost += 8000.0
+				if isHomepage {
+					boost += 6000.0
+				}
+			}
+		} else if domainInfo.isRootDomain && domainInfo.rootLabel == matchDomain {
+			if !isProfilePage {
+				boost += 6000.0
+				if isHomepage {
+					boost += 5000.0
+				}
+			}
+		}
+	}
+
+	if isHomepage && domainPhrase >= 0.75 && !isProfilePage {
+		if domainInfo.isRootDomain {
+			boost += 15000.0
+		} else {
+			boost += 8000.0
+		}
+	}
+	return boost
+}
+
+func applyPlatformIntentBoosts(candidate searchCandidate, query searchQuery, domainInfo searchDomainInfo, urlTokens []string, isProfilePage bool, isHomepage bool) float64 {
+	var boost float64
+	if domainInfo.rootLabel == query.platformIntent {
+		if !isProfilePage {
+			// Use sitehints to classify the URL as hub or sub-page.
+			hint := sitehints.Classify(candidate.URL, query.platformIntent)
+
+			if hint.IsHub {
+				boost += 16000.0 + hint.HubBoost
+				if hint.HubName != "" {
+					for _, tok := range query.tokens {
+						if strings.EqualFold(tok, hint.HubName) {
+							boost += 30000.0
+							break
+						}
+					}
+				}
+			} else {
+				basePlatformBoost := 16000.0 - hint.DepthPenalty
+				if basePlatformBoost < 10000.0 {
+					basePlatformBoost = 10000.0
+				}
+				boost += basePlatformBoost
+			}
+
+			if isHomepage {
+				boost += 4000.0
+			}
+
+			if len(query.tokens) > 0 {
+				urlAvg, _, _ := searchTokenCoverage(query.tokens, urlTokens)
+				if urlAvg > 0 {
+					boost += 3000.0 * urlAvg
+				}
+			}
+		} else {
+			boost += 2000.0
+		}
+	}
+	return boost
+}
+
+func applyGovernmentSourceBoosts(candidate searchCandidate, query searchQuery, urlDomain string, isHomepage bool) float64 {
+	var boost float64
+	isGovOrEdu := strings.Contains(urlDomain, ".gub.") ||
+		strings.Contains(urlDomain, ".gov.") ||
+		strings.Contains(urlDomain, ".edu.")
+
+	if isGovOrEdu {
+		pathLower := strings.ToLower(candidate.URL)
+		pathMatchCount := 0
+		for _, token := range query.tokens {
+			if len(token) >= 3 && !isNumericToken(token) && strings.Contains(pathLower, token) {
+				pathMatchCount++
+			}
+		}
+
+		primaryToken := ""
+		if len(query.tokens) > 0 {
+			ordered := sortTokensByRelevance(query.tokens, query.idfMap)
+			if len(ordered) > 0 {
+				primaryToken = ordered[0]
+			}
+		}
+		hasPrimaryInPath := primaryToken != "" && len(primaryToken) >= 3 && !isNumericToken(primaryToken) && strings.Contains(pathLower, primaryToken)
+
+		primaryIsSpecific := true
+		if hasPrimaryInPath && len(query.tokens) >= 2 && len(query.idfMap) >= 2 {
+			ordered := sortTokensByRelevance(query.tokens, query.idfMap)
+			if len(ordered) >= 2 {
+				primaryIDF := query.idfMap[ordered[0]]
+				secondIDF := query.idfMap[ordered[1]]
+				if primaryIDF < secondIDF*1.5 {
+					primaryIsSpecific = false
+				}
+			}
+		}
+
+		if hasPrimaryInPath && pathMatchCount >= 2 && primaryIsSpecific {
+			boost += 8000.0 + float64(pathMatchCount)*800.0
+			if isHomepage {
+				boost += 2000.0
+			}
+		} else if hasPrimaryInPath && primaryIsSpecific {
+			boost += 6000.0 + float64(pathMatchCount)*800.0
+			if isHomepage {
+				boost += 2000.0
+			}
+		} else if hasPrimaryInPath && pathMatchCount >= 2 {
+			boost += 2000.0 + float64(pathMatchCount)*400.0
+		} else if hasPrimaryInPath {
+			boost += 800.0
+		} else if pathMatchCount >= 2 {
+			boost += 1000.0 + float64(pathMatchCount)*400.0
+		} else if pathMatchCount >= 1 {
+			boost += 400.0
+		}
+	}
+	return boost
+}
+
+func applyBrandMatchBoosts(query searchQuery, domainInfo searchDomainInfo) float64 {
+	var boost float64
+	if len(query.tokens) > 0 && domainInfo.rootLabel != "" {
 		rootLower := strings.ToLower(domainInfo.rootLabel)
 		rootLen := len([]rune(rootLower))
 		brandTokens := make([]string, 0, len(query.tokens)+1)
@@ -1534,14 +1511,13 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 			}
 		}
 		if matchedTokens >= 2 {
-			totalScore += float64(matchedTokens) * 2000.0
+			boost += float64(matchedTokens) * 2000.0
 			if matchedTokens == len(brandTokens) {
-				totalScore += 5000.0
+				boost += 5000.0
 			}
 		}
 	}
-
-	return totalScore, true
+	return boost
 }
 
 // scoreContentRelevance computes how well the page content matches the query.

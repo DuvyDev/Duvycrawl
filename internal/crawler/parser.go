@@ -268,8 +268,8 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 						}
 					}
 				})
-				
-				// Prepend readability links to give them priority in the frontier, 
+
+				// Prepend readability links to give them priority in the frontier,
 				// preserving their natural document order and doing it in O(n) instead of O(n^2).
 				if len(readabilityLinks) > 0 {
 					result.Links = append(readabilityLinks, result.Links...)
