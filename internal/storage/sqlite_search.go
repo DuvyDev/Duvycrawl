@@ -178,6 +178,45 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 		}
 	}
 
+	// --- Platform diversity injection ---
+	// When the query has a platformIntent (e.g. "warframe reddit"), the FTS
+	// tokens are just ["warframe"]. BM25 will rank all pages containing
+	// "warframe" by text relevance — and platform domains like Reddit have
+	// hundreds of pages with identical boilerplate, monopolizing the LIMIT.
+	// This supplementary pass fetches the best non-platform results to ensure
+	// the Go re-ranking pipeline has diversity to work with.
+	if q.platformIntent != "" && searchCtx.Err() == nil {
+		diversityLimit := min(candidateLimit/3, 100)
+		if diversityLimit < 30 {
+			diversityLimit = 30
+		}
+
+		// Use the best FTS query that produced results
+		bestFTS := ""
+		var bestMode searchMode
+		for _, plan := range plans {
+			if plan.ftsQuery != "" {
+				bestFTS = plan.ftsQuery
+				bestMode = plan.mode
+				break
+			}
+		}
+
+		if bestFTS != "" {
+			platformDomain := q.platformIntent + ".com"
+			if q.domainLike != "" {
+				platformDomain = q.domainLike
+			}
+
+			diverseCtx, diverseCancel := context.WithTimeout(searchCtx, perPlanTimeout)
+			diverseCandidates, err := s.searchFTSCandidatesExcludingDomain(diverseCtx, bestMode, bestFTS, q, lang, diversityLimit, platformDomain)
+			diverseCancel()
+			if err == nil && len(diverseCandidates) > 0 {
+				candidates = mergeSearchCandidates(candidates, diverseCandidates)
+			}
+		}
+	}
+
 	// --- Domain-match retrieval for informational queries ---
 	// When query tokens match a domain root label (e.g. "tienda inglesa supermercado"
 	// → "tiendainglesa.com.uy"), ensure those pages are in the candidate set even if
@@ -451,6 +490,12 @@ func classifyQueryIntent(query string, tokens []string, domainLike, navTerm, pla
 
 func searchCandidateLimit(limit, offset int) int {
 	want := offset + (limit * 8) + 30
+	// BM25 ordering can saturate the pool with a single domain's
+	// boilerplate-heavy pages (e.g. Reddit templates). A higher floor
+	// ensures the Go re-ranking pipeline always has enough diversity.
+	if want < 300 {
+		want = 300
+	}
 	if want > 500 {
 		want = 500
 	}
@@ -559,75 +604,98 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		domainPrefix = domainExact + ".%"
 	}
 
+	// BM25 column weights for pages_fts:
+	//   title=10, h1=8, description=5, schema_title=6, schema_description=4, content=1
+	// bm25() returns negative values; more negative = more relevant.
+	// We negate it to produce a positive score for the Go re-ranking pipeline.
+	//
+	// In addition to BM25, we inject cheap SQL-level boosts (all O(1) per-row
+	// comparisons) to differentiate quality within the candidate pool:
+	//   - Domain exact/prefix: promote the navigational target domain
+	//   - Title exact/prefix: promote pages whose title matches the query
+	//   - Homepage/shallow URL: promote root pages over deep sub-pages
+	//   - Language match: promote same-language results
+	//   - Freshness: mild recency preference
+	// These recover the diversity that the old CASE/LIKE scoring provided,
+	// without reintroducing the expensive per-token LIKE patterns.
+
 	titleExact := query.lowered
 	titlePrefix := query.lowered + "%"
 	titleContains := "%" + query.lowered + "%"
-
-	// Build SQL score expression — intent-aware boosts
-	scoreExpr := buildSQLScoreExpr(query, domainExact, domainPrefix, titleExact, titlePrefix, titleContains, lang)
-
 	urlContains := "%" + query.lowered + "%"
-	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, domainPrefix, domainPrefix, urlContains}
 
-	// Token-based LIKE boosts (limited to 4 tokens)
-	scoreTokens := query.tokens
-	if len(scoreTokens) > 4 {
-		scoreTokens = scoreTokens[:4]
-	}
+	// Intent-aware boost magnitudes (relative to BM25 range of ~[-16, -5])
+	var domainBoost, domainPrefixBoost float64
+	var titleExactBoost, titlePrefixBoost, titleContainsBoost float64
+	var homepageBoost, shallowURLBoost float64
+	var langBoost, urlContainsBoost float64
 
-	for _, token := range scoreTokens {
-		scoreExpr += " + CASE WHEN LOWER(p.title) LIKE ? THEN 40.0 ELSE 0 END"
-		args = append(args, "%"+token+"%")
-		scoreExpr += " + CASE WHEN LOWER(p.h1) LIKE ? THEN 25.0 ELSE 0 END"
-		args = append(args, "%"+token+"%")
-	}
-
-	if lang != "" {
-		sqlLangBoost := s.scoringCfg.LanguageBoost * 0.1
-		if sqlLangBoost <= 0 {
-			sqlLangBoost = 35.0
-		}
-		scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlLangBoost)
-		args = append(args, lang)
-		if s.scoringCfg.SecondaryLanguageBoost > 0 && lang != s.scoringCfg.SecondaryLanguage {
-			sqlSecBoost := s.scoringCfg.SecondaryLanguageBoost * 0.1
-			scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlSecBoost)
-			args = append(args, s.scoringCfg.SecondaryLanguage)
-		}
+	if query.intent == intentNavigational {
+		domainBoost = 40.0
+		domainPrefixBoost = 20.0
+		titleExactBoost = 30.0
+		titlePrefixBoost = 15.0
+		titleContainsBoost = 10.0
+		homepageBoost = 25.0
+		shallowURLBoost = 15.0
+		langBoost = 5.0
+		urlContainsBoost = 10.0
+	} else {
+		domainBoost = 15.0
+		domainPrefixBoost = 8.0
+		titleExactBoost = 20.0
+		titlePrefixBoost = 10.0
+		titleContainsBoost = 8.0
+		homepageBoost = 10.0
+		shallowURLBoost = 5.0
+		langBoost = 10.0
+		urlContainsBoost = 5.0
 	}
 
 	searchSQL := fmt.Sprintf(`
-		WITH base_matches AS (
-			SELECT
-				p.id,
-				(%s) AS sql_score,
-				COALESCE(sc.clicks, 0) AS clicks,
-				p.crawled_at
-			FROM pages_fts
-			JOIN pages p ON p.id = pages_fts.rowid
-			LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
-			WHERE pages_fts MATCH ?
-		)
 		SELECT
 			p.id, p.url, p.title, p.h1, p.h2, p.description,
 			'' AS snippet, p.domain, p.language, p.region,
 			p.crawled_at, p.published_at, p.updated_at,
-			m.sql_score, LENGTH(p.content) AS content_len,
+			(-bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)) AS bm25_score,
+			LENGTH(p.content) AS content_len,
 			p.schema_type, p.schema_image, p.schema_author,
 			p.schema_keywords, p.schema_rating,
 			p.referring_domains, COALESCE(p.pagerank, 1.0) AS pagerank,
-			m.clicks
-		FROM (
-			SELECT * FROM base_matches
-			ORDER BY (sql_score + clicks * 50.0) DESC, crawled_at DESC
-			LIMIT ?
-		) m
-		JOIN pages p ON p.id = m.id
-		JOIN pages_fts ON pages_fts.rowid = m.id
+			COALESCE(sc.clicks, 0) AS clicks
+		FROM pages_fts
+		JOIN pages p ON p.id = pages_fts.rowid
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE pages_fts MATCH ?
-		ORDER BY (m.sql_score + m.clicks * 50.0) DESC, m.crawled_at DESC
-	`, scoreExpr)
-	args = append(args, query.raw, matchQuery, limit, matchQuery)
+		ORDER BY (
+			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
+			- CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN LOWER(p.title) = ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN LOWER(p.title) LIKE ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN LOWER(p.title) LIKE ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN %.1f ELSE 0.0 END
+			- CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 4 THEN %.1f ELSE 0.0 END
+			- CASE WHEN ? != '' AND p.language = ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN LOWER(p.url) LIKE ? THEN %.1f ELSE 0.0 END
+		) ASC
+		LIMIT ?
+	`, domainBoost, domainPrefixBoost,
+		titleExactBoost, titlePrefixBoost, titleContainsBoost,
+		homepageBoost, shallowURLBoost,
+		langBoost, urlContainsBoost)
+
+	args := []any{
+		query.raw, matchQuery,
+		domainExact, domainExact,
+		domainPrefix, domainPrefix,
+		titleExact,
+		titlePrefix,
+		titleContains,
+		lang, lang,
+		urlContains,
+		limit,
+	}
 
 	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
@@ -702,6 +770,126 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating FTS candidates: %w", err)
+	}
+
+	return candidates, nil
+}
+
+// searchFTSCandidatesExcludingDomain performs the same FTS retrieval as searchFTSCandidates
+// but excludes results from a specific domain (and its subdomains). This is used to inject
+// diversity into the candidate pool when a platform domain monopolizes BM25 results.
+func (s *SQLiteStorage) searchFTSCandidatesExcludingDomain(ctx context.Context, mode searchMode, matchQuery string, query searchQuery, lang string, limit int, excludeDomain string) ([]searchCandidate, error) {
+	excludeLike := "%" + excludeDomain
+
+	titleExact := query.lowered
+	titlePrefix := query.lowered + "%"
+	urlContains := "%" + query.lowered + "%"
+
+	searchSQL := `
+		SELECT
+			p.id, p.url, p.title, p.h1, p.h2, p.description,
+			'' AS snippet, p.domain, p.language, p.region,
+			p.crawled_at, p.published_at, p.updated_at,
+			(-bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)) AS bm25_score,
+			LENGTH(p.content) AS content_len,
+			p.schema_type, p.schema_image, p.schema_author,
+			p.schema_keywords, p.schema_rating,
+			p.referring_domains, COALESCE(p.pagerank, 1.0) AS pagerank,
+			COALESCE(sc.clicks, 0) AS clicks
+		FROM pages_fts
+		JOIN pages p ON p.id = pages_fts.rowid
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
+		WHERE pages_fts MATCH ?
+		  AND LOWER(p.domain) != ?
+		  AND LOWER(p.domain) NOT LIKE ?
+		ORDER BY (
+			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
+			- CASE WHEN LOWER(p.title) = ? THEN 20.0 ELSE 0.0 END
+			- CASE WHEN LOWER(p.title) LIKE ? THEN 10.0 ELSE 0.0 END
+			- CASE WHEN LOWER(p.title) LIKE ? THEN 8.0 ELSE 0.0 END
+			- CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 15.0 ELSE 0.0 END
+			- CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 4 THEN 8.0 ELSE 0.0 END
+			- CASE WHEN ? != '' AND p.language = ? THEN 10.0 ELSE 0.0 END
+			- CASE WHEN LOWER(p.url) LIKE ? THEN 5.0 ELSE 0.0 END
+		) ASC
+		LIMIT ?
+	`
+	titleContains := "%" + query.lowered + "%"
+	args := []any{query.raw, matchQuery, excludeDomain, excludeLike, titleExact, titlePrefix, titleContains, lang, lang, urlContains, limit}
+
+	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var candidates []searchCandidate
+	for rows.Next() {
+		var (
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			updatedAtStr   sql.NullString
+			snippetText    sql.NullString
+			clicksCount    int
+			schemaRating   sql.NullFloat64
+			schemaType     sql.NullString
+			schemaImage    sql.NullString
+			schemaAuthor   sql.NullString
+			schemaKeywords sql.NullString
+		)
+		if err := rows.Scan(
+			&candidate.ID, &candidate.URL, &candidate.Title, &candidate.H1, &candidate.H2,
+			&candidate.Description, &snippetText, &candidate.Domain, &candidate.Language,
+			&candidate.Region, &crawledAt, &publishedAtStr, &updatedAtStr, &candidate.sqlScore,
+			&candidate.contentLen, &schemaType, &schemaImage, &schemaAuthor, &schemaKeywords,
+			&schemaRating, &candidate.ReferringDomains, &candidate.PageRank, &clicksCount,
+		); err != nil {
+			return nil, fmt.Errorf("scanning FTS diversity candidate: %w", err)
+		}
+		candidate.sqlScore += float64(clicksCount) * 50.0
+
+		candidate.Snippet = snippetText.String
+		if candidate.Snippet == "" {
+			candidate.Snippet = candidate.Description
+		}
+		candidate.mode = mode
+		if crawledAt.Valid {
+			candidate.CrawledAt = crawledAt.Time
+		}
+		if publishedAtStr.Valid && publishedAtStr.String != "" {
+			t := parseFlexibleTime(publishedAtStr.String)
+			if !t.IsZero() {
+				candidate.publishedAtTime = t
+				candidate.PublishedAt = &t
+			}
+		}
+		if updatedAtStr.Valid && updatedAtStr.String != "" {
+			t := parseFlexibleTime(updatedAtStr.String)
+			if !t.IsZero() {
+				candidate.UpdatedAt = &t
+			}
+		}
+		if schemaRating.Valid {
+			candidate.SchemaRating = schemaRating.Float64
+		}
+		if schemaType.Valid {
+			candidate.SchemaType = schemaType.String
+		}
+		if schemaImage.Valid {
+			candidate.SchemaImage = schemaImage.String
+		}
+		if schemaAuthor.Valid {
+			candidate.SchemaAuthor = schemaAuthor.String
+		}
+		if schemaKeywords.Valid {
+			candidate.SchemaKeywords = schemaKeywords.String
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating FTS diversity candidates: %w", err)
 	}
 
 	return candidates, nil
@@ -1097,8 +1285,11 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 		totalScore = contentScore*0.50 + authorityScore*0.15 + urlScore*0.10 + freshnessScore*0.15 + userScore*0.10
 	}
 
-	// --- Add SQL score as a baseline (reduced weight) ---
-	totalScore += candidate.sqlScore * 0.20
+	// --- Add BM25 score as a baseline ---
+	// Native bm25 scores (negated) range ~5-16; scale to match other components.
+	// Old SQL CASE/LIKE scoring produced ~1000-3000 for good matches.
+	// BM25 of ~10 * 200 * 0.20 = ~400, comparable to old contribution.
+	totalScore += candidate.sqlScore * 200.0 * 0.20
 
 	// --- Mode bonus ---
 	totalScore += searchModeBonus(candidate.mode)

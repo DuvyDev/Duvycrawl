@@ -41,7 +41,7 @@ Para evitar bloqueos de concurrencia (`SQLITE_BUSY`) entre las lecturas rápidas
 - `crawler.db`: Almacena el estado asíncrono (`crawl_queue`, `domains`).
 - `graph.db`: Dedicado exclusivamente a la topología (`links`) con sincronización relajada para máxima velocidad de inserción.
 
-**Trade-off conocido**: `bm25()` de FTS5 devuelve 0 en esta implementación (bug conocido), por eso usamos ranking híbrido con CTE + ROW_NUMBER() + boosts manuales. Además, para calcular el PageRank cruzando datos, usamos `ATTACH DATABASE 'graph.db' AS graph` temporalmente sobre la conexión de `content.db`.
+**Nota sobre ranking**: Originalmente se pensaba que `bm25()` no funcionaba en esta implementación, pero pruebas empíricas han demostrado que sí funciona correctamente (devuelve valores negativos donde menor es mejor). El motor de búsqueda está en proceso de refactorización para aprovechar `bm25()` nativamente. Además, para calcular el PageRank cruzando datos, usamos `ATTACH DATABASE 'graph.db' AS graph` temporalmente sobre la conexión de `content.db`.
 
 ### 2. Bloom Filter para deduplicación
 

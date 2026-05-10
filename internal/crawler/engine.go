@@ -66,6 +66,8 @@ type Engine struct {
 	embedder     *embedder.Client
 	logger       *slog.Logger
 
+	noFollowDomains map[string]struct{}
+
 	status  atomic.Value // EngineStatus
 	cancel  context.CancelFunc
 	crawlWG sync.WaitGroup
@@ -118,23 +120,27 @@ func NewEngine(
 	}
 
 	e := &Engine{
-		cfg:            cfg,
-		store:          store,
-		batchWriter:    batchWriter,
-		frontier:       front,
-		proxyManager:   pm,
-		fetcher:        NewFetcher(cfg.UserAgent, cfg.MaxPageSizeKB, cfg.MaxRetries, pm, logger),
-		renderingCfg:   renderingCfg,
-		renderer:       browserRenderer,
-		parser:         NewParser(),
-		robots:         NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
-		limiter:        limiter,
-		domainStats:    domainStats,
-		embedder:       embedClient,
-		logger:         logger.With("component", "engine"),
-		highEmbedQueue: make(chan embedJob, 25000),
-		lowEmbedQueue:  make(chan embedJob, 5000),
-		renderQueued:   make(map[string]struct{}),
+		cfg:             cfg,
+		store:           store,
+		batchWriter:     batchWriter,
+		frontier:        front,
+		proxyManager:    pm,
+		fetcher:         NewFetcher(cfg.UserAgent, cfg.MaxPageSizeKB, cfg.MaxRetries, pm, logger),
+		renderingCfg:    renderingCfg,
+		renderer:        browserRenderer,
+		parser:          NewParser(),
+		robots:          NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
+		limiter:         limiter,
+		domainStats:     domainStats,
+		embedder:        embedClient,
+		logger:          logger.With("component", "engine"),
+		highEmbedQueue:  make(chan embedJob, 25000),
+		lowEmbedQueue:   make(chan embedJob, 5000),
+		renderQueued:    make(map[string]struct{}),
+		noFollowDomains: make(map[string]struct{}, len(cfg.NoFollowDomains)),
+	}
+	for _, d := range cfg.NoFollowDomains {
+		e.noFollowDomains[strings.ToLower(d)] = struct{}{}
 	}
 	if batchWriter != nil {
 		batchWriter.SetPagesPersistedHook(e.onPagesPersisted)
@@ -254,6 +260,23 @@ func (e *Engine) Status() EngineStatus {
 // Stats returns current crawl metrics.
 func (e *Engine) Stats() (crawled, errored int64) {
 	return e.pagesCrawled.Load(), e.pagesErrored.Load()
+}
+
+// isNoFollowDomain returns true if the domain or any of its parent domains
+// (e.g. "wikipedia.org" for "es.wikipedia.org") is configured as a leaf node.
+func (e *Engine) isNoFollowDomain(domain string) bool {
+	d := domain
+	for {
+		if _, exists := e.noFollowDomains[d]; exists {
+			return true
+		}
+		idx := strings.IndexByte(d, '.')
+		if idx == -1 {
+			break
+		}
+		d = d[idx+1:]
+	}
+	return false
 }
 
 // RenderBacklogLen returns the number of URLs waiting in the browser render backlog.
@@ -522,7 +545,11 @@ func (e *Engine) persistParsedPage(ctx context.Context, logger *slog.Logger, job
 
 	// Enqueue discovered links if we haven't exceeded max depth.
 	if job.Depth < e.cfg.MaxDepth && len(parsed.Anchors) > 0 {
-		e.enqueueDiscoveredLinks(ctx, logger, parsed.Anchors, job.Depth+1, page)
+		if !e.isNoFollowDomain(job.Domain) {
+			e.enqueueDiscoveredLinks(ctx, logger, parsed.Anchors, job.Depth+1, page)
+		} else {
+			logger.Debug("skipping outlinks for no-follow domain")
+		}
 	}
 
 	// Update domain stats (async, in-memory accumulator).
@@ -742,7 +769,9 @@ func (e *Engine) processDiscoveryOnly(ctx context.Context, logger *slog.Logger, 
 		}
 	}
 	if len(anchors) > 0 && job.Depth < e.cfg.MaxDepth {
-		e.enqueueDiscoveredLinks(ctx, logger, anchors, job.Depth+1, nil)
+		if !e.isNoFollowDomain(job.Domain) {
+			e.enqueueDiscoveredLinks(ctx, logger, anchors, job.Depth+1, nil)
+		}
 	}
 
 	fingerprint := frontier.FingerprintURL(job.URL)

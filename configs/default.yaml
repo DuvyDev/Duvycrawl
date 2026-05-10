@@ -55,6 +55,11 @@ crawler:
   # Whether to start crawling automatically on launch.
   # Set to false to start via API: POST /api/v1/crawler/start
   auto_start: true
+  # Domains that the crawler is allowed to index, but will NOT extract or enqueue
+  # outgoing links from. Treats the domain as a leaf node to prevent getting stuck.
+  # Subdomains are handled automatically (e.g., "wikipedia.org" covers "es.wikipedia.org").
+  no_follow_domains:
+    - "wikipedia.org"
   # Scoring strategy for the URL frontier.
   #   static   — legacy priority-based (BFS-like)
   #   adaptive — A*-like best-first that learns from your searches and clicks
@@ -62,7 +67,7 @@ crawler:
   # Parameters for the adaptive scorer.
   adaptive:
     min_queries_before_boost: 3
-    depth_penalty_k: 12.0
+    depth_penalty_k: 15.0
     profile_refresh_interval: 60s
     seed_bonus: 50.0
     anchor_weight: 40.0
