@@ -161,10 +161,9 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		}
 	})
 
-	// --- Extract publication date ---
-	result.PublishedAt = extractPublishedAt(doc)
-
 	// --- Extract schema.org JSON-LD structured data ---
+	// Called once; the result is reused for both schema fields and as a
+	// publication-date fallback, avoiding a redundant second parse.
 	schema := extractJSONLD(doc, base)
 	result.SchemaType = schema.Type
 	result.SchemaTitle = schema.Title
@@ -173,6 +172,11 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	result.SchemaAuthor = schema.Author
 	result.SchemaKeywords = schema.Keywords
 	result.SchemaRating = schema.Rating
+
+	// --- Extract publication date ---
+	// Uses meta tags and <time> elements; JSON-LD DatePublished is used as
+	// a fallback from the already-computed schema above.
+	result.PublishedAt = extractPublishedAt(doc)
 	if result.PublishedAt.IsZero() && !schema.DatePublished.IsZero() {
 		result.PublishedAt = schema.DatePublished
 	}
@@ -232,6 +236,9 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 		if article.Content != "" {
 			contentDoc, err := goquery.NewDocumentFromReader(strings.NewReader(article.Content))
 			if err == nil {
+				var readabilityLinks []string
+				var readabilityAnchors []LinkAnchor
+
 				contentDoc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 					href, exists := s.Attr("href")
 					if !exists {
@@ -254,13 +261,20 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 								if len(anchorText) > 500 {
 									anchorText = anchorText[:500]
 								}
-								// Prepend to Links to give them priority in the frontier
-								result.Links = append([]string{resolved}, result.Links...)
-								result.Anchors = append([]LinkAnchor{{URL: resolved, Anchor: anchorText}}, result.Anchors...)
+								// Accumulate to prepend later
+								readabilityLinks = append(readabilityLinks, resolved)
+								readabilityAnchors = append(readabilityAnchors, LinkAnchor{URL: resolved, Anchor: anchorText})
 							}
 						}
 					}
 				})
+				
+				// Prepend readability links to give them priority in the frontier, 
+				// preserving their natural document order and doing it in O(n) instead of O(n^2).
+				if len(readabilityLinks) > 0 {
+					result.Links = append(readabilityLinks, result.Links...)
+					result.Anchors = append(readabilityAnchors, result.Anchors...)
+				}
 			}
 		}
 
@@ -679,8 +693,9 @@ func isImageExtension(rawURL string) bool {
 }
 
 // extractPublishedAt tries multiple strategies to find the publication date
-// of an HTML document. It checks meta tags, <time> elements, and JSON-LD
-// in order of reliability.
+// of an HTML document. It checks meta tags and <time> elements in order of
+// reliability. JSON-LD datePublished is handled by the caller to avoid
+// redundant parsing of JSON-LD blocks.
 func extractPublishedAt(doc *goquery.Document) time.Time {
 	// Strategy 1: Explicit publication meta tags (most reliable).
 	metaCandidates := []string{
@@ -697,15 +712,6 @@ func extractPublishedAt(doc *goquery.Document) time.Time {
 		`meta[property="og:published_time"]`,
 	}
 	for _, sel := range metaCandidates {
-		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
-			if t := parseDateAttribute(s); !t.IsZero() {
-				return
-			}
-		})
-	}
-
-	// Try extracting from meta candidates — return first valid date found.
-	for _, sel := range metaCandidates {
 		var found time.Time
 		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
 			if t := parseDateAttribute(s); !t.IsZero() && found.IsZero() {
@@ -720,11 +726,6 @@ func extractPublishedAt(doc *goquery.Document) time.Time {
 	// Strategy 2: <time> element with datetime attribute or content.
 	if t := extractTimeElement(doc); !t.IsZero() {
 		return t
-	}
-
-	// Strategy 3: JSON-LD (schema.org) datePublished.
-	if schema := extractJSONLD(doc, nil); !schema.DatePublished.IsZero() {
-		return schema.DatePublished
 	}
 
 	return time.Time{}
