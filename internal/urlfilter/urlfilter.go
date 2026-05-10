@@ -52,6 +52,19 @@ var disallowedPathPrefixes = []string{
 	"/account",
 	"/api/",
 	"/cgi-bin/",
+	"/wiki/special:",
+	"/wiki/talk:",
+	"/wiki/user:",
+	"/wiki/user_talk:",
+	"/wiki/wikipedia:",
+	"/wiki/file:",
+	"/wiki/mediawiki:",
+	"/wiki/template:",
+	"/wiki/help:",
+	"/wiki/category:",
+	"/wiki/portal:",
+	"/wiki/draft:",
+	"/wiki/module:",
 }
 
 var challengePathMarkers = []string{

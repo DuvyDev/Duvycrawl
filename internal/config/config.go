@@ -113,6 +113,10 @@ type CrawlerConfig struct {
 	// AutoStart controls whether the crawler starts automatically on launch.
 	// When false, you must start it via the API: POST /api/v1/crawler/start
 	AutoStart bool `yaml:"auto_start"`
+	// NoFollowDomains is a list of domains (e.g., "wikipedia.org") that the crawler
+	// is allowed to index, but will NOT extract or enqueue outgoing links from.
+	// This treats the domain as a "leaf node" to prevent getting stuck in massive sites.
+	NoFollowDomains []string `yaml:"no_follow_domains"`
 	// ScoringStrategy selects the frontier scoring algorithm:
 	// "static"  — legacy priority-based behaviour (default)
 	// "adaptive" — A*-like best-first that learns from searches and clicks
@@ -246,7 +250,10 @@ func DefaultConfig() *Config {
 			ProxyCheckInterval:       60 * time.Second,
 			DomainStatsFlushInterval: 30 * time.Second,
 			AutoStart:                true,
-			ScoringStrategy:          "adaptive",
+			NoFollowDomains: []string{
+				"wikipedia.org",
+			},
+			ScoringStrategy: "adaptive",
 			Adaptive: AdaptiveConfig{
 				MinQueriesBeforeBoost:  3,
 				DepthPenaltyK:          12.0,

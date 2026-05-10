@@ -369,6 +369,8 @@ func shouldDropQueryParam(key string) bool {
 		"f", "filter", "sort", "order", "view", "layout", "theme", "feedviewtype", "feedsort", "sort_by", "sort_order", "dir", "direction", "mode", "type",
 		// Search queries (often lead to infinite crawler traps)
 		"q", "query", "s", "search",
+		// MediaWiki / Wikipedia traps
+		"action", "diff", "oldid", "printable",
 		// Referrers and timestamps
 		"ref", "source", "t", "ref_src", "ref_url", "referer", "referrer", "context":
 		return true

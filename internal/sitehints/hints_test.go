@@ -6,9 +6,9 @@ import (
 
 func TestReddit(t *testing.T) {
 	tests := []struct {
-		url    string
-		isHub  bool
-		label  string
+		url   string
+		isHub bool
+		label string
 	}{
 		{"https://www.reddit.com/r/Warframe", true, "subreddit root"},
 		{"https://reddit.com/r/Warframe", true, "subreddit root no www"},
@@ -41,9 +41,9 @@ func TestReddit(t *testing.T) {
 
 func TestGitHub(t *testing.T) {
 	tests := []struct {
-		url    string
-		isHub  bool
-		label  string
+		url   string
+		isHub bool
+		label string
 	}{
 		{"https://github.com/chromium/chromium", true, "repo root"},
 		{"https://github.com/nicbarker/clay", true, "repo root"},

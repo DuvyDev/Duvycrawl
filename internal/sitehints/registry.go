@@ -565,7 +565,7 @@ var platformRules = []*platformRule{
 	// Non-hub: /dp/{ASIN}/ref=...  /product-reviews/...  /offer-listing/...
 	// -------------------------------------------------------------------------
 	{
-		name:    "amazon",
+		name: "amazon",
 		domains: []string{
 			"amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr",
 			"amazon.es", "amazon.it", "amazon.co.jp", "amazon.ca",
