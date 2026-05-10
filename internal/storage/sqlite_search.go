@@ -559,75 +559,35 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		domainPrefix = domainExact + ".%"
 	}
 
-	titleExact := query.lowered
-	titlePrefix := query.lowered + "%"
-	titleContains := "%" + query.lowered + "%"
-
-	// Build SQL score expression — intent-aware boosts
-	scoreExpr := buildSQLScoreExpr(query, domainExact, domainPrefix, titleExact, titlePrefix, titleContains, lang)
-
-	urlContains := "%" + query.lowered + "%"
-	args := []any{titleExact, titlePrefix, titleContains, domainExact, domainExact, domainPrefix, domainPrefix, urlContains}
-
-	// Token-based LIKE boosts (limited to 4 tokens)
-	scoreTokens := query.tokens
-	if len(scoreTokens) > 4 {
-		scoreTokens = scoreTokens[:4]
-	}
-
-	for _, token := range scoreTokens {
-		scoreExpr += " + CASE WHEN LOWER(p.title) LIKE ? THEN 40.0 ELSE 0 END"
-		args = append(args, "%"+token+"%")
-		scoreExpr += " + CASE WHEN LOWER(p.h1) LIKE ? THEN 25.0 ELSE 0 END"
-		args = append(args, "%"+token+"%")
-	}
-
-	if lang != "" {
-		sqlLangBoost := s.scoringCfg.LanguageBoost * 0.1
-		if sqlLangBoost <= 0 {
-			sqlLangBoost = 35.0
-		}
-		scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlLangBoost)
-		args = append(args, lang)
-		if s.scoringCfg.SecondaryLanguageBoost > 0 && lang != s.scoringCfg.SecondaryLanguage {
-			sqlSecBoost := s.scoringCfg.SecondaryLanguageBoost * 0.1
-			scoreExpr += fmt.Sprintf(" + CASE WHEN p.language = ? THEN %.1f ELSE 0 END", sqlSecBoost)
-			args = append(args, s.scoringCfg.SecondaryLanguage)
-		}
-	}
-
-	searchSQL := fmt.Sprintf(`
-		WITH base_matches AS (
-			SELECT
-				p.id,
-				(%s) AS sql_score,
-				COALESCE(sc.clicks, 0) AS clicks,
-				p.crawled_at
-			FROM pages_fts
-			JOIN pages p ON p.id = pages_fts.rowid
-			LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
-			WHERE pages_fts MATCH ?
-		)
+	// BM25 column weights for pages_fts:
+	//   title=10, h1=8, description=5, schema_title=6, schema_description=4, content=1
+	// bm25() returns negative values; more negative = more relevant.
+	// We negate it to produce a positive score for the Go re-ranking pipeline.
+	// We also inject a domain boost at the SQL level to ensure navigational intents
+	// (like "warframe reddit" -> domain: reddit.com) survive the SQL LIMIT cutoff.
+	searchSQL := `
 		SELECT
 			p.id, p.url, p.title, p.h1, p.h2, p.description,
 			'' AS snippet, p.domain, p.language, p.region,
 			p.crawled_at, p.published_at, p.updated_at,
-			m.sql_score, LENGTH(p.content) AS content_len,
+			(-bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)) AS bm25_score,
+			LENGTH(p.content) AS content_len,
 			p.schema_type, p.schema_image, p.schema_author,
 			p.schema_keywords, p.schema_rating,
 			p.referring_domains, COALESCE(p.pagerank, 1.0) AS pagerank,
-			m.clicks
-		FROM (
-			SELECT * FROM base_matches
-			ORDER BY (sql_score + clicks * 50.0) DESC, crawled_at DESC
-			LIMIT ?
-		) m
-		JOIN pages p ON p.id = m.id
-		JOIN pages_fts ON pages_fts.rowid = m.id
+			COALESCE(sc.clicks, 0) AS clicks
+		FROM pages_fts
+		JOIN pages p ON p.id = pages_fts.rowid
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
 		WHERE pages_fts MATCH ?
-		ORDER BY (m.sql_score + m.clicks * 50.0) DESC, m.crawled_at DESC
-	`, scoreExpr)
-	args = append(args, query.raw, matchQuery, limit, matchQuery)
+		ORDER BY (
+			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
+			- CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 30.0 ELSE 0.0 END
+			- CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 15.0 ELSE 0.0 END
+		) ASC
+		LIMIT ?
+	`
+	args := []any{query.raw, matchQuery, domainExact, domainExact, domainPrefix, domainPrefix, limit}
 
 	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
@@ -1097,8 +1057,11 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 		totalScore = contentScore*0.50 + authorityScore*0.15 + urlScore*0.10 + freshnessScore*0.15 + userScore*0.10
 	}
 
-	// --- Add SQL score as a baseline (reduced weight) ---
-	totalScore += candidate.sqlScore * 0.20
+	// --- Add BM25 score as a baseline ---
+	// Native bm25 scores (negated) range ~5-16; scale to match other components.
+	// Old SQL CASE/LIKE scoring produced ~1000-3000 for good matches.
+	// BM25 of ~10 * 200 * 0.20 = ~400, comparable to old contribution.
+	totalScore += candidate.sqlScore * 200.0 * 0.20
 
 	// --- Mode bonus ---
 	totalScore += searchModeBonus(candidate.mode)

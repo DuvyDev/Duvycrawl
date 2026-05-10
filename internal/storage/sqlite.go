@@ -96,7 +96,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 	var err error
 	var writeContentDB *sql.DB
 	if mode == ModeMonolith || mode == ModeCrawler || mode == ModeSearchAPI {
-		writeContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_loc=auto", contentPath)
+		writeContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-200000&_foreign_keys=ON&_loc=auto", contentPath)
 		writeContentDB, err = openDB(writeContentDSN, 1, 1)
 		if err != nil {
 			return nil, fmt.Errorf("opening write content database: %w", err)
@@ -111,7 +111,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 		}
 	}
 
-	readContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&mode=ro&_loc=auto", contentPath)
+	readContentDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-200000&_foreign_keys=ON&mode=ro&_loc=auto", contentPath)
 	readContentDB, err := openDB(readContentDSN, 16, 8)
 	if err != nil {
 		if writeContentDB != nil {
@@ -146,7 +146,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 
 	// --- 2. Crawler DB (State Machine) ---
 	// The API needs write access to enqueue manual URLs.
-	crawlerDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&_loc=auto", crawlerPath)
+	crawlerDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_cache_size=-50000&_foreign_keys=ON&_loc=auto", crawlerPath)
 	crawlerDB, err := openDB(crawlerDSN, 1, 1) // Keep single writer for queue
 	if err != nil {
 		searchContentDB.Close()
@@ -181,7 +181,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 	var graphDB *sql.DB
 	if mode == ModeMonolith || mode == ModeCrawler {
 		// _synchronous=OFF for extreme write speed on links
-		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OFF&_cache_size=-10000&_foreign_keys=ON&_loc=auto", graphPath)
+		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=30000&_synchronous=OFF&_cache_size=-50000&_foreign_keys=ON&_loc=auto", graphPath)
 		graphDB, err = openDB(graphDSN, 1, 1)
 		if err != nil {
 			crawlerDB.Close()
@@ -214,7 +214,7 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 		}
 	} else {
 		// Read-only connection for API to serve backlinks
-		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-10000&_foreign_keys=ON&mode=ro&_loc=auto", graphPath)
+		graphDSN := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=-50000&_foreign_keys=ON&mode=ro&_loc=auto", graphPath)
 		graphDB, err = openDB(graphDSN, 4, 2)
 		if err != nil {
 			crawlerDB.Close()
@@ -459,7 +459,9 @@ func configureWriteDB(ctx context.Context, db *sql.DB) error {
 		"PRAGMA synchronous = NORMAL",
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA busy_timeout = 30000",
-		"PRAGMA cache_size = -20000",
+		"PRAGMA cache_size = -200000",
+		"PRAGMA mmap_size = 30000000000",
+		"PRAGMA temp_store = MEMORY",
 	}
 
 	for _, pragma := range pragmas {
@@ -474,7 +476,9 @@ func configureWriteDB(ctx context.Context, db *sql.DB) error {
 func configureReadDB(ctx context.Context, db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA busy_timeout = 5000",
-		"PRAGMA cache_size = -20000",
+		"PRAGMA cache_size = -200000",
+		"PRAGMA mmap_size = 30000000000",
+		"PRAGMA temp_store = MEMORY",
 		"PRAGMA query_only = ON",
 	}
 
