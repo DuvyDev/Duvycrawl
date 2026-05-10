@@ -67,7 +67,7 @@ crawler:
   # Parameters for the adaptive scorer.
   adaptive:
     min_queries_before_boost: 3
-    depth_penalty_k: 12.0
+    depth_penalty_k: 15.0
     profile_refresh_interval: 60s
     seed_bonus: 50.0
     anchor_weight: 40.0
