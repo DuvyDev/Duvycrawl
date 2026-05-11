@@ -375,6 +375,10 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	logger.Debug("fetching page")
 	result, err := e.fetcher.Fetch(ctx, job.URL)
 	if err != nil {
+		if errors.Is(err, ErrUnsupportedContentType) {
+			logger.Debug("skipping unsupported content type")
+			return
+		}
 		e.retryOrFail(job, logger, "fetch failed", err)
 		return
 	}

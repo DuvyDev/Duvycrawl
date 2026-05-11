@@ -620,50 +620,11 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 	// bm25() returns negative values; more negative = more relevant.
 	// We negate it to produce a positive score for the Go re-ranking pipeline.
 	//
-	// In addition to BM25, we inject cheap SQL-level boosts (all O(1) per-row
-	// comparisons) to differentiate quality within the candidate pool:
-	//   - Domain exact/prefix: promote the navigational target domain
-	//   - Title exact/prefix: promote pages whose title matches the query
-	//   - Homepage/shallow URL: promote root pages over deep sub-pages
-	//   - Language match: promote same-language results
-	//   - Freshness: mild recency preference
-	// These recover the diversity that the old CASE/LIKE scoring provided,
-	// without reintroducing the expensive per-token LIKE patterns.
-
-	titleExact := query.lowered
-	titlePrefix := query.lowered + "%"
-	titleContains := "%" + query.lowered + "%"
-	urlContains := "%" + query.lowered + "%"
-
-	// Intent-aware boost magnitudes (relative to BM25 range of ~[-16, -5])
-	var domainBoost, domainPrefixBoost float64
-	var titleExactBoost, titlePrefixBoost, titleContainsBoost float64
-	var homepageBoost, shallowURLBoost float64
-	var langBoost, urlContainsBoost float64
-
-	if query.intent == intentNavigational {
-		domainBoost = 40.0
-		domainPrefixBoost = 20.0
-		titleExactBoost = 30.0
-		titlePrefixBoost = 15.0
-		titleContainsBoost = 10.0
-		homepageBoost = 25.0
-		shallowURLBoost = 15.0
-		langBoost = 5.0
-		urlContainsBoost = 10.0
-	} else {
-		domainBoost = 15.0
-		domainPrefixBoost = 8.0
-		titleExactBoost = 20.0
-		titlePrefixBoost = 10.0
-		titleContainsBoost = 8.0
-		homepageBoost = 10.0
-		shallowURLBoost = 5.0
-		langBoost = 10.0
-		urlContainsBoost = 5.0
-	}
-
-	searchSQL := fmt.Sprintf(`
+	// Only a domain boost is applied at SQL level to ensure navigational targets
+	// survive the LIMIT cutoff. All other scoring (title, URL, homepage, language,
+	// freshness) is handled by the Go re-ranking pipeline — duplicating it here
+	// would add expensive per-row LOWER/LIKE scans with no benefit.
+	searchSQL := `
 		SELECT
 			p.id, p.url, p.title, p.h1, p.h2, p.description,
 			'' AS snippet, p.domain, p.language, p.region,
@@ -680,33 +641,12 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 		WHERE pages_fts MATCH ?
 		ORDER BY (
 			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
-			- CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN LOWER(p.title) = ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN LOWER(p.title) LIKE ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN LOWER(p.title) LIKE ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN %.1f ELSE 0.0 END
-			- CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 4 THEN %.1f ELSE 0.0 END
-			- CASE WHEN ? != '' AND p.language = ? THEN %.1f ELSE 0.0 END
-			- CASE WHEN LOWER(p.url) LIKE ? THEN %.1f ELSE 0.0 END
+			- CASE WHEN ? != '' AND LOWER(p.domain) = ? THEN 30.0 ELSE 0.0 END
+			- CASE WHEN ? != '' AND LOWER(p.domain) LIKE ? THEN 15.0 ELSE 0.0 END
 		) ASC
 		LIMIT ?
-	`, domainBoost, domainPrefixBoost,
-		titleExactBoost, titlePrefixBoost, titleContainsBoost,
-		homepageBoost, shallowURLBoost,
-		langBoost, urlContainsBoost)
-
-	args := []any{
-		query.raw, matchQuery,
-		domainExact, domainExact,
-		domainPrefix, domainPrefix,
-		titleExact,
-		titlePrefix,
-		titleContains,
-		lang, lang,
-		urlContains,
-		limit,
-	}
+	`
+	args := []any{query.raw, matchQuery, domainExact, domainExact, domainPrefix, domainPrefix, limit}
 
 	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
@@ -792,10 +732,6 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 func (s *SQLiteStorage) searchFTSCandidatesExcludingDomain(ctx context.Context, mode searchMode, matchQuery string, query searchQuery, lang string, limit int, excludeDomain string) ([]searchCandidate, error) {
 	excludeLike := "%" + excludeDomain
 
-	titleExact := query.lowered
-	titlePrefix := query.lowered + "%"
-	urlContains := "%" + query.lowered + "%"
-
 	searchSQL := `
 		SELECT
 			p.id, p.url, p.title, p.h1, p.h2, p.description,
@@ -813,20 +749,10 @@ func (s *SQLiteStorage) searchFTSCandidatesExcludingDomain(ctx context.Context, 
 		WHERE pages_fts MATCH ?
 		  AND LOWER(p.domain) != ?
 		  AND LOWER(p.domain) NOT LIKE ?
-		ORDER BY (
-			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
-			- CASE WHEN LOWER(p.title) = ? THEN 20.0 ELSE 0.0 END
-			- CASE WHEN LOWER(p.title) LIKE ? THEN 10.0 ELSE 0.0 END
-			- CASE WHEN LOWER(p.title) LIKE ? THEN 8.0 ELSE 0.0 END
-			- CASE WHEN LOWER(p.url) = 'https://' || LOWER(p.domain) || '/' THEN 15.0 ELSE 0.0 END
-			- CASE WHEN LENGTH(p.url) - LENGTH(REPLACE(p.url, '/', '')) <= 4 THEN 8.0 ELSE 0.0 END
-			- CASE WHEN ? != '' AND p.language = ? THEN 10.0 ELSE 0.0 END
-			- CASE WHEN LOWER(p.url) LIKE ? THEN 5.0 ELSE 0.0 END
-		) ASC
+		ORDER BY bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0) ASC
 		LIMIT ?
 	`
-	titleContains := "%" + query.lowered + "%"
-	args := []any{query.raw, matchQuery, excludeDomain, excludeLike, titleExact, titlePrefix, titleContains, lang, lang, urlContains, limit}
+	args := []any{query.raw, matchQuery, excludeDomain, excludeLike, limit}
 
 	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, args...)
 	if err != nil {
