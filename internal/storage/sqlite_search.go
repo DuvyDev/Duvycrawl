@@ -96,19 +96,24 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	t0 := time.Now()
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
+	t1 := time.Now()
 
 	// --- Phase 1: Retrieval ---
 	candidates, total, err := s.retrieveSearchCandidates(searchCtx, q, lang, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
+	t2 := time.Now()
 
 	// --- Phase 2: Scoring ---
 	reranked := s.rerankSearchCandidates(candidates, q, lang)
+	t3 := time.Now()
 
 	// --- Phase 3: Semantic re-ranking ---
 	reranked = s.applySemanticReranking(searchCtx, reranked, q)
+	t4 := time.Now()
 
 	// --- Phase 4: Post-processing ---
 	if lang != "" {
@@ -116,6 +121,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	reranked = filterAndDiversifyCandidates(reranked, domain, schemaType)
+	t5 := time.Now()
 
 	if domain != "" || schemaType != "" {
 		total = len(reranked)
@@ -133,6 +139,18 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	if err := s.loadResultBodies(searchCtx, reranked[offset:end]); err != nil {
 		s.logger.Warn("failed to load result bodies", "error", err)
 	}
+	t6 := time.Now()
+
+	s.logger.Info("Search timing profile",
+		"query", q.raw,
+		"idf_ms", t1.Sub(t0).Milliseconds(),
+		"retrieval_ms", t2.Sub(t1).Milliseconds(),
+		"scoring_ms", t3.Sub(t2).Milliseconds(),
+		"semantic_ms", t4.Sub(t3).Milliseconds(),
+		"postprocess_ms", t5.Sub(t4).Milliseconds(),
+		"load_bodies_ms", t6.Sub(t5).Milliseconds(),
+		"total_ms", t6.Sub(t0).Milliseconds(),
+	)
 
 	results := make([]SearchResult, 0, end-offset)
 	for _, candidate := range reranked[offset:end] {
@@ -255,11 +273,11 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		}
 	}
 
-	// --- Domain-match retrieval for informational queries ---
-	if q.intent == intentInformational && len(q.tokens) >= 2 {
-		domainCandidates, err := s.searchDomainMatchCandidates(searchCtx, q, lang, min(candidateLimit, 30))
+	// --- Navigational fallback ---
+	if q.intent == intentNavigational && len(candidates) < 30 {
+		navCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
 		if err == nil {
-			candidates = mergeSearchCandidates(candidates, domainCandidates)
+			candidates = mergeSearchCandidates(candidates, navCandidates)
 		}
 	}
 
@@ -2134,29 +2152,45 @@ func normalizedEditSimilarity(a, b string) float64 {
 	if a == b {
 		return 1.0
 	}
-	distance := damerauLevenshteinDistance(a, b)
-	maxLen := max(len([]rune(a)), len([]rune(b)))
+	ar := []rune(a)
+	br := []rune(b)
+	
+	maxLen := len(ar)
+	if len(br) > maxLen {
+		maxLen = len(br)
+	}
 	if maxLen == 0 {
 		return 1.0
 	}
+
+	// Early exit: if length difference is too large, similarity will be low anyway.
+	// Since callers generally care about similarities > 0.7, a 30% length diff
+	// guarantees the similarity will be < 0.7.
+	lenDiff := len(ar) - len(br)
+	if lenDiff < 0 {
+		lenDiff = -lenDiff
+	}
+	if float64(lenDiff)/float64(maxLen) > 0.3 {
+		return 0.0
+	}
+
+	distance := damerauLevenshteinDistanceRunes(ar, br)
 	return max(0.0, 1.0-float64(distance)/float64(maxLen))
 }
 
-func damerauLevenshteinDistance(a, b string) int {
-	ar := []rune(a)
-	br := []rune(b)
+func damerauLevenshteinDistanceRunes(ar, br []rune) int {
 	rows := len(ar) + 1
 	cols := len(br) + 1
 
-	dp := make([][]int, rows)
-	for i := range dp {
-		dp[i] = make([]int, cols)
-	}
+	// Use a flat 1D slice instead of [][]int to eliminate slice header allocations
+	// and drastically reduce garbage collection pressure.
+	dp := make([]int, rows*cols)
+	
 	for i := 0; i < rows; i++ {
-		dp[i][0] = i
+		dp[i*cols] = i
 	}
 	for j := 0; j < cols; j++ {
-		dp[0][j] = j
+		dp[j] = j
 	}
 
 	for i := 1; i < rows; i++ {
@@ -2166,18 +2200,30 @@ func damerauLevenshteinDistance(a, b string) int {
 				cost = 1
 			}
 
-			dp[i][j] = min(
-				dp[i-1][j]+1,
-				min(dp[i][j-1]+1, dp[i-1][j-1]+cost),
-			)
+			del := dp[(i-1)*cols+j] + 1
+			ins := dp[i*cols+(j-1)] + 1
+			sub := dp[(i-1)*cols+(j-1)] + cost
+
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			
+			dp[i*cols+j] = m
 
 			if i > 1 && j > 1 && ar[i-1] == br[j-2] && ar[i-2] == br[j-1] {
-				dp[i][j] = min(dp[i][j], dp[i-2][j-2]+1)
+				trans := dp[(i-2)*cols+(j-2)] + 1
+				if trans < dp[i*cols+j] {
+					dp[i*cols+j] = trans
+				}
 			}
 		}
 	}
 
-	return dp[len(ar)][len(br)]
+	return dp[rows*cols-1]
 }
 
 func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64, titleNorm, h1Norm, h2Norm, descNorm string) float64 {

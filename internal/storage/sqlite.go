@@ -237,13 +237,15 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 		}
 	}
 
-	c, err := cache.NewCache(cache.Config{
-		NumCounters: 1e7,     // 10M keys
-		MaxCost:     1 << 29, // 512MB RAM max
-	}, logger)
-	if err != nil {
-		return nil, fmt.Errorf("initializing ristretto cache: %w", err)
-	}
+	// Temporarily disabled for testing
+	// c, err := cache.NewCache(cache.Config{
+	// 	NumCounters: 1e7,     // 10M keys
+	// 	MaxCost:     1 << 29, // 512MB RAM max
+	// }, logger)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("initializing ristretto cache: %w", err)
+	// }
+	var c *cache.Cache = nil
 
 	s := &SQLiteStorage{
 		readContentDB:   readContentDB,
