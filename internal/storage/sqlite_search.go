@@ -177,26 +177,9 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 
 		planCtx, planCancel := context.WithTimeout(searchCtx, perPlanTimeout)
 
-		count, err := s.countFTSCandidates(planCtx, plan.ftsQuery)
-		if err != nil {
-			planCancel()
-			if searchCtx.Err() != nil {
-				break
-			}
-			if planCtx.Err() != nil {
-				s.logger.Debug("FTS plan timed out, skipping", "mode", plan.mode, "query", q.raw)
-				continue
-			}
-			return nil, 0, fmt.Errorf("counting %s results for %q: %w", plan.mode, q.raw, err)
-		}
-		if count == 0 {
-			planCancel()
-			continue
-		}
-
 		results, err := s.searchFTSCandidates(planCtx, plan.mode, plan.ftsQuery, q, lang, candidateLimit)
-		planCancel()
 		if err != nil {
+			planCancel()
 			if searchCtx.Err() != nil {
 				break
 			}
@@ -207,14 +190,26 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 			return nil, 0, fmt.Errorf("searching %s candidates for %q: %w", plan.mode, q.raw, err)
 		}
 		if len(results) == 0 {
+			planCancel()
 			continue
 		}
 
-		candidates = mergeSearchCandidates(candidates, results)
-		total += count
+		// Only count if we actually got results.
+		count, err := s.countFTSCandidates(planCtx, plan.ftsQuery)
+		planCancel()
+		if err != nil {
+			s.logger.Warn("failed to count FTS candidates, ignoring count", "mode", plan.mode, "error", err)
+			count = len(results) // fallback to at least what we retrieved
+		}
 
-		// For navigational queries, early exit once we have enough.
-		if q.intent == intentNavigational && len(candidates) >= candidateLimit {
+		candidates = mergeSearchCandidates(candidates, results)
+		// The looser plans are supersets of the stricter plans, so the count of the
+		// last executed plan is the most accurate total.
+		total = count
+
+		// Early exit once we have enough candidates to saturate the Go re-ranking pool.
+		// This prevents running expensive relaxed queries when a strict query already found plenty.
+		if len(candidates) >= candidateLimit {
 			break
 		}
 	}
@@ -1753,52 +1748,56 @@ func promoteLanguagePerDomain(candidates []searchCandidate, lang string, seconda
 		return candidates
 	}
 
-	domainGroups := make(map[string][]int)
+	bestForDomain := make(map[string]int)
+	bestScoreForDomain := make(map[string]int)
+
 	for i, c := range candidates {
 		info := classifySearchDomain(c.Domain)
 		d := info.effectiveDomain
 		if d == "" {
 			d = c.Domain
 		}
-		domainGroups[d] = append(domainGroups[d], i)
+
+		score := 0
+		if c.Language == lang {
+			score = 2
+		} else if secondaryLang != "" && c.Language == secondaryLang {
+			score = 1
+		}
+
+		if score > bestScoreForDomain[d] {
+			bestScoreForDomain[d] = score
+			bestForDomain[d] = i
+		}
 	}
 
-	for _, indices := range domainGroups {
-		if len(indices) <= 1 {
+	var result []searchCandidate
+	seenBest := make(map[int]bool)
+	domainSeen := make(map[string]bool)
+
+	for i, c := range candidates {
+		info := classifySearchDomain(c.Domain)
+		d := info.effectiveDomain
+		if d == "" {
+			d = c.Domain
+		}
+
+		if !domainSeen[d] {
+			domainSeen[d] = true
+			if bestIdx, ok := bestForDomain[d]; ok && bestIdx != i {
+				result = append(result, candidates[bestIdx])
+				seenBest[bestIdx] = true
+			}
+		}
+
+		if seenBest[i] {
 			continue
 		}
 
-		bestIdx := -1
-		bestScore := 0
-
-		for _, idx := range indices {
-			if candidates[idx].Language == lang {
-				if bestScore < 2 {
-					bestScore = 2
-					bestIdx = idx
-				}
-			} else if bestScore < 2 && secondaryLang != "" && candidates[idx].Language == secondaryLang {
-				if bestScore < 1 {
-					bestScore = 1
-					bestIdx = idx
-				}
-			}
-		}
-
-		if bestIdx >= 0 && bestIdx != indices[0] {
-			best := candidates[bestIdx]
-			candidates = append(candidates[:bestIdx], candidates[bestIdx+1:]...)
-
-			insertPos := indices[0]
-			if bestIdx < indices[0] {
-				insertPos = indices[0] - 1
-			}
-
-			candidates = append(candidates[:insertPos], append([]searchCandidate{best}, candidates[insertPos:]...)...)
-		}
+		result = append(result, c)
 	}
 
-	return candidates
+	return result
 }
 
 func diversifyByDomain(candidates []searchCandidate) []searchCandidate {
@@ -2462,6 +2461,11 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	for _, candidate := range merged {
 		results = append(results, candidate)
 	}
+	
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID < results[j].ID
+	})
+	
 	return results
 }
 
