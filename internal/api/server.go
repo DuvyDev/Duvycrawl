@@ -15,6 +15,16 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
+// ServerMode determines which routes are registered.
+type ServerMode string
+
+const (
+	// ModeSearch registers read-only search endpoints (no crawler control).
+	ModeSearch ServerMode = "search"
+	// ModeCrawler registers crawler control endpoints (crawl, queue, seeds, etc.).
+	ModeCrawler ServerMode = "crawler"
+)
+
 // Server wraps the HTTP server and its dependencies.
 type Server struct {
 	httpServer *http.Server
@@ -22,12 +32,13 @@ type Server struct {
 	logger     *slog.Logger
 }
 
-// NewServer creates a new API server with all routes registered.
+// NewServer creates a new API server with routes registered based on mode.
 func NewServer(
 	cfg *config.APIConfig,
 	store storage.Storage,
 	engine *crawler.Engine,
 	front *frontier.Frontier,
+	mode ServerMode,
 	logger *slog.Logger,
 ) *Server {
 	handlers := NewHandlers(store, engine, front, logger)
@@ -35,51 +46,19 @@ func NewServer(
 
 	mux := http.NewServeMux()
 
-	// --- Register routes ---
-
-	// Health
+	// Health is always registered.
 	mux.HandleFunc("GET /api/v1/health", handlers.HealthCheck)
 
-	// Search
-	mux.HandleFunc("GET /api/v1/search", handlers.Search)
-	mux.HandleFunc("GET /api/v1/images/search", handlers.SearchImages)
-	mux.HandleFunc("POST /api/v1/interact", handlers.Interact)
-
-	// Pages
-	mux.HandleFunc("GET /api/v1/pages/{id}", handlers.GetPage)
-	mux.HandleFunc("GET /api/v1/pages/lookup", handlers.LookupPage)
-	mux.HandleFunc("GET /api/v1/pages/{id}/outlinks", handlers.GetOutlinks)
-
-	// Backlinks
-	mux.HandleFunc("GET /api/v1/backlinks", handlers.GetBacklinks)
-
-	// Stats
+	// Stats is always registered (response differs by mode).
 	mux.HandleFunc("GET /api/v1/stats", handlers.GetStats)
 	mux.HandleFunc("GET /api/v1/stats/embeddings", handlers.GetEmbeddingStats)
 
-	// Crawl
-	mux.HandleFunc("POST /api/v1/crawl", handlers.CrawlURLs)
-
-	// Queue
-	mux.HandleFunc("GET /api/v1/queue", handlers.GetQueue)
-
-	// Seeds
-	mux.HandleFunc("GET /api/v1/seeds", handlers.ListSeeds)
-	mux.HandleFunc("POST /api/v1/seeds", handlers.AddSeed)
-	mux.HandleFunc("DELETE /api/v1/seeds/{url}", handlers.DeleteSeed)
-
-	// Crawler control
-	mux.HandleFunc("POST /api/v1/crawler/start", handlers.StartCrawler)
-	mux.HandleFunc("POST /api/v1/crawler/stop", handlers.StopCrawler)
-	mux.HandleFunc("GET /api/v1/crawler/status", handlers.CrawlerStatus)
-
-	// Interests
-	mux.HandleFunc("GET /api/v1/interests", handlers.ListInterests)
-	mux.HandleFunc("POST /api/v1/interests", handlers.AddInterest)
-	mux.HandleFunc("DELETE /api/v1/interests/{term}", handlers.DeleteInterest)
-
-	// Maintenance
-	mux.HandleFunc("POST /api/v1/maintenance/rank", handlers.UpdateRankings)
+	switch mode {
+	case ModeSearch:
+		registerSearchRoutes(mux, handlers)
+	case ModeCrawler:
+		registerCrawlerRoutes(mux, handlers)
+	}
 
 	// Apply middleware stack.
 	handler := chain(
@@ -105,6 +84,49 @@ func NewServer(
 		handlers:   handlers,
 		logger:     apiLogger,
 	}
+}
+
+// registerSearchRoutes adds read-only endpoints for the Search API node.
+func registerSearchRoutes(mux *http.ServeMux, h *Handlers) {
+	// Search
+	mux.HandleFunc("GET /api/v1/search", h.Search)
+	mux.HandleFunc("GET /api/v1/images/search", h.SearchImages)
+	mux.HandleFunc("POST /api/v1/interact", h.Interact)
+
+	// Pages
+	mux.HandleFunc("GET /api/v1/pages/{id}", h.GetPage)
+	mux.HandleFunc("GET /api/v1/pages/lookup", h.LookupPage)
+	mux.HandleFunc("GET /api/v1/pages/{id}/outlinks", h.GetOutlinks)
+
+	// Backlinks
+	mux.HandleFunc("GET /api/v1/backlinks", h.GetBacklinks)
+}
+
+// registerCrawlerRoutes adds crawler control endpoints for the Crawler node.
+func registerCrawlerRoutes(mux *http.ServeMux, h *Handlers) {
+	// Crawl
+	mux.HandleFunc("POST /api/v1/crawl", h.CrawlURLs)
+
+	// Queue
+	mux.HandleFunc("GET /api/v1/queue", h.GetQueue)
+
+	// Seeds
+	mux.HandleFunc("GET /api/v1/seeds", h.ListSeeds)
+	mux.HandleFunc("POST /api/v1/seeds", h.AddSeed)
+	mux.HandleFunc("DELETE /api/v1/seeds/{url}", h.DeleteSeed)
+
+	// Crawler control
+	mux.HandleFunc("POST /api/v1/crawler/start", h.StartCrawler)
+	mux.HandleFunc("POST /api/v1/crawler/stop", h.StopCrawler)
+	mux.HandleFunc("GET /api/v1/crawler/status", h.CrawlerStatus)
+
+	// Interests
+	mux.HandleFunc("GET /api/v1/interests", h.ListInterests)
+	mux.HandleFunc("POST /api/v1/interests", h.AddInterest)
+	mux.HandleFunc("DELETE /api/v1/interests/{term}", h.DeleteInterest)
+
+	// Maintenance
+	mux.HandleFunc("POST /api/v1/maintenance/rank", h.UpdateRankings)
 }
 
 // Start begins listening for HTTP requests. This method blocks until

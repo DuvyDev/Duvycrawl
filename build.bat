@@ -4,21 +4,14 @@ echo   Compilando proyecto Duvycrawl...
 echo ========================================
 echo.
 
-echo [1/3] Compilando Duvycrawl (Monolito)...
-go build -o duvycrawl.exe ./cmd/duvycrawl
-if %errorlevel% neq 0 (
-    echo Error al compilar Duvycrawl.
-    exit /b %errorlevel%
-)
-
-echo [2/3] Compilando Search API (Solo Buscador)...
+echo [1/2] Compilando Search API...
 go build -o search-api.exe ./cmd/search-api
 if %errorlevel% neq 0 (
     echo Error al compilar Search API.
     exit /b %errorlevel%
 )
 
-echo [3/3] Compilando Crawler Engine (Solo Rastreador)...
+echo [2/2] Compilando Crawler Engine...
 go build -o crawler.exe ./cmd/crawler
 if %errorlevel% neq 0 (
     echo Error al compilar Crawler.
@@ -28,6 +21,6 @@ if %errorlevel% neq 0 (
 echo.
 echo ========================================
 echo   Compilacion exitosa.
-echo   Los binarios estan en la carpeta raiz.
+echo   Binarios: search-api.exe, crawler.exe
 echo ========================================
 pause

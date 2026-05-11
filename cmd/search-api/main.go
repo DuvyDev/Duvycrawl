@@ -64,7 +64,7 @@ func run() error {
 	}
 
 	// Create API server without Crawler Engine and Frontier
-	apiServer := api.NewServer(&cfg.API, store, nil, nil, logger)
+	apiServer := api.NewServer(&cfg.API, store, nil, nil, api.ModeSearch, logger)
 
 	// --- Setup Graceful Shutdown ---
 	ctx, cancel := context.WithCancel(ctx)

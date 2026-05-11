@@ -103,7 +103,7 @@ func run() error {
 
 	// Admin API Server
 	cfg.API.Port = *adminPort
-	adminServer := api.NewServer(&cfg.API, store, engine, front, logger)
+	adminServer := api.NewServer(&cfg.API, store, engine, front, api.ModeCrawler, logger)
 
 	// --- Seed Bloom filter ---
 	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {

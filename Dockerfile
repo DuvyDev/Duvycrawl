@@ -14,7 +14,6 @@ RUN go mod download
 COPY . .
 
 # Build the binaries (CGO disabled for pure Go binary).
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o bin/duvycrawl ./cmd/duvycrawl
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o bin/search-api ./cmd/search-api
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o bin/crawler ./cmd/crawler
 
@@ -39,6 +38,5 @@ ENV PATH="/app/bin:${PATH}"
 EXPOSE 8080
 EXPOSE 8081
 
-# Default behavior: run monolith if no command provided
 ENTRYPOINT []
-CMD ["duvycrawl", "-config", "/app/configs/default.yaml"]
+CMD ["search-api", "-config", "/app/configs/default.yaml"]
