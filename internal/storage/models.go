@@ -164,6 +164,7 @@ type CrawlerStats struct {
 	TotalPages     int        `json:"total_pages"`
 	TotalDomains   int        `json:"total_domains"`
 	SeedDomains    int        `json:"seed_domains"`
+	TotalImages    int        `json:"total_images"`
 	Queue          QueueStats `json:"queue"`
 	DatabaseSizeMB float64    `json:"database_size_mb"`
 }

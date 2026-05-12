@@ -164,13 +164,13 @@ func normalizeInterestTokens(s string) []string {
 	return out
 }
 
-// SetInterestTerm inserts or accumulates a manual interest term weight.
+// SetInterestTerm inserts or replaces a manual interest term weight.
 func (s *SQLiteStorage) SetInterestTerm(ctx context.Context, term string, weight float64, source string, lang string) error {
 	_, err := s.writeContentDB.ExecContext(ctx, `
 		INSERT INTO interest_terms (term, weight, source, lang, last_seen)
 		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(term, source) DO UPDATE SET
-			weight = weight + ?,
+			weight = ?,
 			last_seen = CURRENT_TIMESTAMP
 	`, term, weight, source, lang, weight)
 	if err != nil {

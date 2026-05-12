@@ -305,6 +305,11 @@ func (s *SQLiteStorage) GetStats(ctx context.Context) (*CrawlerStats, error) {
 		return nil, fmt.Errorf("counting seed urls: %w", err)
 	}
 
+	// Image count.
+	if err := s.readContentDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM images`).Scan(&stats.TotalImages); err != nil {
+		return nil, fmt.Errorf("counting images: %w", err)
+	}
+
 	// Queue stats.
 	queueStats, err := s.GetQueueStats(ctx)
 	if err != nil {

@@ -52,8 +52,8 @@ func (a *AdaptiveScorer) Name() string { return "adaptive" }
 
 // SeedInterestsFromConfig inserts manual interest terms from the config into
 // the database. Terms are inserted with source='manual' so they are
-// distinguishable from organic query/click terms. The weight is accumulated
-// on top of any existing manual weight for the same term.
+// distinguishable from organic query/click terms. The weight is set
+// to the configured value, replacing any existing manual weight.
 func (a *AdaptiveScorer) SeedInterestsFromConfig(ctx context.Context, interests []config.InterestConfig) error {
 	if len(interests) == 0 {
 		return nil
