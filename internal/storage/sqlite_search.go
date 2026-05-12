@@ -207,18 +207,15 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		// last executed plan is the most accurate total.
 		total = count
 
-		// Early exit once we have enough candidates to saturate the Go re-ranking pool.
-		// This prevents running expensive relaxed queries when a strict query already found plenty.
-		if len(candidates) >= candidateLimit {
-			break
+		// Early exit once we have enough solid candidates.
+		// A strict threshold (e.g. half the limit, max 100) ensures we don't run
+		// the extremely expensive 'Relaxed' OR-query if we already have good matches.
+		earlyExitThreshold := candidateLimit / 2
+		if earlyExitThreshold > 100 {
+			earlyExitThreshold = 100
 		}
-	}
-
-	// --- Navigational fallback ---
-	if q.intent == intentNavigational && len(candidates) < 30 {
-		navCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
-		if err == nil {
-			candidates = mergeSearchCandidates(candidates, navCandidates)
+		if len(candidates) >= earlyExitThreshold {
+			break
 		}
 	}
 
@@ -255,11 +252,11 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		}
 	}
 
-	// --- Domain-match retrieval for informational queries ---
-	if q.intent == intentInformational && len(q.tokens) >= 2 {
-		domainCandidates, err := s.searchDomainMatchCandidates(searchCtx, q, lang, min(candidateLimit, 30))
+	// --- Navigational fallback ---
+	if q.intent == intentNavigational && len(candidates) < 30 {
+		navCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
 		if err == nil {
-			candidates = mergeSearchCandidates(candidates, domainCandidates)
+			candidates = mergeSearchCandidates(candidates, navCandidates)
 		}
 	}
 
@@ -1343,7 +1340,7 @@ func applyPlatformIntentBoosts(candidate searchCandidate, query searchQuery, dom
 			}
 
 			if len(query.tokens) > 0 {
-				urlAvg, _, _ := searchTokenCoverage(query.tokens, urlTokens)
+				urlAvg, _, _, _ := searchTokenCoverage(query.tokens, urlTokens, query.idfMap)
 				if urlAvg > 0 {
 					boost += 3000.0 * urlAvg
 				}
@@ -1462,12 +1459,12 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 	score += 260.0*domainPhrase + 90.0*urlPhrase
 
 	// Token coverage (what fraction of query tokens appear in each field)
-	titleAvg, titleCoverage, titleExact := searchTokenCoverage(query.tokens, titleTokens)
-	h1Avg, h1Coverage, _ := searchTokenCoverage(query.tokens, h1Tokens)
-	h2Avg, h2Coverage, _ := searchTokenCoverage(query.tokens, h2Tokens)
-	descAvg, descCoverage, _ := searchTokenCoverage(query.tokens, descTokens)
-	domainAvg, domainCoverage, _ := searchTokenCoverage(query.tokens, domainTokens)
-	urlAvg, urlCoverage, _ := searchTokenCoverage(query.tokens, urlTokens)
+	titleAvg, titleCoverage, titleExact, titleMatched := searchTokenCoverage(query.tokens, titleTokens, query.idfMap)
+	h1Avg, h1Coverage, _, h1Matched := searchTokenCoverage(query.tokens, h1Tokens, query.idfMap)
+	h2Avg, h2Coverage, _, h2Matched := searchTokenCoverage(query.tokens, h2Tokens, query.idfMap)
+	descAvg, descCoverage, _, descMatched := searchTokenCoverage(query.tokens, descTokens, query.idfMap)
+	domainAvg, domainCoverage, _, _ := searchTokenCoverage(query.tokens, domainTokens, query.idfMap)
+	urlAvg, urlCoverage, _, urlMatched := searchTokenCoverage(query.tokens, urlTokens, query.idfMap)
 
 	// Weighted average across fields (title matters most)
 	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + 2.0*descAvg) / 9.0
@@ -1486,71 +1483,34 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 		score += 180.0
 	}
 
-	// Content coverage penalty: if the page only matches 1 out of N query tokens
-	// in title+h1+h2+description combined, heavily penalize it.
-	// This prevents pages that only match "uruguay" from ranking for "patente uruguay".
+	// Content coverage penalty: if the page only matches a fraction of query tokens
+	// across all metadata fields, penalize it. Derived from per-field matchedFlags
+	// already computed by searchTokenCoverage above — no redundant scanning.
 	if len(query.tokens) >= 2 {
-		totalMatched := 0
-		for _, qt := range query.tokens {
-			matched := false
-			for _, tt := range titleTokens {
-				if searchTokenSimilarity(qt, tt) >= 0.72 {
-					matched = true
-					break
-				}
+		matchedWeight := 0.0
+		totalWeight := 0.0
+		for i, tok := range query.tokens {
+			w := 1.0
+			if val, ok := query.idfMap[tok]; ok && val > 0 {
+				w = val
 			}
-			if !matched {
-				for _, tt := range h1Tokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range h2Tokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range descTokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range urlTokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if matched {
-				totalMatched++
+			totalWeight += w
+			if titleMatched[i] || h1Matched[i] || h2Matched[i] || descMatched[i] || urlMatched[i] {
+				matchedWeight += w
 			}
 		}
 
-		coverageRatio := float64(totalMatched) / float64(len(query.tokens))
+		coverageRatio := matchedWeight / totalWeight
 		if coverageRatio < 0.5 {
-			// For government/educational domains, apply a softer penalty —
-			// their body content is often relevant even if metadata is minimal.
 			isGovOrEdu := strings.HasSuffix(urlDomain, ".gub.uy") ||
 				strings.HasSuffix(urlDomain, ".gov.uy") ||
 				strings.Contains(urlDomain, ".gub.") ||
 				strings.Contains(urlDomain, ".gov.")
 
 			if isGovOrEdu {
-				// Softer penalty for gov domains
-				score *= 0.75 + coverageRatio*0.25 // e.g., 0.33 coverage → score *= 0.83
+				score *= 0.75 + coverageRatio*0.25
 			} else {
-				// Heavy penalty for non-gov domains
-				score *= coverageRatio * 2.0 // e.g., 0.25 coverage → score *= 0.5
+				score *= coverageRatio * 2.0
 			}
 		}
 	}
@@ -2045,14 +2005,24 @@ func isLanguagePathSegment(segment string) bool {
 // Phrase & token scoring utilities
 // ---------------------------------------------------------------------------
 
-func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, coverage float64, exactMatches int) {
+func searchTokenCoverage(queryTokens, fieldTokens []string, idfMap map[string]float64) (avg float64, coverage float64, exactMatches int, matchedFlags []bool) {
+	matchedFlags = make([]bool, len(queryTokens))
 	if len(queryTokens) == 0 || len(fieldTokens) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, matchedFlags
 	}
 
-	matched := 0
-	total := 0.0
-	for _, queryToken := range queryTokens {
+	totalSim := 0.0
+	totalWeight := 0.0
+	matchedWeight := 0.0
+	for i, queryToken := range queryTokens {
+		w := 1.0
+		if idfMap != nil {
+			if val, ok := idfMap[queryToken]; ok && val > 0 {
+				w = val
+			}
+		}
+		totalWeight += w
+
 		best := 0.0
 		for _, fieldToken := range fieldTokens {
 			similarity := searchTokenSimilarity(queryToken, fieldToken)
@@ -2060,16 +2030,17 @@ func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, covera
 				best = similarity
 			}
 		}
-		total += best
+		totalSim += best * w
 		if best >= 0.72 {
-			matched++
+			matchedWeight += w
+			matchedFlags[i] = true
 		}
 		if best == 1.0 {
 			exactMatches++
 		}
 	}
 
-	return total / float64(len(queryTokens)), float64(matched) / float64(len(queryTokens)), exactMatches
+	return totalSim / totalWeight, matchedWeight / totalWeight, exactMatches, matchedFlags
 }
 
 func searchTokenSimilarity(queryToken, fieldToken string) float64 {
@@ -2134,29 +2105,45 @@ func normalizedEditSimilarity(a, b string) float64 {
 	if a == b {
 		return 1.0
 	}
-	distance := damerauLevenshteinDistance(a, b)
-	maxLen := max(len([]rune(a)), len([]rune(b)))
+	ar := []rune(a)
+	br := []rune(b)
+	
+	maxLen := len(ar)
+	if len(br) > maxLen {
+		maxLen = len(br)
+	}
 	if maxLen == 0 {
 		return 1.0
 	}
+
+	// Early exit: if length difference is too large, similarity will be low anyway.
+	// Since callers generally care about similarities > 0.7, a 30% length diff
+	// guarantees the similarity will be < 0.7.
+	lenDiff := len(ar) - len(br)
+	if lenDiff < 0 {
+		lenDiff = -lenDiff
+	}
+	if float64(lenDiff)/float64(maxLen) > 0.3 {
+		return 0.0
+	}
+
+	distance := damerauLevenshteinDistanceRunes(ar, br)
 	return max(0.0, 1.0-float64(distance)/float64(maxLen))
 }
 
-func damerauLevenshteinDistance(a, b string) int {
-	ar := []rune(a)
-	br := []rune(b)
+func damerauLevenshteinDistanceRunes(ar, br []rune) int {
 	rows := len(ar) + 1
 	cols := len(br) + 1
 
-	dp := make([][]int, rows)
-	for i := range dp {
-		dp[i] = make([]int, cols)
-	}
+	// Use a flat 1D slice instead of [][]int to eliminate slice header allocations
+	// and drastically reduce garbage collection pressure.
+	dp := make([]int, rows*cols)
+	
 	for i := 0; i < rows; i++ {
-		dp[i][0] = i
+		dp[i*cols] = i
 	}
 	for j := 0; j < cols; j++ {
-		dp[0][j] = j
+		dp[j] = j
 	}
 
 	for i := 1; i < rows; i++ {
@@ -2166,18 +2153,30 @@ func damerauLevenshteinDistance(a, b string) int {
 				cost = 1
 			}
 
-			dp[i][j] = min(
-				dp[i-1][j]+1,
-				min(dp[i][j-1]+1, dp[i-1][j-1]+cost),
-			)
+			del := dp[(i-1)*cols+j] + 1
+			ins := dp[i*cols+(j-1)] + 1
+			sub := dp[(i-1)*cols+(j-1)] + cost
+
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			
+			dp[i*cols+j] = m
 
 			if i > 1 && j > 1 && ar[i-1] == br[j-2] && ar[i-2] == br[j-1] {
-				dp[i][j] = min(dp[i][j], dp[i-2][j-2]+1)
+				trans := dp[(i-2)*cols+(j-2)] + 1
+				if trans < dp[i*cols+j] {
+					dp[i*cols+j] = trans
+				}
 			}
 		}
 	}
 
-	return dp[len(ar)][len(br)]
+	return dp[rows*cols-1]
 }
 
 func fixedWeightedTermFrequency(queryTokens []string, idfMap map[string]float64, titleNorm, h1Norm, h2Norm, descNorm string) float64 {
