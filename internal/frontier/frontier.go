@@ -273,6 +273,11 @@ func (f *Frontier) Stats() queue.Stats {
 	return f.queue.Stats()
 }
 
+// DomainBreakdown returns per-domain pending URL counts, sorted by count descending.
+func (f *Frontier) DomainBreakdown() []queue.DomainCount {
+	return f.queue.DomainBreakdown()
+}
+
 // CanonicalizeURL parses and normalizes a URL for consistent deduplication.
 // Returns the canonical URL string and the normalized domain name.
 func CanonicalizeURL(rawURL string) (string, string, error) {

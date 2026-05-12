@@ -361,6 +361,19 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 			logger.Warn("permanent client error, skipping retries", "status_code", result.StatusCode, "url", job.URL)
 			return
 		}
+		// On 429: mark domain as throttled (cooldown blocks TryWait) and
+		// demote the job's score so it doesn't monopolize the queue.
+		if result.StatusCode == http.StatusTooManyRequests {
+			e.limiter.MarkThrottled(job.Domain)
+			job.Score = job.Score * 0.25
+			if job.Score < 1.0 {
+				job.Score = 1.0
+			}
+			logger.Info("domain throttled by 429, applying cooldown and score penalty",
+				"domain", job.Domain,
+				"new_score", job.Score,
+			)
+		}
 		e.retryOrFail(job, logger, fmt.Sprintf("non-2xx status: %d", result.StatusCode), nil)
 		return
 	}

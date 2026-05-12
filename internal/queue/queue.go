@@ -269,15 +269,13 @@ func (q *Queue) DequeueWithWait(ctx context.Context, readyFn DomainReadyFunc) *J
 
 // dequeueLocked is the internal dequeue logic; caller must hold q.mu.
 //
-// Instead of sorting all domains (O(n log n) under lock), it uses a
-// two-pass approach:
-//  1. Scan all domains to find the max score.
-//  2. Iterate from a random offset, trying only domains at max score.
-//     If none are ready, try any domain.
+// Uses round-robin domain selection: each dequeue starts from the next
+// domain offset (via atomic round counter), trying every domain in order
+// until one passes readyFn. This ensures fair distribution across all
+// domains, preventing a single high-score domain from monopolizing workers.
 //
-// The random offset prevents thundering herd where all 300 workers
-// compete for the same high-score domain.
-// candidate represents a domain with at least one pending job.
+// Score still determines job priority WITHIN a domain (highest-scored job
+// is always picked first), but between domains we rotate fairly.
 type candidate struct {
 	domain string
 	score  float64
@@ -289,17 +287,10 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 		return nil
 	}
 
-	// Reuse the internal buffer to avoid allocating a new slice on every
-	// dequeue call (significant GC savings with hundreds of workers).
 	q.candidateBuf = q.candidateBuf[:0]
-	maxScore := -1.0
 	for domain, jobs := range q.domains {
 		if len(jobs) > 0 {
-			s := jobs[0].Score
-			q.candidateBuf = append(q.candidateBuf, candidate{domain, s})
-			if s > maxScore {
-				maxScore = s
-			}
+			q.candidateBuf = append(q.candidateBuf, candidate{domain, jobs[0].Score})
 		}
 	}
 
@@ -307,28 +298,12 @@ func (q *Queue) dequeueLocked(readyFn DomainReadyFunc) *Job {
 		return nil
 	}
 
-	// Use an atomic counter as a cheap pseudo-random offset so workers
-	// start scanning from different positions, spreading load across domains.
+	// Round-robin: each dequeue starts from a different domain offset.
+	// This spreads workers evenly across all domains with pending work.
 	offset := int(q.round.Add(1)) % len(q.candidateBuf)
 
-	// Pass 1: try domains at max score (from random offset).
 	for i := 0; i < len(q.candidateBuf); i++ {
 		c := q.candidateBuf[(offset+i)%len(q.candidateBuf)]
-		if c.score != maxScore {
-			continue
-		}
-		if readyFn(c.domain) {
-			return q.popJob(c.domain)
-		}
-	}
-
-	// Pass 2: try any domain (from random offset) — lower score is
-	// better than no work at all.
-	for i := 0; i < len(q.candidateBuf); i++ {
-		c := q.candidateBuf[(offset+i)%len(q.candidateBuf)]
-		if c.score == maxScore {
-			continue // already tried in pass 1
-		}
 		if readyFn(c.domain) {
 			return q.popJob(c.domain)
 		}
@@ -397,6 +372,28 @@ func (q *Queue) Stats() Stats {
 		Enqueued: q.enqueued.Load(),
 		Dequeued: q.dequeued.Load(),
 	}
+}
+
+// DomainBreakdown returns per-domain pending counts, sorted by count descending.
+func (q *Queue) DomainBreakdown() []DomainCount {
+	q.mu.Lock()
+	result := make([]DomainCount, 0, len(q.domains))
+	for domain, jobs := range q.domains {
+		if len(jobs) > 0 {
+			result = append(result, DomainCount{Domain: domain, Pending: len(jobs)})
+		}
+	}
+	q.mu.Unlock()
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Pending > result[j].Pending
+	})
+	return result
+}
+
+// DomainCount represents a domain with its pending job count.
+type DomainCount struct {
+	Domain  string `json:"domain"`
+	Pending int    `json:"pending"`
 }
 
 // insertSorted inserts a job into a slice maintaining descending score order.

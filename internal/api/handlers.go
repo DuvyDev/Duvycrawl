@@ -301,16 +301,19 @@ func (h *Handlers) CrawlURLs(w http.ResponseWriter, r *http.Request) {
 
 // --- Queue ---
 
-// GetQueue returns the current crawl queue status.
+// GetQueue returns the current crawl queue status with per-domain breakdown.
 func (h *Handlers) GetQueue(w http.ResponseWriter, r *http.Request) {
 	stats := h.frontier.Stats()
 	renderBacklog := h.engine.RenderBacklogLen()
+	breakdown := h.frontier.DomainBreakdown()
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"pending":        stats.Pending,
-		"domains":        stats.Domains,
-		"total_enqueued": stats.Enqueued,
-		"total_dequeued": stats.Dequeued,
-		"render_backlog": renderBacklog,
+		"pending":         stats.Pending,
+		"domains":         stats.Domains,
+		"total_enqueued":  stats.Enqueued,
+		"total_dequeued":  stats.Dequeued,
+		"render_backlog":  renderBacklog,
+		"domain_breakdown": breakdown,
 	})
 }
 
