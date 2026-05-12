@@ -1,22 +1,22 @@
 module github.com/DuvyDev/Duvycrawl
 
-go 1.26.2
+go 1.26.3
 
 require (
 	github.com/PuerkitoBio/goquery v1.12.0
 	github.com/abadojack/whatlanggo v1.0.1
 	github.com/bits-and-blooms/bloom/v3 v3.7.1
-	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
+	github.com/chromedp/cdproto v0.0.0-20260427013145-5737772c319b
 	github.com/chromedp/chromedp v0.15.1
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/google/uuid v1.6.0
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/temoto/robotstxt v1.1.2
-	golang.org/x/net v0.53.0
-	golang.org/x/text v0.36.0
+	golang.org/x/net v0.54.0
+	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.50.0
+	modernc.org/sqlite v1.50.1
 )
 
 require (
@@ -36,8 +36,8 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sys v0.43.0 // indirect
-	modernc.org/libc v1.72.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
+	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
