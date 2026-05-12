@@ -21,7 +21,6 @@ type Config struct {
 	Logging       LoggingConfig       `yaml:"logging"`
 	Seeds         []SeedURLConfig     `yaml:"seeds"`
 	SearchIntents SearchIntentsConfig `yaml:"search_intents"`
-	Embedder      EmbedderConfig      `yaml:"embedder"`
 }
 
 // RenderingConfig controls optional JavaScript rendering via a real browser.
@@ -216,14 +215,6 @@ type ScoringConfig struct {
 	SecondaryLanguage      string  `yaml:"secondary_language"`
 }
 
-// EmbedderConfig controls the Ollama semantic embeddings client.
-type EmbedderConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	URL     string `yaml:"url"`
-	Model   string `yaml:"model"`
-	Workers int    `yaml:"workers"`
-}
-
 // Addr returns the full address string (host:port) for the API server.
 func (a APIConfig) Addr() string {
 	return fmt.Sprintf("%s:%d", a.Host, a.Port)
@@ -328,12 +319,6 @@ func DefaultConfig() *Config {
 			LanguageBoost:          3000.0,
 			SecondaryLanguageBoost: 1500.0,
 			SecondaryLanguage:      "en",
-		},
-		Embedder: EmbedderConfig{
-			Enabled: false,
-			URL:     "http://localhost:11434",
-			Model:   "all-minilm:l6-v2",
-			Workers: 2,
 		},
 	}
 }

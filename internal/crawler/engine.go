@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/DuvyDev/Duvycrawl/internal/config"
-	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
@@ -30,15 +29,6 @@ const (
 	StatusRunning  EngineStatus = "running"
 	StatusStopping EngineStatus = "stopping"
 )
-
-// embedJob carries the data needed to generate an embedding for a page.
-type embedJob struct {
-	pageID      int64
-	pageURL     string
-	title       string
-	description string
-	content     string
-}
 
 type renderBacklogItem struct {
 	job       *queue.Job
@@ -63,7 +53,6 @@ type Engine struct {
 	robots       *RobotsCache
 	limiter      *ratelimit.DomainLimiter
 	domainStats  *DomainStatsCollector
-	embedder     *embedder.Client
 	logger       *slog.Logger
 
 	noFollowDomains map[string]struct{}
@@ -71,13 +60,6 @@ type Engine struct {
 	status  atomic.Value // EngineStatus
 	cancel  context.CancelFunc
 	crawlWG sync.WaitGroup
-	embedWG sync.WaitGroup
-
-	// High-priority jobs are freshly persisted pages; low-priority jobs are
-	// backfill of older pages missing embeddings.
-	highEmbedQueue chan embedJob
-	lowEmbedQueue  chan embedJob
-	embedQueued    sync.Map // pageID -> struct{}{}
 
 	renderMu      sync.Mutex
 	renderBacklog []*renderBacklogItem
@@ -96,7 +78,6 @@ func NewEngine(
 	front *frontier.Frontier,
 	limiter *ratelimit.DomainLimiter,
 	domainStats *DomainStatsCollector,
-	embedClient *embedder.Client,
 	renderingCfg config.RenderingConfig,
 	logger *slog.Logger,
 ) *Engine {
@@ -132,18 +113,12 @@ func NewEngine(
 		robots:          NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
 		limiter:         limiter,
 		domainStats:     domainStats,
-		embedder:        embedClient,
 		logger:          logger.With("component", "engine"),
-		highEmbedQueue:  make(chan embedJob, 25000),
-		lowEmbedQueue:   make(chan embedJob, 5000),
 		renderQueued:    make(map[string]struct{}),
 		noFollowDomains: make(map[string]struct{}, len(cfg.NoFollowDomains)),
 	}
 	for _, d := range cfg.NoFollowDomains {
 		e.noFollowDomains[strings.ToLower(d)] = struct{}{}
-	}
-	if batchWriter != nil {
-		batchWriter.SetPagesPersistedHook(e.onPagesPersisted)
 	}
 	e.status.Store(StatusIdle)
 	return e
@@ -185,19 +160,6 @@ func (e *Engine) Start(ctx context.Context) {
 		go e.worker(ctx, i)
 	}
 
-	// Launch background embedding workers (limited concurrency to avoid
-	// overwhelming the Ollama API).
-	if e.embedder != nil {
-		embedWorkers := e.embedder.Workers()
-		for i := 0; i < embedWorkers; i++ {
-			e.embedWG.Add(1)
-			go e.embedWorker(ctx, i)
-		}
-		e.crawlWG.Add(1)
-		go e.backfillEmbeddings(ctx)
-		e.logger.Info("embedding workers started", "count", embedWorkers)
-	}
-
 	e.logger.Info("all workers started")
 }
 
@@ -237,12 +199,6 @@ func (e *Engine) Stop() {
 			e.logger.Warn("renderer close failed", "error", err)
 		}
 	}
-
-	// Signal embedding workers to stop once the queue is drained.
-	close(e.highEmbedQueue)
-	close(e.lowEmbedQueue)
-
-	e.embedWG.Wait()
 
 	e.status.Store(StatusIdle)
 
@@ -819,360 +775,6 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen]
 }
 
-func (e *Engine) onPagesPersisted(pages []*storage.Page) {
-	for _, page := range pages {
-		e.enqueueEmbedJob(embedJob{
-			pageID:      page.ID,
-			pageURL:     page.URL,
-			title:       page.Title,
-			description: page.Description,
-			content:     truncateString(page.Content, 2048),
-		}, true)
-	}
-}
-
-func (e *Engine) enqueueEmbedJob(job embedJob, highPriority bool) {
-	if job.pageID <= 0 {
-		return
-	}
-	if _, loaded := e.embedQueued.LoadOrStore(job.pageID, struct{}{}); loaded {
-		return
-	}
-
-	queue := e.lowEmbedQueue
-	queueName := "low"
-	if highPriority {
-		queue = e.highEmbedQueue
-		queueName = "high"
-	}
-
-	select {
-	case queue <- job:
-	default:
-		e.embedQueued.Delete(job.pageID)
-		e.logger.Debug("embedding queue full, dropping job", "page_id", job.pageID, "queue", queueName)
-	}
-}
-
-func (e *Engine) backfillEmbeddings(ctx context.Context) {
-	defer e.crawlWG.Done()
-	logger := e.logger.With("component", "embed_backfill")
-
-	const batchSize = 250
-	for {
-		afterID := int64(0)
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-
-			pages, err := e.store.ListPagesWithoutEmbeddings(ctx, afterID, batchSize)
-			if err != nil {
-				logger.Warn("failed to load pages without embeddings", "error", err)
-				break
-			}
-			if len(pages) == 0 {
-				break
-			}
-
-			for _, page := range pages {
-				e.enqueueEmbedJob(embedJob{
-					pageID:      page.ID,
-					pageURL:     page.URL,
-					title:       page.Title,
-					description: page.Description,
-					content:     page.Content,
-				}, false)
-				afterID = page.ID
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(5 * time.Minute):
-		}
-	}
-}
-
-// embedWorker consumes embedding jobs from the queue and persists them.
-// Limited concurrency protects the Ollama API from being overwhelmed.
-func (e *Engine) embedWorker(ctx context.Context, id int) {
-	defer e.embedWG.Done()
-	logger := e.logger.With("embed_worker", id)
-	logger.Debug("embedding worker started")
-	highQueue := e.highEmbedQueue
-	lowQueue := e.lowEmbedQueue
-
-	for {
-		if highQueue == nil && lowQueue == nil {
-			logger.Debug("embedding worker shutting down (queues drained)")
-			return
-		}
-
-		select {
-		case job, ok := <-highQueue:
-			if !ok {
-				highQueue = nil
-				continue
-			}
-			e.processEmbedJob(job, logger)
-			continue
-		default:
-		}
-
-		select {
-		case job, ok := <-highQueue:
-			if !ok {
-				highQueue = nil
-				continue
-			}
-			e.processEmbedJob(job, logger)
-		case job, ok := <-lowQueue:
-			if !ok {
-				lowQueue = nil
-				continue
-			}
-			e.processEmbedJob(job, logger)
-		}
-	}
-}
-
-func (e *Engine) processEmbedJob(job embedJob, logger *slog.Logger) {
-	defer e.embedQueued.Delete(job.pageID)
-
-	// Build a clean representation prioritising title and description over raw
-	// content. Title is the strongest semantic signal, description next; content
-	// is used only if budget remains.
-	title := sanitizeEmbedText(job.title)
-	desc := sanitizeEmbedText(job.description)
-	content := sanitizeEmbedText(job.content)
-
-	text := buildEmbedText(title, desc, content, 768)
-	if text == "" {
-		return
-	}
-
-	// Try with progressively shorter text if Ollama rejects for context length.
-	maxLengths := []int{768, 512, 256}
-	for _, maxLen := range maxLengths {
-		candidate := buildEmbedText(title, desc, content, maxLen)
-
-		vec, err := e.embedder.GenerateEmbedding(candidate)
-		if err == nil {
-			e.saveEmbedding(job, vec, logger)
-			return
-		}
-		if !isContextLengthError(err) {
-			logger.Debug("embedding generation failed", "url", job.pageURL, "error", err)
-			return
-		}
-		logger.Debug("embedding context exceeded, retrying shorter", "url", job.pageURL, "len", maxLen)
-	}
-}
-
-// buildEmbedText assembles title + description + content, always keeping the
-// title intact, then fitting as much description as possible, and finally
-// padding with content up to maxLen. Never cuts mid-word.
-func buildEmbedText(title, desc, content string, maxLen int) string {
-	if title == "" && desc == "" && content == "" {
-		return ""
-	}
-
-	maxWords := embedWordBudget(maxLen)
-	parts := []string{}
-	remaining := maxLen
-	usedWords := 0
-
-	// Title always goes in full (it's the strongest signal).
-	if title != "" {
-		title = truncateByWordAndBytes(title, maxWords, remaining)
-		if len(title) > remaining {
-			title = truncateAtWordBoundary(title, remaining)
-		}
-		parts = append(parts, title)
-		remaining -= len(title)
-		usedWords += len(strings.Fields(title))
-	}
-
-	// Fit description next, truncated at last full word if needed.
-	if desc != "" && remaining > 1 && usedWords < maxWords {
-		descPart := desc
-		descPart = truncateByWordAndBytes(descPart, maxWords-usedWords, remaining-1)
-		if descPart != "" {
-			parts = append(parts, descPart)
-			remaining -= len(descPart) + 1
-			usedWords += len(strings.Fields(descPart))
-		}
-	}
-
-	// Whatever space is left goes to content.
-	if content != "" && remaining > 1 && usedWords < maxWords {
-		contentPart := content
-		contentPart = truncateByWordAndBytes(contentPart, maxWords-usedWords, remaining-1)
-		if contentPart != "" {
-			parts = append(parts, contentPart)
-		}
-	}
-
-	return strings.Join(parts, " ")
-}
-
-func embedWordBudget(maxLen int) int {
-	switch {
-	case maxLen >= 768:
-		return 120
-	case maxLen >= 512:
-		return 80
-	default:
-		return 40
-	}
-}
-
-func truncateByWordAndBytes(s string, maxWords, maxBytes int) string {
-	if s == "" || maxWords <= 0 || maxBytes <= 0 {
-		return ""
-	}
-	words := strings.Fields(s)
-	if len(words) > maxWords {
-		words = words[:maxWords]
-	}
-	joined := strings.Join(words, " ")
-	if len(joined) <= maxBytes {
-		return joined
-	}
-	return truncateAtWordBoundary(joined, maxBytes)
-}
-
-// truncateAtWordBoundary cuts s to fit within maxLen bytes without breaking
-// a word. If the first word is longer than maxLen, it falls back to a hard
-// truncation.
-func truncateAtWordBoundary(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	// Walk backwards from maxLen to find a space.
-	for i := maxLen; i > 0; i-- {
-		if s[i] == ' ' {
-			return strings.TrimSpace(s[:i])
-		}
-	}
-	// No space found — hard truncate.
-	return s[:maxLen]
-}
-
-// isContextLengthError detects if an error is due to exceeding the model's context window.
-func isContextLengthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	errStr := strings.ToLower(err.Error())
-	return strings.Contains(errStr, "context length") ||
-		strings.Contains(errStr, "input length")
-}
-
-// sanitizeEmbedText removes problematic characters and normalizes whitespace
-// to prevent tokenizer issues.
-func sanitizeEmbedText(s string) string {
-	if s == "" {
-		return ""
-	}
-	// Strip HTML tags if any slipped through.
-	s = stripHTMLTags(s)
-	// Replace control chars and excessive whitespace with single spaces.
-	var b strings.Builder
-	lastSpace := false
-	for _, r := range s {
-		if r == '\n' || r == '\r' || r == '\t' {
-			if !lastSpace {
-				b.WriteByte(' ')
-				lastSpace = true
-			}
-			continue
-		}
-		// Skip null bytes and other control characters.
-		if r < 32 {
-			continue
-		}
-		b.WriteRune(r)
-		lastSpace = false
-	}
-	clean := strings.TrimSpace(b.String())
-	if clean == "" {
-		return ""
-	}
-
-	// Remove pathological tokens that explode into many subword pieces.
-	words := strings.Fields(clean)
-	filtered := make([]string, 0, len(words))
-	for _, w := range words {
-		if shouldSkipEmbedToken(w) {
-			continue
-		}
-		if len(w) > 32 {
-			w = w[:32]
-		}
-		filtered = append(filtered, w)
-	}
-
-	return strings.Join(filtered, " ")
-}
-
-func shouldSkipEmbedToken(token string) bool {
-	lower := strings.ToLower(token)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.") {
-		return true
-	}
-	if len(token) > 96 {
-		return true
-	}
-	letters := 0
-	for _, r := range token {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			letters++
-		}
-	}
-	// Drop long mostly-non-letter blobs like hashes, query strings, base64-ish text.
-	if len(token) > 24 && letters < len(token)/4 {
-		return true
-	}
-	return false
-}
-
-// stripHTMLTags removes simple HTML tags from a string.
-func stripHTMLTags(s string) string {
-	var b strings.Builder
-	inTag := false
-	for _, r := range s {
-		if r == '<' {
-			inTag = true
-			continue
-		}
-		if r == '>' {
-			inTag = false
-			continue
-		}
-		if !inTag {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-func (e *Engine) saveEmbedding(job embedJob, vec []float32, logger *slog.Logger) {
-	ctxSave, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	emb := &storage.PageEmbedding{
-		PageID:     job.pageID,
-		Model:      e.embedder.Model(),
-		Dimensions: len(vec),
-		Embedding:  vec,
-	}
-	if err := e.store.SavePageEmbedding(ctxSave, emb); err != nil {
-		logger.Debug("embedding save failed", "url", job.pageURL, "page_id", job.pageID, "error", err)
-	}
-}
 
 // inferRegion extracts a country/region code from a domain's TLD.
 // For example: "elpais.com.uy" → "uy", "vandal.elespanol.com" → "".

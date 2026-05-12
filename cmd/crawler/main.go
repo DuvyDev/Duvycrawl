@@ -13,7 +13,6 @@ import (
 	"github.com/DuvyDev/Duvycrawl/internal/api"
 	"github.com/DuvyDev/Duvycrawl/internal/config"
 	"github.com/DuvyDev/Duvycrawl/internal/crawler"
-	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"github.com/DuvyDev/Duvycrawl/internal/frontier"
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/ratelimit"
@@ -91,13 +90,7 @@ func run() error {
 	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)
 	defer domainStats.Stop()
 
-	var embedClient *embedder.Client
-	if cfg.Embedder.Enabled {
-		embedClient = embedder.NewClient(cfg.Embedder)
-		store.WithEmbedder(embedClient)
-	}
-
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, embedClient, cfg.Rendering, logger)
+	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, cfg.Rendering, logger)
 
 	sched := scheduler.New(store, front, cfg.Crawler.Scheduler, logger)
 

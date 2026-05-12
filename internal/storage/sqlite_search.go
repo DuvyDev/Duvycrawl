@@ -107,10 +107,7 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	// --- Phase 2: Scoring ---
 	reranked := s.rerankSearchCandidates(candidates, q, lang)
 
-	// --- Phase 3: Semantic re-ranking ---
-	reranked = s.applySemanticReranking(searchCtx, reranked, q)
-
-	// --- Phase 4: Post-processing ---
+	// --- Phase 3: Post-processing ---
 	if lang != "" {
 		reranked = promoteLanguagePerDomain(reranked, lang, s.scoringCfg.SecondaryLanguage)
 	}
@@ -265,41 +262,6 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 	}
 
 	return candidates, total, nil
-}
-
-func (s *SQLiteStorage) applySemanticReranking(searchCtx context.Context, reranked []searchCandidate, q searchQuery) []searchCandidate {
-	if len(reranked) == 0 || s.embedder == nil {
-		return reranked
-	}
-
-	semanticCtx, semanticCancel := context.WithTimeout(searchCtx, 1200*time.Millisecond)
-	queryEmbedding, err := s.embedder.GenerateEmbeddingContext(semanticCtx, q.raw)
-	semanticCancel()
-	if err == nil && len(queryEmbedding) > 0 {
-		topN := min(len(reranked), 100)
-		pageIDs := make([]int64, 0, topN)
-		for i := 0; i < topN; i++ {
-			pageIDs = append(pageIDs, reranked[i].ID)
-		}
-
-		embs, err := s.GetPageEmbeddings(searchCtx, pageIDs)
-		if err == nil && len(embs) > 0 {
-			for i := 0; i < topN; i++ {
-				emb, ok := embs[reranked[i].ID]
-				if !ok || len(emb.Embedding) == 0 {
-					continue
-				}
-				sim := cosineSimilarity(queryEmbedding, emb.Embedding)
-				semanticScore := sim * 10000.0
-				oldRank := reranked[i].Rank
-				reranked[i].Rank = oldRank*0.75 + semanticScore*0.25
-			}
-			sort.SliceStable(reranked, func(i, j int) bool {
-				return reranked[i].Rank > reranked[j].Rank
-			})
-		}
-	}
-	return reranked
 }
 
 func filterAndDiversifyCandidates(reranked []searchCandidate, domain string, schemaType string) []searchCandidate {
@@ -2575,22 +2537,3 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	return results, total, nil
 }
 
-func cosineSimilarity(a, b []float32) float64 {
-	if len(a) == 0 || len(b) == 0 || len(a) != len(b) {
-		return 0
-	}
-
-	var dot, normA, normB float64
-	for i := range a {
-		va := float64(a[i])
-		vb := float64(b[i])
-		dot += va * vb
-		normA += va * va
-		normB += vb * vb
-	}
-
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
-}

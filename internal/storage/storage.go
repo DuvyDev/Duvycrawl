@@ -63,10 +63,6 @@ type Storage interface {
 	// more recently than the given TTL. Used to skip recently-indexed URLs.
 	GetFreshURLs(ctx context.Context, urls []string, newerThan time.Time) (map[string]struct{}, error)
 
-	// ListPagesWithoutEmbeddings returns pages that do not yet have a stored
-	// embedding, ordered by ID for incremental backfill.
-	ListPagesWithoutEmbeddings(ctx context.Context, afterID int64, limit int) ([]Page, error)
-
 	// --- Crawl Queue Operations ---
 
 	// EnqueueURL adds a single URL to the crawl queue if it doesn't already exist.
@@ -163,17 +159,6 @@ type Storage interface {
 
 	// RecordClick records a user interaction with a search result to improve future rankings.
 	RecordClick(ctx context.Context, query string, url string) error
-
-	// --- Embeddings ---
-
-	// SavePageEmbedding stores a vector embedding for a crawled page.
-	SavePageEmbedding(ctx context.Context, emb *PageEmbedding) error
-
-	// GetPageEmbeddings returns embeddings for the given page IDs.
-	GetPageEmbeddings(ctx context.Context, pageIDs []int64) (map[int64]*PageEmbedding, error)
-
-	// GetEmbeddingStats returns statistics about the embedding index.
-	GetEmbeddingStats(ctx context.Context) (totalPages, embeddedPages, avgDimensions int, model string, err error)
 
 	// --- Adaptive Scoring / Interest Profile ---
 

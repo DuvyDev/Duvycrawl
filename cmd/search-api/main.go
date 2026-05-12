@@ -12,7 +12,6 @@ import (
 
 	"github.com/DuvyDev/Duvycrawl/internal/api"
 	"github.com/DuvyDev/Duvycrawl/internal/config"
-	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"github.com/DuvyDev/Duvycrawl/internal/storage"
 )
 
@@ -55,13 +54,6 @@ func run() error {
 		SecondaryLanguage:      cfg.Scoring.SecondaryLanguage,
 	})
 	defer store.Close()
-
-	// Initialize Ollama embedder for semantic search
-	var embedClient *embedder.Client
-	if cfg.Embedder.Enabled {
-		embedClient = embedder.NewClient(cfg.Embedder)
-		store.WithEmbedder(embedClient)
-	}
 
 	// Create API server without Crawler Engine and Frontier
 	apiServer := api.NewServer(&cfg.API, store, nil, nil, api.ModeSearch, logger)

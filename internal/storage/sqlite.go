@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/DuvyDev/Duvycrawl/internal/embedder"
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -46,7 +45,6 @@ type SQLiteStorage struct {
 	graphDB         *sql.DB
 	logger          *slog.Logger
 	dataDir         string
-	embedder        *embedder.Client
 	siteTypes       map[string]struct{}
 	platformDomains map[string]struct{}
 	spellChecker    *SpellChecker
@@ -381,11 +379,6 @@ func (s *SQLiteStorage) GraphDB() *sql.DB {
 	return s.graphDB
 }
 
-// WithEmbedder attaches an Ollama embedding client for semantic search.
-func (s *SQLiteStorage) WithEmbedder(client *embedder.Client) *SQLiteStorage {
-	s.embedder = client
-	return s
-}
 
 // WithSearchIntents configures the dictionaries for navigational search intent extraction.
 func (s *SQLiteStorage) WithSearchIntents(siteTypes, platformDomains []string) *SQLiteStorage {
