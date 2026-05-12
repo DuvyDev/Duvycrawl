@@ -167,17 +167,6 @@ var contentMigrations = []string{
         last_updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
 
-	// --- Phase 5: Semantic Embeddings for AI Re-ranking ---
-	`CREATE TABLE IF NOT EXISTS page_embeddings (
-        page_id INTEGER PRIMARY KEY,
-        model TEXT NOT NULL DEFAULT 'all-minilm',
-        dimensions INTEGER NOT NULL DEFAULT 384,
-        embedding BLOB NOT NULL,
-        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE
-    )`,
-	`CREATE INDEX IF NOT EXISTS idx_embeddings_model ON page_embeddings(model)`,
-
 	// --- Discovered resources (non-HTML assets crawled for link discovery only) ---
 	`CREATE TABLE IF NOT EXISTS discovered_resources (
 		id              INTEGER PRIMARY KEY AUTOINCREMENT,

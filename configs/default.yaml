@@ -156,16 +156,6 @@ logging:
   # Log format: text (human-readable) or json (machine-readable)
   format: "text"
 
-embedder:
-  # Enable or disable semantic embeddings generation and search re-ranking.
-  # Set to true only if you have Ollama running and the model pulled.
-  enabled: true
-  # Base URL for the Ollama embeddings API
-  url: "http://localhost:11434"
-  # The semantic embedding model to use
-  model: "all-minilm:l6-v2"
-  # Number of concurrent workers sending documents to Ollama
-  workers: 2
 
 search_intents:
   site_types: ["wiki", "blog", "docs", "forum", "forums", "foro", "tienda", "store", "info", "guia", "guias", "guide", "guides", "noticias", "news", "comunidad", "community", "api", "documentacion", "documentation", "soporte", "support", "ayuda", "help", "portal", "hub", "status"]

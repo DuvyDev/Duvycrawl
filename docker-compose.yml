@@ -35,18 +35,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # ─── Ollama ───────────────────────────────
-  ollama:
-    image: ollama/ollama
-    container_name: ollama
-    restart: always
-    ports:
-      - 11434:11434
-    volumes:
-      - ./ollama:/root/.ollama
-    networks:
-      - duvycrawl
-
 
   # ─── API Service ──────────────────────────
   duvycrawl-api:

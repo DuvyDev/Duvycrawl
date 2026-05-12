@@ -1,7 +1,7 @@
 # Configuration
 
 Duvycrawl is configured via YAML:
-- **YAML** (`configs/default.yaml`): crawler behavior, proxy, rendering, storage, API, logging, seeds, and embeddings.
+- **YAML** (`configs/default.yaml`): crawler behavior, proxy, rendering, storage, API, logging, and seeds.
 - **`.env` file**: compose/deployment values for surrounding services such as Cloudflare Tunnel or the search UI.
 
 ---

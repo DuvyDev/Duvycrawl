@@ -51,7 +51,6 @@ func NewServer(
 
 	// Stats is always registered (response differs by mode).
 	mux.HandleFunc("GET /api/v1/stats", handlers.GetStats)
-	mux.HandleFunc("GET /api/v1/stats/embeddings", handlers.GetEmbeddingStats)
 
 	switch mode {
 	case ModeSearch:
