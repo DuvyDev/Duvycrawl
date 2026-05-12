@@ -1358,7 +1358,7 @@ func applyPlatformIntentBoosts(candidate searchCandidate, query searchQuery, dom
 			}
 
 			if len(query.tokens) > 0 {
-				urlAvg, _, _, _ := searchTokenCoverage(query.tokens, urlTokens)
+				urlAvg, _, _, _ := searchTokenCoverage(query.tokens, urlTokens, query.idfMap)
 				if urlAvg > 0 {
 					boost += 3000.0 * urlAvg
 				}
@@ -1477,12 +1477,12 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 	score += 260.0*domainPhrase + 90.0*urlPhrase
 
 	// Token coverage (what fraction of query tokens appear in each field)
-	titleAvg, titleCoverage, titleExact, titleMatched := searchTokenCoverage(query.tokens, titleTokens)
-	h1Avg, h1Coverage, _, h1Matched := searchTokenCoverage(query.tokens, h1Tokens)
-	h2Avg, h2Coverage, _, h2Matched := searchTokenCoverage(query.tokens, h2Tokens)
-	descAvg, descCoverage, _, descMatched := searchTokenCoverage(query.tokens, descTokens)
-	domainAvg, domainCoverage, _, _ := searchTokenCoverage(query.tokens, domainTokens)
-	urlAvg, urlCoverage, _, urlMatched := searchTokenCoverage(query.tokens, urlTokens)
+	titleAvg, titleCoverage, titleExact, titleMatched := searchTokenCoverage(query.tokens, titleTokens, query.idfMap)
+	h1Avg, h1Coverage, _, h1Matched := searchTokenCoverage(query.tokens, h1Tokens, query.idfMap)
+	h2Avg, h2Coverage, _, h2Matched := searchTokenCoverage(query.tokens, h2Tokens, query.idfMap)
+	descAvg, descCoverage, _, descMatched := searchTokenCoverage(query.tokens, descTokens, query.idfMap)
+	domainAvg, domainCoverage, _, _ := searchTokenCoverage(query.tokens, domainTokens, query.idfMap)
+	urlAvg, urlCoverage, _, urlMatched := searchTokenCoverage(query.tokens, urlTokens, query.idfMap)
 
 	// Weighted average across fields (title matters most)
 	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + 2.0*descAvg) / 9.0
@@ -1505,14 +1505,20 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 	// across all metadata fields, penalize it. Derived from per-field matchedFlags
 	// already computed by searchTokenCoverage above — no redundant scanning.
 	if len(query.tokens) >= 2 {
-		totalMatched := 0
-		for i := range query.tokens {
+		matchedWeight := 0.0
+		totalWeight := 0.0
+		for i, tok := range query.tokens {
+			w := 1.0
+			if val, ok := query.idfMap[tok]; ok && val > 0 {
+				w = val
+			}
+			totalWeight += w
 			if titleMatched[i] || h1Matched[i] || h2Matched[i] || descMatched[i] || urlMatched[i] {
-				totalMatched++
+				matchedWeight += w
 			}
 		}
 
-		coverageRatio := float64(totalMatched) / float64(len(query.tokens))
+		coverageRatio := matchedWeight / totalWeight
 		if coverageRatio < 0.5 {
 			isGovOrEdu := strings.HasSuffix(urlDomain, ".gub.uy") ||
 				strings.HasSuffix(urlDomain, ".gov.uy") ||
@@ -2017,15 +2023,24 @@ func isLanguagePathSegment(segment string) bool {
 // Phrase & token scoring utilities
 // ---------------------------------------------------------------------------
 
-func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, coverage float64, exactMatches int, matchedFlags []bool) {
+func searchTokenCoverage(queryTokens, fieldTokens []string, idfMap map[string]float64) (avg float64, coverage float64, exactMatches int, matchedFlags []bool) {
 	matchedFlags = make([]bool, len(queryTokens))
 	if len(queryTokens) == 0 || len(fieldTokens) == 0 {
 		return 0, 0, 0, matchedFlags
 	}
 
-	matched := 0
-	total := 0.0
+	totalSim := 0.0
+	totalWeight := 0.0
+	matchedWeight := 0.0
 	for i, queryToken := range queryTokens {
+		w := 1.0
+		if idfMap != nil {
+			if val, ok := idfMap[queryToken]; ok && val > 0 {
+				w = val
+			}
+		}
+		totalWeight += w
+
 		best := 0.0
 		for _, fieldToken := range fieldTokens {
 			similarity := searchTokenSimilarity(queryToken, fieldToken)
@@ -2033,9 +2048,9 @@ func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, covera
 				best = similarity
 			}
 		}
-		total += best
+		totalSim += best * w
 		if best >= 0.72 {
-			matched++
+			matchedWeight += w
 			matchedFlags[i] = true
 		}
 		if best == 1.0 {
@@ -2043,7 +2058,7 @@ func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, covera
 		}
 	}
 
-	return total / float64(len(queryTokens)), float64(matched) / float64(len(queryTokens)), exactMatches, matchedFlags
+	return totalSim / totalWeight, matchedWeight / totalWeight, exactMatches, matchedFlags
 }
 
 func searchTokenSimilarity(queryToken, fieldToken string) float64 {
