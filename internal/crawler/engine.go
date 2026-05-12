@@ -775,7 +775,6 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen]
 }
 
-
 // inferRegion extracts a country/region code from a domain's TLD.
 // For example: "elpais.com.uy" → "uy", "vandal.elespanol.com" → "".
 func inferRegion(domain string) string {

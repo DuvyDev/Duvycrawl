@@ -2069,7 +2069,7 @@ func normalizedEditSimilarity(a, b string) float64 {
 	}
 	ar := []rune(a)
 	br := []rune(b)
-	
+
 	maxLen := len(ar)
 	if len(br) > maxLen {
 		maxLen = len(br)
@@ -2100,7 +2100,7 @@ func damerauLevenshteinDistanceRunes(ar, br []rune) int {
 	// Use a flat 1D slice instead of [][]int to eliminate slice header allocations
 	// and drastically reduce garbage collection pressure.
 	dp := make([]int, rows*cols)
-	
+
 	for i := 0; i < rows; i++ {
 		dp[i*cols] = i
 	}
@@ -2126,7 +2126,7 @@ func damerauLevenshteinDistanceRunes(ar, br []rune) int {
 			if sub < m {
 				m = sub
 			}
-			
+
 			dp[i*cols+j] = m
 
 			if i > 1 && j > 1 && ar[i-1] == br[j-2] && ar[i-2] == br[j-1] {
@@ -2422,11 +2422,11 @@ func mergeSearchCandidates(groups ...[]searchCandidate) []searchCandidate {
 	for _, candidate := range merged {
 		results = append(results, candidate)
 	}
-	
+
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].ID < results[j].ID
 	})
-	
+
 	return results
 }
 
@@ -2536,4 +2536,3 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 
 	return results, total, nil
 }
-

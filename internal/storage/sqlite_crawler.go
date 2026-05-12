@@ -263,7 +263,6 @@ func (s *SQLiteStorage) GetFreshURLs(ctx context.Context, urls []string, newerTh
 	return fresh, rows.Err()
 }
 
-
 // --------------------------------------------------------------------------
 // Crawl Queue Operations
 // --------------------------------------------------------------------------
@@ -1191,4 +1190,3 @@ func (s *SQLiteStorage) GetBacklinkCount(ctx context.Context, targetURL string) 
 	}
 	return count, nil
 }
-

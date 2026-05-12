@@ -379,7 +379,6 @@ func (s *SQLiteStorage) GraphDB() *sql.DB {
 	return s.graphDB
 }
 
-
 // WithSearchIntents configures the dictionaries for navigational search intent extraction.
 func (s *SQLiteStorage) WithSearchIntents(siteTypes, platformDomains []string) *SQLiteStorage {
 	s.siteTypes = make(map[string]struct{}, len(siteTypes))

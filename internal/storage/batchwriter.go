@@ -24,11 +24,11 @@ type BatchWriter struct {
 	graphDB        *sql.DB
 	logger         *slog.Logger
 
-	mu               sync.Mutex
-	pages            []*Page
-	links            map[string][]OutgoingLink // sourceURL → links
-	images           []ImageRecord
-	flushErr         error // last flush error, cleared on successful flush
+	mu       sync.Mutex
+	pages    []*Page
+	links    map[string][]OutgoingLink // sourceURL → links
+	images   []ImageRecord
+	flushErr error // last flush error, cleared on successful flush
 
 	maxPages      int
 	maxLinks      int
