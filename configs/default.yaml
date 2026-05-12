@@ -60,6 +60,11 @@ crawler:
   # Subdomains are handled automatically (e.g., "wikipedia.org" covers "es.wikipedia.org").
   no_follow_domains:
     - "wikipedia.org"
+  # Domains that are completely blocked: never visited, never indexed.
+  # On startup, any existing data for these domains is purged from all databases.
+  # Subdomain matching: "example.com" blocks all subdomains too.
+  # "sub.example.com" blocks only that specific subdomain.
+  blacklisted_domains: []
   # Scoring strategy for the URL frontier.
   #   static   — legacy priority-based (BFS-like)
   #   adaptive — A*-like best-first that learns from your searches and clicks

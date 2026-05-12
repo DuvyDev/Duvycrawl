@@ -116,6 +116,12 @@ type CrawlerConfig struct {
 	// is allowed to index, but will NOT extract or enqueue outgoing links from.
 	// This treats the domain as a "leaf node" to prevent getting stuck in massive sites.
 	NoFollowDomains []string `yaml:"no_follow_domains"`
+	// BlacklistedDomains is a list of domains that are completely blocked:
+	// never visited, never indexed, never enqueued. On startup, any existing
+	// data for these domains is purged from all databases.
+	// Subdomain matching: "example.com" blocks all subdomains too;
+	// "sub.example.com" blocks only that specific subdomain.
+	BlacklistedDomains []string `yaml:"blacklisted_domains"`
 	// ScoringStrategy selects the frontier scoring algorithm:
 	// "static"  — legacy priority-based behaviour (default)
 	// "adaptive" — A*-like best-first that learns from searches and clicks
@@ -244,7 +250,8 @@ func DefaultConfig() *Config {
 			NoFollowDomains: []string{
 				"wikipedia.org",
 			},
-			ScoringStrategy: "adaptive",
+			BlacklistedDomains: nil,
+			ScoringStrategy:    "adaptive",
 			Adaptive: AdaptiveConfig{
 				MinQueriesBeforeBoost:  3,
 				DepthPenaltyK:          12.0,

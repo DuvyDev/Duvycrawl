@@ -16,8 +16,8 @@ const defaultThrottleCooldown = 30 * time.Second
 
 // domainState holds the per-domain rate-limiting semaphore.
 type domainState struct {
-	semaphore     chan struct{} // buffered channel; capacity = max parallelism
-	throttledUntil time.Time   // if non-zero, domain is in 429 cooldown
+	semaphore      chan struct{} // buffered channel; capacity = max parallelism
+	throttledUntil time.Time     // if non-zero, domain is in 429 cooldown
 }
 
 // DomainLimiter enforces rate limits per domain using semaphores.

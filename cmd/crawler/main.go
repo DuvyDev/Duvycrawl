@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/DuvyDev/Duvycrawl/internal/api"
@@ -80,7 +81,11 @@ func run() error {
 
 	// --- Initialize Components ---
 	crawlQueue := queue.New()
-	front := frontier.New(crawlQueue, store, scoringEngine, logger)
+	blacklistedDomains := make(map[string]struct{}, len(cfg.Crawler.BlacklistedDomains))
+	for _, d := range cfg.Crawler.BlacklistedDomains {
+		blacklistedDomains[strings.ToLower(d)] = struct{}{}
+	}
+	front := frontier.New(crawlQueue, store, scoringEngine, blacklistedDomains, logger)
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
@@ -90,7 +95,7 @@ func run() error {
 	domainStats := crawler.NewDomainStatsCollector(store, cfg.Crawler.DomainStatsFlushInterval, logger)
 	defer domainStats.Stop()
 
-	engine := crawler.NewEngine(&cfg.Crawler, store, batchWriter, front, limiter, domainStats, cfg.Rendering, logger)
+	engine := crawler.NewEngine(ctx, &cfg.Crawler, store, batchWriter, front, limiter, domainStats, cfg.Rendering, logger)
 
 	sched := scheduler.New(store, front, cfg.Crawler.Scheduler, logger)
 

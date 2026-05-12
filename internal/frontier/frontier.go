@@ -30,21 +30,41 @@ type LinkContext struct {
 // Frontier manages the URL crawl queue, providing deduplication and
 // priority-based dispatching of URLs to crawler workers.
 type Frontier struct {
-	queue  *queue.Queue
-	store  storage.Storage
-	scorer scorer.Scorer
-	logger *slog.Logger
+	queue              *queue.Queue
+	store              storage.Storage
+	scorer             scorer.Scorer
+	blacklistedDomains map[string]struct{}
+	logger             *slog.Logger
 }
 
 // New creates a new Frontier backed by the given in-memory queue,
 // storage (used for checking already-crawled pages), and scorer.
-func New(q *queue.Queue, store storage.Storage, sc scorer.Scorer, logger *slog.Logger) *Frontier {
+func New(q *queue.Queue, store storage.Storage, sc scorer.Scorer, blacklistedDomains map[string]struct{}, logger *slog.Logger) *Frontier {
 	return &Frontier{
-		queue:  q,
-		store:  store,
-		scorer: sc,
-		logger: logger.With("component", "frontier"),
+		queue:              q,
+		store:              store,
+		scorer:             sc,
+		blacklistedDomains: blacklistedDomains,
+		logger:             logger.With("component", "frontier"),
 	}
+}
+
+// isBlacklistedDomain returns true if the domain or any of its parent domains
+// is in the blacklist. E.g. if "example.com" is blacklisted, "sub.example.com"
+// is also blocked, but "other.com" is not.
+func (f *Frontier) isBlacklistedDomain(domain string) bool {
+	d := domain
+	for {
+		if _, exists := f.blacklistedDomains[d]; exists {
+			return true
+		}
+		idx := strings.IndexByte(d, '.')
+		if idx == -1 {
+			break
+		}
+		d = d[idx+1:]
+	}
+	return false
 }
 
 // Add enqueues a single URL for crawling with the given depth.
@@ -56,6 +76,9 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth int, baseScore 
 		return nil // Silently ignore unparseable URLs.
 	}
 	if urlfilter.IsNonIndexableDocumentURL(normalized) {
+		return nil
+	}
+	if f.isBlacklistedDomain(domain) {
 		return nil
 	}
 
@@ -130,6 +153,9 @@ func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int,
 			continue
 		}
 		if urlfilter.IsNonIndexableDocumentURL(normalized) {
+			continue
+		}
+		if f.isBlacklistedDomain(domain) {
 			continue
 		}
 
@@ -219,6 +245,9 @@ func (f *Frontier) AddBatchDirect(ctx context.Context, rawURLs []string, depth i
 			continue
 		}
 		if urlfilter.IsNonIndexableDocumentURL(normalized) {
+			continue
+		}
+		if f.isBlacklistedDomain(domain) {
 			continue
 		}
 

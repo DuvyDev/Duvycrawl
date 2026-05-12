@@ -338,6 +338,214 @@ func (s *SQLiteStorage) PurgeOldPages(ctx context.Context, olderThan time.Time) 
 	return result.RowsAffected()
 }
 
+// PurgeBlacklistedDomains removes all data for the given domains from all 3 databases.
+// For each domain d, it matches both exact (domain = d) and subdomains (domain LIKE '%.d').
+// Returns total rows affected across all tables.
+func (s *SQLiteStorage) PurgeBlacklistedDomains(ctx context.Context, domains []string) (int64, error) {
+	if len(domains) == 0 {
+		return 0, nil
+	}
+
+	var totalAffected int64
+
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		subdomainPattern := "%." + d
+
+		affected, err := s.purgeDomainFromContentDB(ctx, d, subdomainPattern)
+		if err != nil {
+			return totalAffected, fmt.Errorf("purging domain %q from content DB: %w", d, err)
+		}
+		totalAffected += affected
+
+		affected, err = s.purgeDomainFromCrawlerDB(ctx, d, subdomainPattern)
+		if err != nil {
+			return totalAffected, fmt.Errorf("purging domain %q from crawler DB: %w", d, err)
+		}
+		totalAffected += affected
+
+		affected, err = s.purgeDomainFromGraphDB(ctx, d, subdomainPattern)
+		if err != nil {
+			return totalAffected, fmt.Errorf("purging domain %q from graph DB: %w", d, err)
+		}
+		totalAffected += affected
+	}
+
+	if totalAffected > 0 {
+		s.logger.Info("purged blacklisted domains", "domains", domains, "rows_affected", totalAffected)
+	}
+
+	return totalAffected, nil
+}
+
+func (s *SQLiteStorage) purgeDomainFromContentDB(ctx context.Context, domain, subdomainPattern string) (int64, error) {
+	var total int64
+
+	// 1. search_clicks — must be deleted BEFORE pages (no domain column, uses url)
+	clicksResult, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM search_clicks
+		WHERE url IN (SELECT url FROM pages WHERE domain = ? OR domain LIKE ?)
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging search_clicks: %w", err)
+	}
+	if n, _ := clicksResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 2. images — has domain column
+	imgResult, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM images WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging images: %w", err)
+	}
+	if n, _ := imgResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 3. domain_relevance — has domain column
+	drResult, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM domain_relevance WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging domain_relevance: %w", err)
+	}
+	if n, _ := drResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 4. discovered_resources — no domain column, match by URL pattern
+	// URLs look like "https://sub.example.com/path"
+	httpPattern := "http://%." + domain + "/%"
+	httpPattern2 := "http://" + domain + "/%"
+	drDiscResult, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM discovered_resources
+		WHERE url LIKE ? OR url LIKE ?
+	`, httpPattern, httpPattern2)
+	if err != nil {
+		return total, fmt.Errorf("purging discovered_resources: %w", err)
+	}
+	if n, _ := drDiscResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 5. pages — FTS5 triggers handle pages_fts automatically
+	pagesResult, err := s.writeContentDB.ExecContext(ctx, `
+		DELETE FROM pages WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging pages: %w", err)
+	}
+	if n, _ := pagesResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	return total, nil
+}
+
+func (s *SQLiteStorage) purgeDomainFromCrawlerDB(ctx context.Context, domain, subdomainPattern string) (int64, error) {
+	var total int64
+
+	// 1. crawl_queue
+	cqResult, err := s.crawlerDB.ExecContext(ctx, `
+		DELETE FROM crawl_queue WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging crawl_queue: %w", err)
+	}
+	if n, _ := cqResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 2. domains
+	dResult, err := s.crawlerDB.ExecContext(ctx, `
+		DELETE FROM domains WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging domains: %w", err)
+	}
+	if n, _ := dResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	// 3. seed_urls
+	suResult, err := s.crawlerDB.ExecContext(ctx, `
+		DELETE FROM seed_urls WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return total, fmt.Errorf("purging seed_urls: %w", err)
+	}
+	if n, _ := suResult.RowsAffected(); n > 0 {
+		total += n
+	}
+
+	return total, nil
+}
+
+func (s *SQLiteStorage) purgeDomainFromGraphDB(ctx context.Context, domain, subdomainPattern string) (int64, error) {
+	// links table has no domain column — uses source_id which references pages.id.
+	// We need to cross-reference with content.db.
+	// Strategy: ATTACH content.db to graph.db, delete links where source_id
+	// references a blacklisted domain, then DETACH.
+
+	// First, collect page IDs for this domain from content.db.
+	rows, err := s.writeContentDB.QueryContext(ctx, `
+		SELECT id FROM pages WHERE domain = ? OR domain LIKE ?
+	`, domain, subdomainPattern)
+	if err != nil {
+		return 0, fmt.Errorf("querying page IDs for graph purge: %w", err)
+	}
+	defer rows.Close()
+
+	var pageIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, fmt.Errorf("scanning page ID: %w", err)
+		}
+		pageIDs = append(pageIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterating page IDs: %w", err)
+	}
+
+	if len(pageIDs) == 0 {
+		return 0, nil
+	}
+
+	// Delete links in batches to avoid SQLite variable limit (999).
+	var total int64
+	const batchSize = 500
+	for i := 0; i < len(pageIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(pageIDs) {
+			end = len(pageIDs)
+		}
+		batch := pageIDs[i:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for j, id := range batch {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+		query := fmt.Sprintf("DELETE FROM links WHERE source_id IN (%s)", strings.Join(placeholders, ","))
+		result, err := s.graphDB.ExecContext(ctx, query, args...)
+		if err != nil {
+			return total, fmt.Errorf("purging links batch: %w", err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			total += n
+		}
+	}
+
+	return total, nil
+}
+
 // ResetStalledJobs resets jobs stuck in in_progress back to pending.
 func (s *SQLiteStorage) ResetStalledJobs(ctx context.Context, stalledAfter time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-stalledAfter)

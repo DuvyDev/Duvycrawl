@@ -151,6 +151,11 @@ type Storage interface {
 	// back to pending, so they can be retried.
 	ResetStalledJobs(ctx context.Context, stalledAfter time.Duration) (int64, error)
 
+	// PurgeBlacklistedDomains removes all data associated with the given domains
+	// from all databases (content, crawler, graph). Each domain is matched
+	// exactly or as a suffix (e.g. "example.com" matches "sub.example.com").
+	PurgeBlacklistedDomains(ctx context.Context, domains []string) (int64, error)
+
 	// Vacuum runs SQLite's VACUUM command to reclaim disk space.
 	Vacuum(ctx context.Context) error
 

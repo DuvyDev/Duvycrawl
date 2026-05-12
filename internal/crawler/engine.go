@@ -55,7 +55,8 @@ type Engine struct {
 	domainStats  *DomainStatsCollector
 	logger       *slog.Logger
 
-	noFollowDomains map[string]struct{}
+	noFollowDomains    map[string]struct{}
+	blacklistedDomains map[string]struct{}
 
 	status  atomic.Value // EngineStatus
 	cancel  context.CancelFunc
@@ -72,6 +73,7 @@ type Engine struct {
 
 // NewEngine creates a new crawler engine wired with all its dependencies.
 func NewEngine(
+	ctx context.Context,
 	cfg *config.CrawlerConfig,
 	store storage.Storage,
 	batchWriter *storage.BatchWriter,
@@ -101,25 +103,44 @@ func NewEngine(
 	}
 
 	e := &Engine{
-		cfg:             cfg,
-		store:           store,
-		batchWriter:     batchWriter,
-		frontier:        front,
-		proxyManager:    pm,
-		fetcher:         NewFetcher(cfg.UserAgent, cfg.MaxPageSizeKB, cfg.MaxRetries, pm, logger),
-		renderingCfg:    renderingCfg,
-		renderer:        browserRenderer,
-		parser:          NewParser(),
-		robots:          NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
-		limiter:         limiter,
-		domainStats:     domainStats,
-		logger:          logger.With("component", "engine"),
-		renderQueued:    make(map[string]struct{}),
-		noFollowDomains: make(map[string]struct{}, len(cfg.NoFollowDomains)),
+		cfg:                cfg,
+		store:              store,
+		batchWriter:        batchWriter,
+		frontier:           front,
+		proxyManager:       pm,
+		fetcher:            NewFetcher(cfg.UserAgent, cfg.MaxPageSizeKB, cfg.MaxRetries, pm, logger),
+		renderingCfg:       renderingCfg,
+		renderer:           browserRenderer,
+		parser:             NewParser(),
+		robots:             NewRobotsCache(cfg.UserAgent, 24*time.Hour, logger),
+		limiter:            limiter,
+		domainStats:        domainStats,
+		logger:             logger.With("component", "engine"),
+		renderQueued:       make(map[string]struct{}),
+		noFollowDomains:    make(map[string]struct{}, len(cfg.NoFollowDomains)),
+		blacklistedDomains: make(map[string]struct{}, len(cfg.BlacklistedDomains)),
 	}
 	for _, d := range cfg.NoFollowDomains {
 		e.noFollowDomains[strings.ToLower(d)] = struct{}{}
 	}
+	for _, d := range cfg.BlacklistedDomains {
+		e.blacklistedDomains[strings.ToLower(d)] = struct{}{}
+	}
+
+	// Purge any existing data for blacklisted domains from all databases.
+	if len(e.blacklistedDomains) > 0 {
+		domains := make([]string, 0, len(e.blacklistedDomains))
+		for d := range e.blacklistedDomains {
+			domains = append(domains, d)
+		}
+		purged, err := e.store.PurgeBlacklistedDomains(ctx, domains)
+		if err != nil {
+			e.logger.Error("failed to purge blacklisted domains", "error", err)
+		} else if purged > 0 {
+			e.logger.Info("purged existing data for blacklisted domains", "domains", domains, "rows_affected", purged)
+		}
+	}
+
 	e.status.Store(StatusIdle)
 	return e
 }
@@ -235,6 +256,23 @@ func (e *Engine) isNoFollowDomain(domain string) bool {
 	return false
 }
 
+// isBlacklistedDomain returns true if the domain or any of its parent domains
+// is in the blacklist. Blacklisted domains are never visited or indexed.
+func (e *Engine) isBlacklistedDomain(domain string) bool {
+	d := domain
+	for {
+		if _, exists := e.blacklistedDomains[d]; exists {
+			return true
+		}
+		idx := strings.IndexByte(d, '.')
+		if idx == -1 {
+			break
+		}
+		d = d[idx+1:]
+	}
+	return false
+}
+
 // RenderBacklogLen returns the number of URLs waiting in the browser render backlog.
 func (e *Engine) RenderBacklogLen() int {
 	e.renderMu.Lock()
@@ -318,6 +356,10 @@ func (e *Engine) processJob(ctx context.Context, logger *slog.Logger, job *queue
 	)
 	if urlfilter.IsNonIndexableDocumentURL(job.URL) {
 		logger.Debug("skipping non-indexable URL")
+		return
+	}
+	if e.isBlacklistedDomain(job.Domain) {
+		logger.Debug("skipping blacklisted domain")
 		return
 	}
 
