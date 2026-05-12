@@ -237,14 +237,6 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		}
 	}
 
-	// --- Navigational fallback ---
-	if q.intent == intentNavigational && len(candidates) < 30 {
-		navCandidates, err := s.searchNavigationalCandidates(searchCtx, q, lang, min(candidateLimit, 60))
-		if err == nil {
-			candidates = mergeSearchCandidates(candidates, navCandidates)
-		}
-	}
-
 	// --- Platform diversity injection ---
 	if q.platformIntent != "" && searchCtx.Err() == nil {
 		diversityLimit := min(candidateLimit/3, 100)
@@ -1366,7 +1358,7 @@ func applyPlatformIntentBoosts(candidate searchCandidate, query searchQuery, dom
 			}
 
 			if len(query.tokens) > 0 {
-				urlAvg, _, _ := searchTokenCoverage(query.tokens, urlTokens)
+				urlAvg, _, _, _ := searchTokenCoverage(query.tokens, urlTokens)
 				if urlAvg > 0 {
 					boost += 3000.0 * urlAvg
 				}
@@ -1485,12 +1477,12 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 	score += 260.0*domainPhrase + 90.0*urlPhrase
 
 	// Token coverage (what fraction of query tokens appear in each field)
-	titleAvg, titleCoverage, titleExact := searchTokenCoverage(query.tokens, titleTokens)
-	h1Avg, h1Coverage, _ := searchTokenCoverage(query.tokens, h1Tokens)
-	h2Avg, h2Coverage, _ := searchTokenCoverage(query.tokens, h2Tokens)
-	descAvg, descCoverage, _ := searchTokenCoverage(query.tokens, descTokens)
-	domainAvg, domainCoverage, _ := searchTokenCoverage(query.tokens, domainTokens)
-	urlAvg, urlCoverage, _ := searchTokenCoverage(query.tokens, urlTokens)
+	titleAvg, titleCoverage, titleExact, titleMatched := searchTokenCoverage(query.tokens, titleTokens)
+	h1Avg, h1Coverage, _, h1Matched := searchTokenCoverage(query.tokens, h1Tokens)
+	h2Avg, h2Coverage, _, h2Matched := searchTokenCoverage(query.tokens, h2Tokens)
+	descAvg, descCoverage, _, descMatched := searchTokenCoverage(query.tokens, descTokens)
+	domainAvg, domainCoverage, _, _ := searchTokenCoverage(query.tokens, domainTokens)
+	urlAvg, urlCoverage, _, urlMatched := searchTokenCoverage(query.tokens, urlTokens)
 
 	// Weighted average across fields (title matters most)
 	weightedFieldAvg := (3.0*titleAvg + 2.0*h1Avg + 2.0*h2Avg + 2.0*descAvg) / 9.0
@@ -1509,71 +1501,28 @@ func scoreContentRelevance(query searchQuery, titleNorm string, titleTokens []st
 		score += 180.0
 	}
 
-	// Content coverage penalty: if the page only matches 1 out of N query tokens
-	// in title+h1+h2+description combined, heavily penalize it.
-	// This prevents pages that only match "uruguay" from ranking for "patente uruguay".
+	// Content coverage penalty: if the page only matches a fraction of query tokens
+	// across all metadata fields, penalize it. Derived from per-field matchedFlags
+	// already computed by searchTokenCoverage above — no redundant scanning.
 	if len(query.tokens) >= 2 {
 		totalMatched := 0
-		for _, qt := range query.tokens {
-			matched := false
-			for _, tt := range titleTokens {
-				if searchTokenSimilarity(qt, tt) >= 0.72 {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				for _, tt := range h1Tokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range h2Tokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range descTokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if !matched {
-				for _, tt := range urlTokens {
-					if searchTokenSimilarity(qt, tt) >= 0.72 {
-						matched = true
-						break
-					}
-				}
-			}
-			if matched {
+		for i := range query.tokens {
+			if titleMatched[i] || h1Matched[i] || h2Matched[i] || descMatched[i] || urlMatched[i] {
 				totalMatched++
 			}
 		}
 
 		coverageRatio := float64(totalMatched) / float64(len(query.tokens))
 		if coverageRatio < 0.5 {
-			// For government/educational domains, apply a softer penalty —
-			// their body content is often relevant even if metadata is minimal.
 			isGovOrEdu := strings.HasSuffix(urlDomain, ".gub.uy") ||
 				strings.HasSuffix(urlDomain, ".gov.uy") ||
 				strings.Contains(urlDomain, ".gub.") ||
 				strings.Contains(urlDomain, ".gov.")
 
 			if isGovOrEdu {
-				// Softer penalty for gov domains
-				score *= 0.75 + coverageRatio*0.25 // e.g., 0.33 coverage → score *= 0.83
+				score *= 0.75 + coverageRatio*0.25
 			} else {
-				// Heavy penalty for non-gov domains
-				score *= coverageRatio * 2.0 // e.g., 0.25 coverage → score *= 0.5
+				score *= coverageRatio * 2.0
 			}
 		}
 	}
@@ -2068,14 +2017,15 @@ func isLanguagePathSegment(segment string) bool {
 // Phrase & token scoring utilities
 // ---------------------------------------------------------------------------
 
-func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, coverage float64, exactMatches int) {
+func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, coverage float64, exactMatches int, matchedFlags []bool) {
+	matchedFlags = make([]bool, len(queryTokens))
 	if len(queryTokens) == 0 || len(fieldTokens) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, matchedFlags
 	}
 
 	matched := 0
 	total := 0.0
-	for _, queryToken := range queryTokens {
+	for i, queryToken := range queryTokens {
 		best := 0.0
 		for _, fieldToken := range fieldTokens {
 			similarity := searchTokenSimilarity(queryToken, fieldToken)
@@ -2086,13 +2036,14 @@ func searchTokenCoverage(queryTokens, fieldTokens []string) (avg float64, covera
 		total += best
 		if best >= 0.72 {
 			matched++
+			matchedFlags[i] = true
 		}
 		if best == 1.0 {
 			exactMatches++
 		}
 	}
 
-	return total / float64(len(queryTokens)), float64(matched) / float64(len(queryTokens)), exactMatches
+	return total / float64(len(queryTokens)), float64(matched) / float64(len(queryTokens)), exactMatches, matchedFlags
 }
 
 func searchTokenSimilarity(queryToken, fieldToken string) float64 {
