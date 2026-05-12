@@ -225,9 +225,14 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		// last executed plan is the most accurate total.
 		total = count
 
-		// Early exit once we have enough candidates to saturate the Go re-ranking pool.
-		// This prevents running expensive relaxed queries when a strict query already found plenty.
-		if len(candidates) >= candidateLimit {
+		// Early exit once we have enough solid candidates.
+		// A strict threshold (e.g. half the limit, max 100) ensures we don't run
+		// the extremely expensive 'Relaxed' OR-query if we already have good matches.
+		earlyExitThreshold := candidateLimit / 2
+		if earlyExitThreshold > 100 {
+			earlyExitThreshold = 100
+		}
+		if len(candidates) >= earlyExitThreshold {
 			break
 		}
 	}
