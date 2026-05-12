@@ -96,24 +96,19 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	t0 := time.Now()
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
-	t1 := time.Now()
 
 	// --- Phase 1: Retrieval ---
 	candidates, total, err := s.retrieveSearchCandidates(searchCtx, q, lang, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	t2 := time.Now()
 
 	// --- Phase 2: Scoring ---
 	reranked := s.rerankSearchCandidates(candidates, q, lang)
-	t3 := time.Now()
 
 	// --- Phase 3: Semantic re-ranking ---
 	reranked = s.applySemanticReranking(searchCtx, reranked, q)
-	t4 := time.Now()
 
 	// --- Phase 4: Post-processing ---
 	if lang != "" {
@@ -121,7 +116,6 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	}
 
 	reranked = filterAndDiversifyCandidates(reranked, domain, schemaType)
-	t5 := time.Now()
 
 	if domain != "" || schemaType != "" {
 		total = len(reranked)
@@ -139,18 +133,6 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	if err := s.loadResultBodies(searchCtx, reranked[offset:end]); err != nil {
 		s.logger.Warn("failed to load result bodies", "error", err)
 	}
-	t6 := time.Now()
-
-	s.logger.Info("Search timing profile",
-		"query", q.raw,
-		"idf_ms", t1.Sub(t0).Milliseconds(),
-		"retrieval_ms", t2.Sub(t1).Milliseconds(),
-		"scoring_ms", t3.Sub(t2).Milliseconds(),
-		"semantic_ms", t4.Sub(t3).Milliseconds(),
-		"postprocess_ms", t5.Sub(t4).Milliseconds(),
-		"load_bodies_ms", t6.Sub(t5).Milliseconds(),
-		"total_ms", t6.Sub(t0).Milliseconds(),
-	)
 
 	results := make([]SearchResult, 0, end-offset)
 	for _, candidate := range reranked[offset:end] {
