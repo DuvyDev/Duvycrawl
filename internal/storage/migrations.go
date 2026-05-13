@@ -37,6 +37,8 @@ var contentMigrations = []string{
 	)`,
 	`ALTER TABLE pages ADD COLUMN fetch_mode TEXT NOT NULL DEFAULT 'http'`,
 	`ALTER TABLE pages ADD COLUMN render_reason TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE pages ADD COLUMN ingest_hits INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE pages ADD COLUMN last_seen_at DATETIME`,
 
 	// --- Performance indexes ---
 	`CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain)`,
@@ -49,6 +51,7 @@ var contentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_pagerank ON pages(pagerank)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_url_hash ON pages(url_hash)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_last_seen_at ON pages(last_seen_at)`,
 
 	// --- Full-text search index ---
 	// Includes title, h1, description, schema_title, schema_description and content

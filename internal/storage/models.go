@@ -34,6 +34,8 @@ type Page struct {
 	SchemaAuthor      string    `json:"schema_author,omitempty"`      // JSON-LD author name
 	SchemaKeywords    string    `json:"schema_keywords,omitempty"`    // JSON-LD keywords (comma-separated)
 	SchemaRating      float64   `json:"schema_rating,omitempty"`      // JSON-LD aggregateRating value
+	IngestHits        int64     `json:"ingest_hits,omitempty"`
+	LastSeenAt        time.Time `json:"last_seen_at,omitempty"`
 }
 
 // CrawlJob represents a URL queued for crawling in the frontier.
@@ -213,4 +215,29 @@ type ScoringConfig struct {
 	LanguageBoost          float64
 	SecondaryLanguageBoost float64
 	SecondaryLanguage      string
+}
+
+// IngestPageRequest is the JSON body for POST /api/v1/ingest/page.
+type IngestPageRequest struct {
+	URL               string   `json:"url"`
+	Title             string   `json:"title,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	H1                string   `json:"h1,omitempty"`
+	Content           string   `json:"content,omitempty"`
+	Language          string   `json:"language,omitempty"`
+	Outlinks          []string `json:"outlinks,omitempty"`
+	SchemaType        string   `json:"schema_type,omitempty"`
+	SchemaTitle       string   `json:"schema_title,omitempty"`
+	SchemaDescription string   `json:"schema_description,omitempty"`
+	SchemaImage       string   `json:"schema_image,omitempty"`
+	SchemaAuthor      string   `json:"schema_author,omitempty"`
+	SchemaKeywords    string   `json:"schema_keywords,omitempty"`
+	PublishedAt       string   `json:"published_at,omitempty"` // RFC3339
+	CrawledAt         string   `json:"crawled_at,omitempty"`   // RFC3339, defaults to now
+	UserID            string   `json:"user_id,omitempty"`
+}
+
+// IngestBatchRequest is the JSON body for POST /api/v1/ingest/batch.
+type IngestBatchRequest struct {
+	Pages []IngestPageRequest `json:"pages"`
 }

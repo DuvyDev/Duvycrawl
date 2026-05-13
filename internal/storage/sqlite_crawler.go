@@ -15,8 +15,8 @@ import (
 
 func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	query := `
-		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pages (url, domain, title, h1, h2, description, content, language, region, status_code, content_hash, url_fingerprint, fetch_mode, render_reason, published_at, crawled_at, updated_at, schema_type, schema_title, schema_description, schema_image, schema_author, schema_keywords, schema_rating, ingest_hits, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(url) DO UPDATE SET
 			domain           = excluded.domain,
 			title            = excluded.title,
@@ -40,7 +40,50 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 			schema_image     = excluded.schema_image,
 			schema_author    = excluded.schema_author,
 			schema_keywords  = excluded.schema_keywords,
-			schema_rating    = excluded.schema_rating
+			schema_rating    = excluded.schema_rating,
+			ingest_hits      = CASE
+				WHEN excluded.fetch_mode = 'extension' THEN pages.ingest_hits + excluded.ingest_hits
+				ELSE pages.ingest_hits
+			END,
+			last_seen_at     = CASE
+				WHEN excluded.fetch_mode = 'extension' THEN COALESCE(excluded.last_seen_at, CURRENT_TIMESTAMP)
+				ELSE pages.last_seen_at
+			END
+	`
+
+	queryByFingerprint := `
+		UPDATE pages SET
+			domain           = ?,
+			title            = ?,
+			h1               = ?,
+			h2               = ?,
+			description      = ?,
+			content          = ?,
+			language         = ?,
+			region           = ?,
+			status_code      = ?,
+			content_hash     = ?,
+			fetch_mode       = ?,
+			render_reason    = ?,
+			published_at     = COALESCE(?, pages.published_at),
+			crawled_at       = ?,
+			updated_at       = CURRENT_TIMESTAMP,
+			schema_type      = ?,
+			schema_title     = ?,
+			schema_description = ?,
+			schema_image     = ?,
+			schema_author    = ?,
+			schema_keywords  = ?,
+			schema_rating    = ?,
+			ingest_hits      = CASE
+				WHEN ? = 'extension' THEN pages.ingest_hits + ?
+				ELSE pages.ingest_hits
+			END,
+			last_seen_at     = CASE
+				WHEN ? = 'extension' THEN COALESCE(?, CURRENT_TIMESTAMP)
+				ELSE pages.last_seen_at
+			END
+		WHERE url_fingerprint = ?
 	`
 
 	var publishedAt any
@@ -54,6 +97,19 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 	if page.FetchMode == "" {
 		page.FetchMode = "http"
 	}
+	if page.FetchMode == "extension" {
+		if page.IngestHits <= 0 {
+			page.IngestHits = 1
+		}
+		if page.LastSeenAt.IsZero() {
+			page.LastSeenAt = time.Now().UTC()
+		}
+	}
+
+	var lastSeenAt any
+	if !page.LastSeenAt.IsZero() {
+		lastSeenAt = page.LastSeenAt
+	}
 
 	_, err := s.writeContentDB.ExecContext(ctx, query,
 		page.URL, page.Domain, page.Title, page.H1, page.H2, page.Description,
@@ -62,8 +118,32 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 		page.FetchMode, page.RenderReason, publishedAt, page.CrawledAt,
 		page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
 		page.SchemaAuthor, page.SchemaKeywords, schemaRating,
+		page.IngestHits, lastSeenAt,
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: pages.url_fingerprint") && page.URLFingerprint != "" {
+			res, updateErr := s.writeContentDB.ExecContext(ctx, queryByFingerprint,
+				page.Domain, page.Title, page.H1, page.H2, page.Description,
+				page.Content, page.Language, page.Region,
+				page.StatusCode, page.ContentHash,
+				page.FetchMode, page.RenderReason, publishedAt, page.CrawledAt,
+				page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
+				page.SchemaAuthor, page.SchemaKeywords, schemaRating,
+				page.FetchMode, page.IngestHits,
+				page.FetchMode, lastSeenAt,
+				page.URLFingerprint,
+			)
+			if updateErr != nil {
+				return fmt.Errorf("upserting page %q by fingerprint: %w", page.URL, updateErr)
+			}
+			rows, rowsErr := res.RowsAffected()
+			if rowsErr != nil {
+				return fmt.Errorf("upserting page %q by fingerprint rows affected: %w", page.URL, rowsErr)
+			}
+			if rows > 0 {
+				return nil
+			}
+		}
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
 	}
 	return nil
@@ -601,6 +681,58 @@ func (s *SQLiteStorage) FilterExistingFingerprints(ctx context.Context, fingerpr
 		existing[fp] = struct{}{}
 	}
 	return existing, rows.Err()
+}
+
+// --------------------------------------------------------------------------
+// Ingest Operations (extension)
+// --------------------------------------------------------------------------
+
+// IngestPage upserts a page from extension-submitted data and stores
+// its outlinks in the graph database. Returns the new or existing page ID.
+// Caller is responsible for enqueuing outlinks via the frontier.
+func (s *SQLiteStorage) IngestPage(ctx context.Context, page *Page, outlinks []string) (int64, error) {
+	if err := s.UpsertPage(ctx, page); err != nil {
+		return 0, fmt.Errorf("ingest upsert page: %w", err)
+	}
+
+	saved, err := s.GetPageByURL(ctx, page.URL)
+	if err != nil {
+		return 0, fmt.Errorf("ingest get page after upsert: %w", err)
+	}
+	if saved == nil && page.URLFingerprint != "" {
+		saved, err = s.GetPageByFingerprint(ctx, page.URLFingerprint)
+		if err != nil {
+			return 0, fmt.Errorf("ingest get page by fingerprint after upsert: %w", err)
+		}
+	}
+	if saved == nil {
+		return 0, fmt.Errorf("ingest page not found after upsert for %q", page.URL)
+	}
+
+	if len(outlinks) > 0 {
+		links := make([]OutgoingLink, 0, len(outlinks))
+		for _, raw := range outlinks {
+			parsed, err := url.Parse(raw)
+			if err != nil || parsed.Hostname() == "" {
+				continue
+			}
+			if parsed.Scheme != "http" && parsed.Scheme != "https" {
+				continue
+			}
+			links = append(links, OutgoingLink{
+				TargetURL:  raw,
+				TargetHash: utils.HashURL(raw),
+				AnchorText: "",
+			})
+		}
+		if len(links) > 0 {
+			if err := s.StoreLinks(ctx, saved.ID, page.URL, links); err != nil {
+				return 0, fmt.Errorf("ingest store links: %w", err)
+			}
+		}
+	}
+
+	return saved.ID, nil
 }
 
 // --------------------------------------------------------------------------

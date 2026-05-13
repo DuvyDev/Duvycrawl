@@ -96,6 +96,10 @@ type Storage interface {
 
 	// --- Domain Operations ---
 
+	// IngestPage upserts a page from extension data and stores its outlinks.
+	// Returns the page ID. Does NOT enqueue outlinks for crawling (caller does via frontier).
+	IngestPage(ctx context.Context, page *Page, outlinks []string) (int64, error)
+
 	// UpsertDomain inserts a new domain or updates an existing one.
 	UpsertDomain(ctx context.Context, domain *Domain) error
 

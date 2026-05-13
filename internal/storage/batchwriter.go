@@ -192,6 +192,38 @@ func (bw *BatchWriter) flushLocked() error {
 	}
 	defer pageStmt.Close()
 
+	pageByFingerprintStmt, err := tx.PrepareContext(ctx, `
+		UPDATE pages SET
+			url_hash         = ?,
+			domain           = ?,
+			title            = ?,
+			h1               = ?,
+			h2               = ?,
+			description      = ?,
+			content          = ?,
+			language         = ?,
+			region           = ?,
+			status_code      = ?,
+			content_hash     = ?,
+			fetch_mode       = ?,
+			render_reason    = ?,
+			published_at     = COALESCE(?, pages.published_at),
+			crawled_at       = ?,
+			updated_at       = CURRENT_TIMESTAMP,
+			schema_type      = ?,
+			schema_title     = ?,
+			schema_description = ?,
+			schema_image     = ?,
+			schema_author    = ?,
+			schema_keywords  = ?,
+			schema_rating    = ?
+		WHERE url_fingerprint = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare page update by fingerprint: %w", err)
+	}
+	defer pageByFingerprintStmt.Close()
+
 	for _, page := range bw.pages {
 		if page.FetchMode == "" {
 			page.FetchMode = "http"
@@ -216,6 +248,20 @@ func (bw *BatchWriter) flushLocked() error {
 			page.SchemaAuthor, page.SchemaKeywords, schemaRating,
 		)
 		if err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed: pages.url_fingerprint") && page.URLFingerprint != "" {
+				if _, updateErr := pageByFingerprintStmt.ExecContext(ctx,
+					page.URLHash, page.Domain, page.Title, page.H1, page.H2, page.Description,
+					page.Content, page.Language, page.Region,
+					page.StatusCode, page.ContentHash,
+					page.FetchMode, page.RenderReason, publishedAt, page.CrawledAt,
+					page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
+					page.SchemaAuthor, page.SchemaKeywords, schemaRating,
+					page.URLFingerprint,
+				); updateErr != nil {
+					bw.logger.Warn("batch upsert page by fingerprint failed", "url", page.URL, "error", updateErr)
+				}
+				continue
+			}
 			bw.logger.Warn("batch upsert page failed", "url", page.URL, "error", err)
 		}
 	}

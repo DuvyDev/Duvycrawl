@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +25,8 @@ type Handlers struct {
 	frontier *frontier.Frontier
 	logger   *slog.Logger
 }
+
+const maxIngestOutlinks = 3
 
 // NewHandlers creates a new Handlers instance.
 func NewHandlers(store storage.Storage, engine *crawler.Engine, front *frontier.Frontier, logger *slog.Logger) *Handlers {
@@ -737,6 +742,327 @@ func normalizeInterestAPITokens(s string) []string {
 		out = append(out, b.String())
 	}
 	return out
+}
+
+func clampIngestOutlinks(outlinks []string) []string {
+	if len(outlinks) <= maxIngestOutlinks {
+		return outlinks
+	}
+	return outlinks[:maxIngestOutlinks]
+}
+
+func isSearchResultsPageURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	path := strings.ToLower(parsed.Path)
+
+	query := parsed.Query()
+	hasSearchTerm := query.Has("q") || query.Has("query") || query.Has("p") || query.Has("text") || query.Has("s")
+	looksLikeSearxInstance :=
+		path == "/search" && query.Has("q") &&
+		(query.Has("categories") || query.Has("language") || query.Has("engines") || query.Has("theme") || query.Has("time_range") || query.Has("safesearch"))
+	looksLikeWhoogleInstance :=
+		(path == "/search" || path == "/") && query.Has("q") &&
+		(query.Has("safe") || query.Has("tbm") || query.Has("start") || query.Has("region") || query.Has("near"))
+
+	if strings.HasPrefix(host, "www.google.") || strings.HasPrefix(host, "google.") {
+		return path == "/search" || strings.HasPrefix(path, "/search/") || path == "/imgres"
+	}
+	if host == "www.bing.com" || host == "bing.com" {
+		return path == "/search"
+	}
+	if host == "duckduckgo.com" || host == "www.duckduckgo.com" {
+		return (path == "/" && hasSearchTerm) || path == "/html"
+	}
+	if host == "search.yahoo.com" {
+		return path == "/search"
+	}
+	if strings.HasPrefix(host, "www.yandex.") || strings.HasPrefix(host, "yandex.") {
+		return path == "/search"
+	}
+	if host == "www.baidu.com" || host == "baidu.com" {
+		return path == "/s"
+	}
+	if host == "www.ecosia.org" || host == "ecosia.org" {
+		return path == "/search"
+	}
+	if host == "www.mojeek.com" || host == "mojeek.com" {
+		return path == "/search"
+	}
+	if host == "search.brave.com" {
+		return path == "/search"
+	}
+	if host == "www.metager.org" || host == "metager.org" {
+		return strings.HasPrefix(path, "/meta/") || path == "/"
+	}
+	if host == "www.stract.com" || host == "stract.com" {
+		return path == "/search"
+	}
+	if host == "www.mwmbl.org" || host == "mwmbl.org" {
+		return path == "/" && hasSearchTerm
+	}
+	if strings.Contains(host, "yacy") {
+		return path == "/yacysearch.html" || path == "/solr/select"
+	}
+	if host == "www.startpage.com" || host == "startpage.com" {
+		return path == "/sp/search" || (path == "/" && hasSearchTerm)
+	}
+	if strings.Contains(host, "searx") || looksLikeSearxInstance {
+		return path == "/search"
+	}
+	if strings.Contains(host, "whoogle") || looksLikeWhoogleInstance {
+		return (path == "/search" || path == "/") && query.Has("q")
+	}
+
+	return false
+}
+
+// --- Ingest (Extension) ---
+
+// IngestPage receives a single pre-extracted page from the browser extension.
+// It stores the page content directly (skips HTTP fetch) and optionally records
+// outlinks. Outlinks are enqueued for future crawling by the frontier.
+func (h *Handlers) IngestPage(w http.ResponseWriter, r *http.Request) {
+	var req storage.IngestPageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.URL == "" {
+		writeError(w, http.StatusBadRequest, "url is required")
+		return
+	}
+	if isSearchResultsPageURL(req.URL) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"indexed":         false,
+			"url":             req.URL,
+			"reason":          "search_results_page",
+			"outlinks_queued": 0,
+		})
+		return
+	}
+
+	if h.frontier == nil {
+		writeError(w, http.StatusInternalServerError, "frontier not available on this node")
+		return
+	}
+
+	normalized, domain, err := frontier.CanonicalizeURL(req.URL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid url")
+		return
+	}
+
+	crawledAt := time.Now().UTC()
+	if req.CrawledAt != "" {
+		if t, err := time.Parse(time.RFC3339, req.CrawledAt); err == nil {
+			crawledAt = t
+		}
+	}
+
+	var publishedAt time.Time
+	if req.PublishedAt != "" {
+		publishedAt, _ = time.Parse(time.RFC3339, req.PublishedAt)
+	}
+
+	page := &storage.Page{
+		URL:               normalized,
+		Domain:            domain,
+		Title:             req.Title,
+		H1:                req.H1,
+		Description:       req.Description,
+		Content:           req.Content,
+		Language:          req.Language,
+		StatusCode:        200,
+		ContentHash:       fmt.Sprintf("%x", sha256.Sum256([]byte(req.Content))),
+		URLFingerprint:    frontier.FingerprintURL(normalized),
+		FetchMode:         "extension",
+		RenderReason:      "submitted_by_extension",
+		IngestHits:        1,
+		LastSeenAt:        crawledAt,
+		CrawledAt:         crawledAt,
+		PublishedAt:       publishedAt,
+		SchemaType:        req.SchemaType,
+		SchemaTitle:       req.SchemaTitle,
+		SchemaDescription: req.SchemaDescription,
+		SchemaImage:       req.SchemaImage,
+		SchemaAuthor:      req.SchemaAuthor,
+		SchemaKeywords:    req.SchemaKeywords,
+	}
+
+	limitedOutlinks := clampIngestOutlinks(req.Outlinks)
+
+	pageID, err := h.store.IngestPage(r.Context(), page, limitedOutlinks)
+	if err != nil {
+		h.logger.Error("ingest page failed", "url", normalized, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to ingest page")
+		return
+	}
+
+	// Enqueue outlinks for future crawling
+	outlinksQueued := 0
+	if len(limitedOutlinks) > 0 {
+		linkCtxs := make([]frontier.LinkContext, 0, len(limitedOutlinks))
+		for _, raw := range limitedOutlinks {
+			linkCtxs = append(linkCtxs, frontier.LinkContext{
+				URL:              raw,
+				SourcePageTitle:  req.Title,
+				SourceSchemaType: req.SchemaType,
+				SourceLanguage:   req.Language,
+			})
+		}
+		startingDepth := h.engine.Config().MaxDepth
+		if err := h.frontier.AddBatch(r.Context(), linkCtxs, startingDepth, storage.PriorityDiscovery); err != nil {
+			h.logger.Warn("ingest enqueue outlinks failed", "error", err)
+		} else {
+			outlinksQueued = len(linkCtxs)
+		}
+	}
+
+	h.logger.Info("extension page ingested", "url", normalized, "page_id", pageID, "outlinks_queued", outlinksQueued)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"indexed":          true,
+		"page_id":          pageID,
+		"url":              normalized,
+		"outlinks_queued":  outlinksQueued,
+	})
+}
+
+// IngestBatch receives multiple pre-extracted pages in one request.
+func (h *Handlers) IngestBatch(w http.ResponseWriter, r *http.Request) {
+	var req storage.IngestBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.Pages) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one page is required")
+		return
+	}
+	if len(req.Pages) > 1000 {
+		writeError(w, http.StatusBadRequest, "maximum 1000 pages per batch request")
+		return
+	}
+
+	if h.frontier == nil {
+		writeError(w, http.StatusInternalServerError, "frontier not available on this node")
+		return
+	}
+
+	type result struct {
+		URL            string `json:"url"`
+		Indexed        bool   `json:"indexed"`
+		PageID         int64  `json:"page_id,omitempty"`
+		OutlinksQueued int    `json:"outlinks_queued,omitempty"`
+		Error          string `json:"error,omitempty"`
+	}
+
+	results := make([]result, 0, len(req.Pages))
+	processed := 0
+
+	for _, p := range req.Pages {
+		if p.URL == "" {
+			results = append(results, result{URL: p.URL, Indexed: false, Error: "url is required"})
+			continue
+		}
+		if isSearchResultsPageURL(p.URL) {
+			results = append(results, result{URL: p.URL, Indexed: false, Error: "search_results_page"})
+			continue
+		}
+
+		normalized, domain, err := frontier.CanonicalizeURL(p.URL)
+		if err != nil {
+			results = append(results, result{URL: p.URL, Indexed: false, Error: "invalid url"})
+			continue
+		}
+
+		crawledAt := time.Now().UTC()
+		if p.CrawledAt != "" {
+			if t, err := time.Parse(time.RFC3339, p.CrawledAt); err == nil {
+				crawledAt = t
+			}
+		}
+
+		var publishedAt time.Time
+		if p.PublishedAt != "" {
+			publishedAt, _ = time.Parse(time.RFC3339, p.PublishedAt)
+		}
+
+		page := &storage.Page{
+			URL:               normalized,
+			Domain:            domain,
+			Title:             p.Title,
+			H1:                p.H1,
+			Description:       p.Description,
+			Content:           p.Content,
+			Language:          p.Language,
+			StatusCode:        200,
+			ContentHash:       fmt.Sprintf("%x", sha256.Sum256([]byte(p.Content))),
+			URLFingerprint:    frontier.FingerprintURL(normalized),
+			FetchMode:         "extension",
+			RenderReason:      "submitted_by_extension",
+			IngestHits:        1,
+			LastSeenAt:        crawledAt,
+			CrawledAt:         crawledAt,
+			PublishedAt:       publishedAt,
+			SchemaType:        p.SchemaType,
+			SchemaTitle:       p.SchemaTitle,
+			SchemaDescription: p.SchemaDescription,
+			SchemaImage:       p.SchemaImage,
+			SchemaAuthor:      p.SchemaAuthor,
+			SchemaKeywords:    p.SchemaKeywords,
+		}
+
+		limitedOutlinks := clampIngestOutlinks(p.Outlinks)
+
+		pageID, err := h.store.IngestPage(r.Context(), page, limitedOutlinks)
+		if err != nil {
+			h.logger.Warn("ingest batch page failed", "url", normalized, "error", err)
+			results = append(results, result{URL: normalized, Indexed: false, Error: err.Error()})
+			continue
+		}
+
+		outlinksQueued := 0
+		if len(limitedOutlinks) > 0 {
+			linkCtxs := make([]frontier.LinkContext, 0, len(limitedOutlinks))
+			for _, raw := range limitedOutlinks {
+				linkCtxs = append(linkCtxs, frontier.LinkContext{
+					URL:              raw,
+					SourcePageTitle:  p.Title,
+					SourceSchemaType: p.SchemaType,
+					SourceLanguage:   p.Language,
+				})
+			}
+			startingDepth := h.engine.Config().MaxDepth
+			if err := h.frontier.AddBatch(r.Context(), linkCtxs, startingDepth, storage.PriorityDiscovery); err != nil {
+				h.logger.Warn("ingest batch enqueue outlinks failed", "error", err)
+			} else {
+				outlinksQueued = len(linkCtxs)
+			}
+		}
+
+		processed++
+		h.logger.Info("extension batch page ingested", "url", normalized, "page_id", pageID, "outlinks_queued", outlinksQueued)
+		results = append(results, result{
+			URL:            normalized,
+			Indexed:        true,
+			PageID:         pageID,
+			OutlinksQueued: outlinksQueued,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"processed": processed,
+		"failed":    len(req.Pages) - processed,
+		"results":   results,
+	})
 }
 
 // --- Maintenance ---

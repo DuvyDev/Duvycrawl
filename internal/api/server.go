@@ -124,6 +124,10 @@ func registerCrawlerRoutes(mux *http.ServeMux, h *Handlers) {
 	mux.HandleFunc("POST /api/v1/interests", h.AddInterest)
 	mux.HandleFunc("DELETE /api/v1/interests/{term}", h.DeleteInterest)
 
+	// Ingest (extension page push)
+	mux.HandleFunc("POST /api/v1/ingest/page", h.IngestPage)
+	mux.HandleFunc("POST /api/v1/ingest/batch", h.IngestBatch)
+
 	// Maintenance
 	mux.HandleFunc("POST /api/v1/maintenance/rank", h.UpdateRankings)
 }
