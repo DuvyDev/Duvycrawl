@@ -92,10 +92,18 @@ func (sc *SpellChecker) LoadVocabulary(db *sql.DB) {
 // periodically so that newly crawled words are included in the spell checker
 // without needing to restart the server.
 func (sc *SpellChecker) StartPeriodicReload(ctx context.Context, db *sql.DB, interval time.Duration) {
-	// Initial load
-	sc.LoadVocabulary(db)
-
 	go func() {
+		// Wait a few seconds on startup to allow any pending SQLite schema migrations
+		// (which require exclusive locks) from other containers to complete before
+		// we issue our long-running FTS read query.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+
+		sc.LoadVocabulary(db)
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 

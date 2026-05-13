@@ -103,9 +103,11 @@ func NewSQLiteStorage(ctx context.Context, dbPath string, mode StorageMode, logg
 			writeContentDB.Close()
 			return nil, fmt.Errorf("configuring write content database: %w", err)
 		}
-		if err := migrateDB(ctx, writeContentDB, contentMigrations); err != nil {
-			writeContentDB.Close()
-			return nil, fmt.Errorf("running content migrations: %w", err)
+		if mode == ModeMonolith || mode == ModeCrawler {
+			if err := migrateDB(ctx, writeContentDB, contentMigrations); err != nil {
+				writeContentDB.Close()
+				return nil, fmt.Errorf("running content migrations: %w", err)
+			}
 		}
 	}
 
