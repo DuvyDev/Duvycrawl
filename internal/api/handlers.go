@@ -938,15 +938,18 @@ func (h *Handlers) IngestPage(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) IngestBatch(w http.ResponseWriter, r *http.Request) {
 	var req storage.IngestBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		h.logger.Error("invalid request body in IngestBatch", "error", err)
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
 	if len(req.Pages) == 0 {
+		h.logger.Error("IngestBatch rejected: empty pages array")
 		writeError(w, http.StatusBadRequest, "at least one page is required")
 		return
 	}
 	if len(req.Pages) > 1000 {
+		h.logger.Error("IngestBatch rejected: too many pages", "count", len(req.Pages))
 		writeError(w, http.StatusBadRequest, "maximum 1000 pages per batch request")
 		return
 	}
