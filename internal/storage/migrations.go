@@ -45,7 +45,7 @@ var contentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pages_crawled_at ON pages(crawled_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_content_hash ON pages(content_hash)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_language ON pages(language)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_fingerprint ON pages(url_fingerprint)`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_fingerprint ON pages(url_fingerprint)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_published_at ON pages(published_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_schema_type ON pages(schema_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_pages_referring_domains ON pages(referring_domains)`,
@@ -180,6 +180,11 @@ var contentMigrations = []string{
 		last_crawled    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_discovered_resources_fingerprint ON discovered_resources(url_fingerprint)`,
+
+	// --- Phase 5: Relax Fingerprint Deduplication ---
+	// Drop the unique index and recreate it as a regular index
+	`DROP INDEX IF EXISTS idx_pages_fingerprint`,
+	`CREATE INDEX IF NOT EXISTS idx_pages_fingerprint ON pages(url_fingerprint)`,
 }
 
 var crawlerMigrations = []string{

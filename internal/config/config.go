@@ -128,6 +128,11 @@ type CrawlerConfig struct {
 	ScoringStrategy string `yaml:"scoring_strategy"`
 	// Adaptive holds the parameters for the adaptive scorer.
 	Adaptive AdaptiveConfig `yaml:"adaptive"`
+	// MaxPagesPerFingerprint limits the number of pages with the exact same
+	// structural fingerprint (e.g. same URL path structure but different IDs)
+	// that can be enqueued per domain. This prevents crawler traps.
+	// Set to 0 to disable. Default is 10000.
+	MaxPagesPerFingerprint int `yaml:"max_pages_per_fingerprint"`
 	// Scheduler holds the parameters for the re-crawl scheduler.
 	Scheduler SchedulerConfig `yaml:"scheduler"`
 }
@@ -263,6 +268,7 @@ func DefaultConfig() *Config {
 				DomainReputationWeight: 15.0,
 				LanguageMatchBonus:     35.0,
 			},
+			MaxPagesPerFingerprint: 10000,
 			Scheduler: SchedulerConfig{
 				TickInterval:        10 * time.Minute,
 				SeedRecrawlInterval: 24 * time.Hour,
@@ -495,6 +501,9 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.Scheduler.SeedRecrawlInterval < 1*time.Minute {
 		return fmt.Errorf("crawler.scheduler.seed_recrawl_interval must be >= 1m, got %s", c.Crawler.Scheduler.SeedRecrawlInterval)
+	}
+	if c.Crawler.MaxPagesPerFingerprint < 0 {
+		return fmt.Errorf("crawler.max_pages_per_fingerprint must be >= 0, got %d", c.Crawler.MaxPagesPerFingerprint)
 	}
 
 	for i, s := range c.Seeds {

@@ -51,40 +51,7 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 			END
 	`
 
-	queryByFingerprint := `
-		UPDATE pages SET
-			domain           = ?,
-			title            = ?,
-			h1               = ?,
-			h2               = ?,
-			description      = ?,
-			content          = ?,
-			language         = ?,
-			region           = ?,
-			status_code      = ?,
-			content_hash     = ?,
-			fetch_mode       = ?,
-			render_reason    = ?,
-			published_at     = COALESCE(?, pages.published_at),
-			crawled_at       = ?,
-			updated_at       = CURRENT_TIMESTAMP,
-			schema_type      = ?,
-			schema_title     = ?,
-			schema_description = ?,
-			schema_image     = ?,
-			schema_author    = ?,
-			schema_keywords  = ?,
-			schema_rating    = ?,
-			ingest_hits      = CASE
-				WHEN ? = 'extension' THEN pages.ingest_hits + ?
-				ELSE pages.ingest_hits
-			END,
-			last_seen_at     = CASE
-				WHEN ? = 'extension' THEN COALESCE(?, CURRENT_TIMESTAMP)
-				ELSE pages.last_seen_at
-			END
-		WHERE url_fingerprint = ?
-	`
+
 
 	var publishedAt any
 	if !page.PublishedAt.IsZero() {
@@ -121,29 +88,6 @@ func (s *SQLiteStorage) UpsertPage(ctx context.Context, page *Page) error {
 		page.IngestHits, lastSeenAt,
 	)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed: pages.url_fingerprint") && page.URLFingerprint != "" {
-			res, updateErr := s.writeContentDB.ExecContext(ctx, queryByFingerprint,
-				page.Domain, page.Title, page.H1, page.H2, page.Description,
-				page.Content, page.Language, page.Region,
-				page.StatusCode, page.ContentHash,
-				page.FetchMode, page.RenderReason, publishedAt, page.CrawledAt,
-				page.SchemaType, page.SchemaTitle, page.SchemaDescription, page.SchemaImage,
-				page.SchemaAuthor, page.SchemaKeywords, schemaRating,
-				page.FetchMode, page.IngestHits,
-				page.FetchMode, lastSeenAt,
-				page.URLFingerprint,
-			)
-			if updateErr != nil {
-				return fmt.Errorf("upserting page %q by fingerprint: %w", page.URL, updateErr)
-			}
-			rows, rowsErr := res.RowsAffected()
-			if rowsErr != nil {
-				return fmt.Errorf("upserting page %q by fingerprint rows affected: %w", page.URL, rowsErr)
-			}
-			if rows > 0 {
-				return nil
-			}
-		}
 		return fmt.Errorf("upserting page %q: %w", page.URL, err)
 	}
 	return nil

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/DuvyDev/Duvycrawl/internal/queue"
 	"github.com/DuvyDev/Duvycrawl/internal/scorer"
@@ -33,19 +34,34 @@ type Frontier struct {
 	queue              *queue.Queue
 	store              storage.Storage
 	scorer             scorer.Scorer
-	blacklistedDomains map[string]struct{}
-	logger             *slog.Logger
+	blacklistedDomains     map[string]struct{}
+	fpCounts               map[string]int
+	fpMutex                sync.Mutex
+	maxPagesPerFingerprint int
+	logger                 *slog.Logger
 }
 
 // New creates a new Frontier backed by the given in-memory queue,
 // storage (used for checking already-crawled pages), and scorer.
-func New(q *queue.Queue, store storage.Storage, sc scorer.Scorer, blacklistedDomains map[string]struct{}, logger *slog.Logger) *Frontier {
+func New(q *queue.Queue, store storage.Storage, sc scorer.Scorer, blacklistedDomains map[string]struct{}, maxPagesPerFingerprint int, logger *slog.Logger) *Frontier {
 	return &Frontier{
-		queue:              q,
-		store:              store,
-		scorer:             sc,
-		blacklistedDomains: blacklistedDomains,
-		logger:             logger.With("component", "frontier"),
+		queue:                  q,
+		store:                  store,
+		scorer:                 sc,
+		blacklistedDomains:     blacklistedDomains,
+		fpCounts:               make(map[string]int),
+		maxPagesPerFingerprint: maxPagesPerFingerprint,
+		logger:                 logger.With("component", "frontier"),
+	}
+}
+
+// SeedFingerprintCounts populates the initial in-memory fingerprint counts
+// from the database, ensuring soft limits persist across restarts.
+func (f *Frontier) SeedFingerprintCounts(fingerprints []string) {
+	f.fpMutex.Lock()
+	defer f.fpMutex.Unlock()
+	for _, fp := range fingerprints {
+		f.fpCounts[fp]++
 	}
 }
 
@@ -84,6 +100,15 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth int, baseScore 
 
 	fingerprint := FingerprintURL(normalized)
 
+	f.fpMutex.Lock()
+	count := f.fpCounts[fingerprint]
+	if f.maxPagesPerFingerprint > 0 && count >= f.maxPagesPerFingerprint {
+		f.fpMutex.Unlock()
+		return nil
+	}
+	f.fpCounts[fingerprint]++
+	f.fpMutex.Unlock()
+
 	// Fast path: check Bloom filter first (O(1), in-memory, ~0.1% FP rate).
 	// This skips the vast majority of DB queries for already-seen URLs.
 	if f.queue.HasSeen(fingerprint) {
@@ -101,15 +126,7 @@ func (f *Frontier) Add(ctx context.Context, rawURL string, depth int, baseScore 
 		return nil
 	}
 
-	// Check structural fingerprint (catches URLs with different query values).
-	existingFingerprint, err := f.store.GetPageByFingerprint(ctx, fingerprint)
-	if err != nil {
-		return fmt.Errorf("checking fingerprint: %w", err)
-	}
-	if existingFingerprint != nil {
-		f.queue.MarkSeen(fingerprint)
-		return nil
-	}
+
 
 	job := &queue.Job{
 		URL:         normalized,
@@ -161,6 +178,15 @@ func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int,
 
 		fingerprint := FingerprintURL(normalized)
 
+		f.fpMutex.Lock()
+		count := f.fpCounts[fingerprint]
+		if f.maxPagesPerFingerprint > 0 && count >= f.maxPagesPerFingerprint {
+			f.fpMutex.Unlock()
+			continue
+		}
+		f.fpCounts[fingerprint]++
+		f.fpMutex.Unlock()
+
 		// Fast path: check Bloom filter first — avoids ~99.9% of DB queries.
 		if f.queue.HasSeen(fingerprint) {
 			continue
@@ -182,11 +208,7 @@ func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int,
 		existingURLs = map[string]struct{}{}
 	}
 
-	existingFingerprints, err := f.store.FilterExistingFingerprints(ctx, fingerprintBatch)
-	if err != nil {
-		f.logger.Warn("batch fingerprint deduplication failed, proceeding with Bloom-only filter", "error", err)
-		existingFingerprints = map[string]struct{}{}
-	}
+
 
 	var jobs []*queue.Job
 	for _, c := range candidates {
@@ -194,10 +216,7 @@ func (f *Frontier) AddBatch(ctx context.Context, links []LinkContext, depth int,
 			f.queue.MarkSeen(c.fingerprint)
 			continue
 		}
-		if _, exists := existingFingerprints[c.fingerprint]; exists {
-			f.queue.MarkSeen(c.fingerprint)
-			continue
-		}
+
 
 		job := &queue.Job{
 			URL:              c.normalized,

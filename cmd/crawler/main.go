@@ -85,7 +85,7 @@ func run() error {
 	for _, d := range cfg.Crawler.BlacklistedDomains {
 		blacklistedDomains[strings.ToLower(d)] = struct{}{}
 	}
-	front := frontier.New(crawlQueue, store, scoringEngine, blacklistedDomains, logger)
+	front := frontier.New(crawlQueue, store, scoringEngine, blacklistedDomains, cfg.Crawler.MaxPagesPerFingerprint, logger)
 	limiter := ratelimit.NewDomainLimiter(cfg.Crawler.PolitenessDelay, cfg.Crawler.RandomDelay, cfg.Crawler.ParallelismPerDomain)
 	defer limiter.Close()
 
@@ -104,7 +104,7 @@ func run() error {
 	adminServer := api.NewServer(&cfg.API, store, engine, front, api.ModeCrawler, logger)
 
 	// --- Seed Bloom filter ---
-	if err := seedBloomFilter(ctx, store, crawlQueue, logger); err != nil {
+	if err := seedBloomFilter(ctx, store, crawlQueue, front, logger); err != nil {
 		logger.Warn("failed to seed bloom filter", "error", err)
 	}
 
@@ -184,7 +184,7 @@ func initLogger(cfg config.LoggingConfig) *slog.Logger {
 	return slog.New(handler)
 }
 
-func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue, logger *slog.Logger) error {
+func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue, front *frontier.Frontier, logger *slog.Logger) error {
 	urls, fingerprints, err := store.GetAllPageURLs(ctx)
 	if err != nil {
 		return err
@@ -196,6 +196,7 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 		q.MarkSeen(urls[i])
 		marked += 2
 	}
+	front.SeedFingerprintCounts(fingerprints)
 
 	discURLs, discFingerprints, err := store.GetAllDiscoveredURLs(ctx)
 	if err != nil {
@@ -206,6 +207,7 @@ func seedBloomFilter(ctx context.Context, store storage.Storage, q *queue.Queue,
 			q.MarkSeen(discURLs[i])
 			marked += 2
 		}
+		front.SeedFingerprintCounts(discFingerprints)
 	}
 
 	logger.Info("bloom filter seeded from database", "urls", len(urls), "discovered", len(discURLs), "marked", marked)

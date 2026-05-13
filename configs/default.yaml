@@ -65,6 +65,10 @@ crawler:
   # Subdomain matching: "example.com" blocks all subdomains too.
   # "sub.example.com" blocks only that specific subdomain.
   blacklisted_domains: []
+  # Limits the number of pages with the exact same structural fingerprint
+  # (e.g. same URL path structure but different IDs) that can be enqueued
+  # per domain. This prevents crawler traps. 0 disables the limit.
+  max_pages_per_fingerprint: 10000
   # Scoring strategy for the URL frontier.
   #   static   — legacy priority-based (BFS-like)
   #   adaptive — A*-like best-first that learns from your searches and clicks
