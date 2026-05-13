@@ -1213,12 +1213,80 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 	}
 
 	// --- Site-type intent boost ---
-	if query.siteTypeIntent != "" && isHomepage {
+	if query.siteTypeIntent != "" {
+		isNews := query.siteTypeIntent == "noticias" || query.siteTypeIntent == "news"
+		isWiki := query.siteTypeIntent == "wiki"
+		isDocs := query.siteTypeIntent == "docs" || query.siteTypeIntent == "documentacion" || query.siteTypeIntent == "documentation" || query.siteTypeIntent == "guide" || query.siteTypeIntent == "guides" || query.siteTypeIntent == "guia" || query.siteTypeIntent == "guias" || query.siteTypeIntent == "api"
+		isBlog := query.siteTypeIntent == "blog"
+		isForum := query.siteTypeIntent == "foro" || query.siteTypeIntent == "forum" || query.siteTypeIntent == "forums" || query.siteTypeIntent == "comunidad" || query.siteTypeIntent == "community"
+		isSupport := query.siteTypeIntent == "soporte" || query.siteTypeIntent == "support" || query.siteTypeIntent == "ayuda" || query.siteTypeIntent == "help"
+		isStore := query.siteTypeIntent == "tienda" || query.siteTypeIntent == "store"
+
+		schemaLower := strings.ToLower(candidate.SchemaType)
+
+		if isNews {
+			if strings.Contains(schemaLower, "newsarticle") || strings.Contains(schemaLower, "report") {
+				totalScore += 12000.0
+			} else if strings.Contains(schemaLower, "article") {
+				totalScore += 8000.0
+			}
+			if strings.Contains(schemaLower, "jobposting") {
+				totalScore -= 15000.0
+			}
+			if strings.Contains(schemaLower, "product") || strings.Contains(schemaLower, "offer") {
+				totalScore -= 8000.0
+			}
+			totalScore += freshnessScore * 40.0
+		} else if isDocs {
+			if strings.Contains(schemaLower, "techarticle") || strings.Contains(schemaLower, "apireference") || strings.Contains(schemaLower, "howto") || strings.Contains(schemaLower, "softwaresourcecode") {
+				totalScore += 12000.0
+			} else if strings.Contains(schemaLower, "article") {
+				totalScore += 4000.0
+			}
+			if strings.Contains(schemaLower, "jobposting") {
+				totalScore -= 15000.0
+			}
+			if strings.Contains(schemaLower, "product") || strings.Contains(schemaLower, "offer") {
+				totalScore -= 8000.0
+			}
+		} else if isBlog {
+			if strings.Contains(schemaLower, "blogposting") || strings.Contains(schemaLower, "blog") {
+				totalScore += 12000.0
+			} else if strings.Contains(schemaLower, "article") {
+				totalScore += 6000.0
+			}
+			totalScore += freshnessScore * 10.0
+		} else if isForum {
+			if strings.Contains(schemaLower, "discussionforumposting") || strings.Contains(schemaLower, "qapage") || strings.Contains(schemaLower, "comment") {
+				totalScore += 12000.0
+			}
+		} else if isSupport {
+			if strings.Contains(schemaLower, "faqpage") || strings.Contains(schemaLower, "qapage") || strings.Contains(schemaLower, "howto") || strings.Contains(schemaLower, "techarticle") {
+				totalScore += 10000.0
+			}
+		} else if isStore {
+			if strings.Contains(schemaLower, "product") || strings.Contains(schemaLower, "offer") || strings.Contains(schemaLower, "store") || strings.Contains(schemaLower, "itempage") {
+				totalScore += 12000.0
+			}
+			if strings.Contains(schemaLower, "article") || strings.Contains(schemaLower, "newsarticle") {
+				totalScore -= 8000.0
+			}
+		} else if isWiki {
+			if strings.Contains(schemaLower, "article") {
+				totalScore += 6000.0
+			}
+		}
+
 		typeInDomain := strings.Contains(candidate.Domain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.effectiveDomain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.rootLabel, query.siteTypeIntent)
+		
 		if typeInDomain {
-			totalScore += 12000.0
+			if isHomepage {
+				totalScore += 12000.0
+			} else {
+				totalScore += 4000.0
+			}
 		}
 	}
 
