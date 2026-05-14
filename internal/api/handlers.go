@@ -770,7 +770,7 @@ func isSearchResultsPageURL(rawURL string) bool {
 		(query.Has("safe") || query.Has("tbm") || query.Has("start") || query.Has("region") || query.Has("near"))
 
 	if strings.HasPrefix(host, "www.google.") || strings.HasPrefix(host, "google.") {
-		return path == "/search" || strings.HasPrefix(path, "/search/") || path == "/imgres"
+		return path == "/search" || strings.HasPrefix(path, "/search/") || path == "/imgres" || strings.HasPrefix(path, "/sorry/")
 	}
 	if host == "www.bing.com" || host == "bing.com" {
 		return path == "/search"
