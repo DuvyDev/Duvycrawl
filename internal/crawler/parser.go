@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -176,7 +177,7 @@ func (p *Parser) Parse(htmlBody []byte, contentType string, baseURL string) (*Pa
 	// --- Extract publication date ---
 	// Uses meta tags and <time> elements; JSON-LD DatePublished is used as
 	// a fallback from the already-computed schema above.
-	result.PublishedAt = extractPublishedAt(doc)
+	result.PublishedAt = extractPublishedAt(doc, baseURL)
 	if result.PublishedAt.IsZero() && !schema.DatePublished.IsZero() {
 		result.PublishedAt = schema.DatePublished
 	}
@@ -696,12 +697,16 @@ func isImageExtension(rawURL string) bool {
 // of an HTML document. It checks meta tags and <time> elements in order of
 // reliability. JSON-LD datePublished is handled by the caller to avoid
 // redundant parsing of JSON-LD blocks.
-func extractPublishedAt(doc *goquery.Document) time.Time {
+func extractPublishedAt(doc *goquery.Document, baseURL string) time.Time {
 	// Strategy 1: Explicit publication meta tags (most reliable).
 	metaCandidates := []string{
 		`meta[property="article:published_time"]`,
 		`meta[name="article:published_time"]`,
 		`meta[property="og:article:published_time"]`,
+		`meta[itemprop="datePublished"]`,
+		`meta[name="datePublished"]`,
+		`meta[property="datePublished"]`,
+		`meta[itemprop="dateCreated"]`,
 		`meta[name="date"]`,
 		`meta[name="pubdate"]`,
 		`meta[name="publish_date"]`,
@@ -723,8 +728,48 @@ func extractPublishedAt(doc *goquery.Document) time.Time {
 		}
 	}
 
-	// Strategy 2: <time> element with datetime attribute or content.
-	if t := extractTimeElement(doc); !t.IsZero() {
+	// Strategy 2: publication-specific <time> elements.
+	if t := extractTimeElement(doc, []string{
+		`time[itemprop="datePublished"]`,
+		`time[pubdate]`,
+		`time.published`,
+		`time.posted`,
+		`time.entry-date`,
+		`time.article-date`,
+	}); !t.IsZero() {
+		return t
+	}
+
+	// Strategy 3: modified dates are weaker, but better than treating crawl time as publish time.
+	modifiedCandidates := []string{
+		`meta[property="article:modified_time"]`,
+		`meta[name="article:modified_time"]`,
+		`meta[property="og:updated_time"]`,
+		`meta[itemprop="dateModified"]`,
+		`meta[name="dateModified"]`,
+		`meta[property="dateModified"]`,
+		`meta[name="lastmod"]`,
+	}
+	for _, sel := range modifiedCandidates {
+		var found time.Time
+		doc.Find(sel).Each(func(_ int, s *goquery.Selection) {
+			if t := parseDateAttribute(s); !t.IsZero() && found.IsZero() {
+				found = t
+			}
+		})
+		if !found.IsZero() {
+			return found
+		}
+	}
+
+	// Strategy 4: generic <time> fallback. Pick the newest valid time to avoid
+	// stale footer/sidebar dates dominating article pages.
+	if t := extractTimeElement(doc, []string{`time`}); !t.IsZero() {
+		return t
+	}
+
+	// Strategy 5: URL date fallback (common news URL pattern: /2026/05/14/slug).
+	if t := extractDateFromURL(baseURL); !t.IsZero() {
 		return t
 	}
 
@@ -739,18 +784,59 @@ func parseDateAttribute(s *goquery.Selection) time.Time {
 	return parseDateString(content)
 }
 
-func extractTimeElement(doc *goquery.Document) time.Time {
+func extractTimeElement(doc *goquery.Document, selectors []string) time.Time {
 	var best time.Time
-	doc.Find("time").Each(func(_ int, s *goquery.Selection) {
-		if datetime, exists := s.Attr("datetime"); exists {
-			if t := parseDateString(datetime); !t.IsZero() {
-				if best.IsZero() || t.Before(best) {
+	for _, selector := range selectors {
+		doc.Find(selector).Each(func(_ int, s *goquery.Selection) {
+			var t time.Time
+			if datetime, exists := s.Attr("datetime"); exists {
+				t = parseDateString(datetime)
+			}
+			if t.IsZero() {
+				if content, exists := s.Attr("content"); exists {
+					t = parseDateString(content)
+				}
+			}
+			if t.IsZero() {
+				t = parseDateString(strings.TrimSpace(s.Text()))
+			}
+			if !t.IsZero() {
+				if best.IsZero() || t.After(best) {
 					best = t
 				}
 			}
+		})
+		if !best.IsZero() {
+			return best
 		}
-	})
+	}
 	return best
+}
+
+var urlDatePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`/((?:19|20)\d{2})/(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])(?:/|$|[-_])`),
+	regexp.MustCompile(`/((?:19|20)\d{2})-(0?[1-9]|1[0-2])-(0?[1-9]|[12]\d|3[01])(?:/|$|[-_])`),
+}
+
+func extractDateFromURL(rawURL string) time.Time {
+	for _, pattern := range urlDatePatterns {
+		match := pattern.FindStringSubmatch(rawURL)
+		if len(match) != 4 {
+			continue
+		}
+		date := match[1] + "-" + leftPad2(match[2]) + "-" + leftPad2(match[3])
+		if t := parseDateString(date); !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func leftPad2(value string) string {
+	if len(value) == 1 {
+		return "0" + value
+	}
+	return value
 }
 
 // SchemaData holds extracted schema.org JSON-LD fields.
@@ -876,6 +962,16 @@ func extractJSONLD(doc *goquery.Document, base *url.URL) SchemaData {
 						best.DatePublished = parseDateString(dc)
 					}
 				}
+				if best.DatePublished.IsZero() {
+					if dm, ok := obj["dateModified"].(string); ok && dm != "" {
+						best.DatePublished = parseDateString(dm)
+					}
+				}
+				if best.DatePublished.IsZero() {
+					if ud, ok := obj["uploadDate"].(string); ok && ud != "" {
+						best.DatePublished = parseDateString(ud)
+					}
+				}
 			}
 		}
 	})
@@ -955,7 +1051,13 @@ var dateFormats = []string{
 	"02 January 2006",
 	"02 Jan 2006",
 	"02/01/2006",
+	"2/1/2006",
 	"01/02/2006",
+	"1/2/2006",
+	"02-01-2006",
+	"2-1-2006",
+	"2006/01/02",
+	"2006/1/2",
 	"2 de January de 2006",
 	"2 de Jan de 2006",
 }
@@ -966,6 +1068,7 @@ func parseDateString(s string) time.Time {
 	if s == "" {
 		return time.Time{}
 	}
+	s = normalizeSpanishDateString(s)
 
 	for _, format := range dateFormats {
 		if t, err := time.Parse(format, s); err == nil {
@@ -984,4 +1087,20 @@ func parseDateString(s string) time.Time {
 	}
 
 	return time.Time{}
+}
+
+func normalizeSpanishDateString(s string) string {
+	replacements := map[string]string{
+		"enero": "January", "febrero": "February", "marzo": "March", "abril": "April",
+		"mayo": "May", "junio": "June", "julio": "July", "agosto": "August",
+		"septiembre": "September", "setiembre": "September", "octubre": "October",
+		"noviembre": "November", "diciembre": "December",
+	}
+	lower := strings.ToLower(s)
+	for es, en := range replacements {
+		if strings.Contains(lower, es) {
+			return strings.ReplaceAll(lower, es, en)
+		}
+	}
+	return s
 }

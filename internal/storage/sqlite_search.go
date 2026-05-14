@@ -37,20 +37,23 @@ const (
 	searchModeFTSExact     searchMode = "fts_exact"
 	searchModeFTSCore      searchMode = "fts_core"
 	searchModeFTSRelaxed   searchMode = "fts_relaxed"
+	searchModeFTSRecent    searchMode = "fts_recent"
 )
 
 type searchQuery struct {
-	raw            string
-	lowered        string
-	normalized     string
-	tokens         []string // significant tokens (stopwords removed)
-	ftsTokens      []string // stopword-filtered tokens for FTS queries
-	navTerm        string
-	domainLike     string
-	intent         queryIntent
-	idfMap         map[string]float64
-	siteTypeIntent string
-	platformIntent string
+	raw                string
+	lowered            string
+	normalized         string
+	tokens             []string // significant tokens (stopwords removed)
+	ftsTokens          []string // stopword-filtered tokens for FTS queries
+	navTerm            string
+	domainLike         string
+	intent             queryIntent
+	idfMap             map[string]float64
+	siteTypeIntent     string
+	platformIntent     string
+	freshnessIntent    bool
+	explicitDateIntent bool
 }
 
 type searchCandidate struct {
@@ -216,6 +219,26 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		}
 	}
 
+	if q.freshnessIntent && !q.explicitDateIntent && searchCtx.Err() == nil {
+		bestFTS := ""
+		for _, plan := range plans {
+			if plan.ftsQuery != "" {
+				bestFTS = plan.ftsQuery
+				break
+			}
+		}
+		if bestFTS != "" {
+			recentCtx, recentCancel := context.WithTimeout(searchCtx, perPlanTimeout)
+			recentCandidates, err := s.searchRecentFTSCandidates(recentCtx, bestFTS, q, lang, min(candidateLimit, 300))
+			recentCancel()
+			if err == nil && len(recentCandidates) > 0 {
+				candidates = mergeSearchCandidates(candidates, recentCandidates)
+			} else if err != nil && recentCtx.Err() == nil {
+				s.logger.Warn("failed to fetch recent FTS candidates, continuing with regular pool", "error", err)
+			}
+		}
+	}
+
 	// --- Platform diversity injection ---
 	if q.platformIntent != "" && searchCtx.Err() == nil {
 		diversityLimit := min(candidateLimit/3, 100)
@@ -307,6 +330,8 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 	normalized := normalizeSearchText(query)
 	allTokens := strings.Fields(normalized)
 	domainLike := normalizeDomainLikeQuery(query)
+	freshnessIntent := detectFreshnessIntent(allTokens)
+	explicitDateIntent := detectExplicitDateIntent(query, allTokens)
 
 	// Implicit gTLD detection
 	if domainLike == "" && len(allTokens) == 2 {
@@ -403,21 +428,68 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 	// For tokens ≥ 7 chars, try all 2-way splits and validate against FTS vocab.
 	searchTokens = s.splitCompoundTokens(searchTokens)
 
+	if siteTypeIntent == "noticias" || siteTypeIntent == "news" {
+		freshnessIntent = true
+	}
+
 	// Intent classification
 	intent := classifyQueryIntent(query, searchTokens, domainLike, navTerm, platformIntent)
+	if platformIntent == "" && domainLike == "" && siteTypeIntent != "" {
+		intent = intentInformational
+	}
+	if freshnessIntent && platformIntent == "" {
+		intent = intentInformational
+	}
 
 	return searchQuery{
-		raw:            query,
-		lowered:        strings.ToLower(strings.TrimSpace(query)),
-		normalized:     normalized,
-		tokens:         searchTokens,
-		ftsTokens:      searchTokens,
-		navTerm:        navTerm,
-		domainLike:     domainLike,
-		intent:         intent,
-		siteTypeIntent: siteTypeIntent,
-		platformIntent: platformIntent,
+		raw:                query,
+		lowered:            strings.ToLower(strings.TrimSpace(query)),
+		normalized:         normalized,
+		tokens:             searchTokens,
+		ftsTokens:          searchTokens,
+		navTerm:            navTerm,
+		domainLike:         domainLike,
+		intent:             intent,
+		siteTypeIntent:     siteTypeIntent,
+		platformIntent:     platformIntent,
+		freshnessIntent:    freshnessIntent,
+		explicitDateIntent: explicitDateIntent,
 	}
+}
+
+var explicitYearPattern = regexp.MustCompile(`\b(19[9][0-9]|20[0-9]{2}|2100)\b`)
+var explicitDatePattern = regexp.MustCompile(`\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b`)
+
+func detectFreshnessIntent(tokens []string) bool {
+	freshTerms := map[string]struct{}{
+		"noticia": {}, "noticias": {}, "news": {}, "actualidad": {},
+		"reciente": {}, "recientes": {}, "ultimo": {}, "ultimos": {},
+		"ultima": {}, "ultimas": {}, "hoy": {}, "today": {}, "latest": {},
+	}
+	for _, tok := range tokens {
+		if _, ok := freshTerms[tok]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func detectExplicitDateIntent(raw string, tokens []string) bool {
+	if explicitYearPattern.MatchString(raw) || explicitDatePattern.MatchString(raw) {
+		return true
+	}
+	monthTerms := map[string]struct{}{
+		"enero": {}, "febrero": {}, "marzo": {}, "abril": {}, "mayo": {}, "junio": {},
+		"julio": {}, "agosto": {}, "septiembre": {}, "setiembre": {}, "octubre": {}, "noviembre": {}, "diciembre": {},
+		"january": {}, "february": {}, "march": {}, "april": {}, "may": {}, "june": {},
+		"july": {}, "august": {}, "september": {}, "october": {}, "november": {}, "december": {},
+	}
+	for _, tok := range tokens {
+		if _, ok := monthTerms[tok]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyQueryIntent determines whether a query is navigational or informational.
@@ -675,6 +747,114 @@ func (s *SQLiteStorage) searchFTSCandidates(ctx context.Context, mode searchMode
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating FTS candidates: %w", err)
+	}
+
+	return candidates, nil
+}
+
+func (s *SQLiteStorage) searchRecentFTSCandidates(ctx context.Context, matchQuery string, query searchQuery, lang string, limit int) ([]searchCandidate, error) {
+	searchSQL := `
+		SELECT
+			p.id, p.url, p.title, p.h1, p.h2, p.description,
+			'' AS snippet, p.domain, p.language, p.region,
+			p.crawled_at, p.published_at, p.updated_at,
+			(-bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)) AS bm25_score,
+			LENGTH(p.content) AS content_len,
+			p.schema_type, p.schema_image, p.schema_author,
+			p.schema_keywords, p.schema_rating,
+			p.referring_domains, COALESCE(p.pagerank, 1.0) AS pagerank,
+			COALESCE(sc.clicks, 0) AS clicks
+		FROM pages_fts
+		JOIN pages p ON p.id = pages_fts.rowid
+		LEFT JOIN search_clicks sc ON sc.url = p.url AND sc.query = ?
+		WHERE pages_fts MATCH ?
+		  AND p.published_at IS NOT NULL
+		  AND SUBSTR(CAST(p.published_at AS TEXT), 1, 10) >= date('now', '-180 days')
+		ORDER BY (
+			bm25(pages_fts, 10.0, 8.0, 5.0, 6.0, 4.0, 1.0)
+			- CASE
+				WHEN SUBSTR(CAST(p.published_at AS TEXT), 1, 10) >= date('now', '-1 day') THEN 60.0
+				WHEN SUBSTR(CAST(p.published_at AS TEXT), 1, 10) >= date('now', '-7 days') THEN 45.0
+				WHEN SUBSTR(CAST(p.published_at AS TEXT), 1, 10) >= date('now', '-30 days') THEN 25.0
+				WHEN SUBSTR(CAST(p.published_at AS TEXT), 1, 10) >= date('now', '-90 days') THEN 10.0
+				ELSE 0.0
+			END
+		) ASC
+		LIMIT ?
+	`
+
+	rows, err := s.searchContentDB.QueryContext(ctx, searchSQL, query.raw, matchQuery, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var candidates []searchCandidate
+	for rows.Next() {
+		var (
+			candidate      searchCandidate
+			crawledAt      sql.NullTime
+			publishedAtStr sql.NullString
+			updatedAtStr   sql.NullString
+			snippetText    sql.NullString
+			clicksCount    int
+			schemaRating   sql.NullFloat64
+			schemaType     sql.NullString
+			schemaImage    sql.NullString
+			schemaAuthor   sql.NullString
+			schemaKeywords sql.NullString
+		)
+		if err := rows.Scan(
+			&candidate.ID, &candidate.URL, &candidate.Title, &candidate.H1, &candidate.H2,
+			&candidate.Description, &snippetText, &candidate.Domain, &candidate.Language,
+			&candidate.Region, &crawledAt, &publishedAtStr, &updatedAtStr, &candidate.sqlScore,
+			&candidate.contentLen, &schemaType, &schemaImage, &schemaAuthor, &schemaKeywords,
+			&schemaRating, &candidate.ReferringDomains, &candidate.PageRank, &clicksCount,
+		); err != nil {
+			return nil, fmt.Errorf("scanning recent FTS candidate: %w", err)
+		}
+		candidate.sqlScore += float64(clicksCount) * 50.0
+		candidate.Snippet = snippetText.String
+		if candidate.Snippet == "" {
+			candidate.Snippet = candidate.Description
+		}
+		candidate.mode = searchModeFTSRecent
+		if crawledAt.Valid {
+			candidate.CrawledAt = crawledAt.Time
+		}
+		if publishedAtStr.Valid && publishedAtStr.String != "" {
+			t := parseFlexibleTime(publishedAtStr.String)
+			if !t.IsZero() {
+				candidate.publishedAtTime = t
+				candidate.PublishedAt = &t
+			}
+		}
+		if updatedAtStr.Valid && updatedAtStr.String != "" {
+			t := parseFlexibleTime(updatedAtStr.String)
+			if !t.IsZero() {
+				candidate.UpdatedAt = &t
+			}
+		}
+		if schemaRating.Valid {
+			candidate.SchemaRating = schemaRating.Float64
+		}
+		if schemaType.Valid {
+			candidate.SchemaType = schemaType.String
+		}
+		if schemaImage.Valid {
+			candidate.SchemaImage = schemaImage.String
+		}
+		if schemaAuthor.Valid {
+			candidate.SchemaAuthor = schemaAuthor.String
+		}
+		if schemaKeywords.Valid {
+			candidate.SchemaKeywords = schemaKeywords.String
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating recent FTS candidates: %w", err)
 	}
 
 	return candidates, nil
@@ -1237,6 +1417,7 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 				totalScore -= 8000.0
 			}
 			totalScore += freshnessScore * 40.0
+			totalScore += scoreNewsRecency(candidate.publishedAtTime, query.explicitDateIntent)
 		} else if isDocs {
 			if strings.Contains(schemaLower, "techarticle") || strings.Contains(schemaLower, "apireference") || strings.Contains(schemaLower, "howto") || strings.Contains(schemaLower, "softwaresourcecode") {
 				totalScore += 12000.0
@@ -1280,7 +1461,7 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 		typeInDomain := strings.Contains(candidate.Domain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.effectiveDomain, query.siteTypeIntent) ||
 			strings.Contains(domainInfo.rootLabel, query.siteTypeIntent)
-		
+
 		if typeInDomain {
 			if isHomepage {
 				totalScore += 12000.0
@@ -1668,6 +1849,39 @@ func scoreFreshness(crawledAt time.Time, publishedAt time.Time) float64 {
 	return max(0.0, 50.0-days*0.15)
 }
 
+func scoreNewsRecency(publishedAt time.Time, explicitDateIntent bool) float64 {
+	if explicitDateIntent {
+		return 0
+	}
+	if publishedAt.IsZero() {
+		return -2500.0
+	}
+
+	days := time.Since(publishedAt).Hours() / 24
+	if days < 0 {
+		return 6000.0
+	}
+
+	switch {
+	case days <= 1:
+		return 9000.0
+	case days <= 7:
+		return 7000.0
+	case days <= 30:
+		return 4500.0
+	case days <= 90:
+		return 2000.0
+	case days <= 180:
+		return -2500.0
+	case days <= 365:
+		return -7000.0
+	case days <= 730:
+		return -12000.0
+	default:
+		return -18000.0
+	}
+}
+
 // scoreUserSignals computes a score from SQL-side signals (clicks, etc.).
 // Capped to prevent popularity bias from dominating.
 func scoreUserSignals(sqlScore float64) float64 {
@@ -1859,6 +2073,8 @@ func searchModeBonus(mode searchMode) float64 {
 		return 100.0
 	case searchModeFTSRelaxed:
 		return 60.0
+	case searchModeFTSRecent:
+		return 220.0
 	default:
 		return 0.0
 	}
