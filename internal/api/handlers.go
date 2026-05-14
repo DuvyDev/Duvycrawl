@@ -751,6 +751,33 @@ func clampIngestOutlinks(outlinks []string) []string {
 	return outlinks[:maxIngestOutlinks]
 }
 
+func parseIngestTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	}
+	for _, format := range formats {
+		if t, err := time.Parse(format, value); err == nil && isSaneIngestTime(t) {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func isSaneIngestTime(t time.Time) bool {
+	year := t.Year()
+	return !t.IsZero() && year >= 1990 && year <= time.Now().UTC().Year()+1
+}
+
 func isSearchResultsPageURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -764,10 +791,10 @@ func isSearchResultsPageURL(rawURL string) bool {
 	hasSearchTerm := query.Has("q") || query.Has("query") || query.Has("p") || query.Has("text") || query.Has("s")
 	looksLikeSearxInstance :=
 		path == "/search" && query.Has("q") &&
-		(query.Has("categories") || query.Has("language") || query.Has("engines") || query.Has("theme") || query.Has("time_range") || query.Has("safesearch"))
+			(query.Has("categories") || query.Has("language") || query.Has("engines") || query.Has("theme") || query.Has("time_range") || query.Has("safesearch"))
 	looksLikeWhoogleInstance :=
 		(path == "/search" || path == "/") && query.Has("q") &&
-		(query.Has("safe") || query.Has("tbm") || query.Has("start") || query.Has("region") || query.Has("near"))
+			(query.Has("safe") || query.Has("tbm") || query.Has("start") || query.Has("region") || query.Has("near"))
 
 	if strings.HasPrefix(host, "www.google.") || strings.HasPrefix(host, "google.") {
 		return path == "/search" || strings.HasPrefix(path, "/search/") || path == "/imgres" || strings.HasPrefix(path, "/sorry/")
@@ -860,14 +887,14 @@ func (h *Handlers) IngestPage(w http.ResponseWriter, r *http.Request) {
 
 	crawledAt := time.Now().UTC()
 	if req.CrawledAt != "" {
-		if t, err := time.Parse(time.RFC3339, req.CrawledAt); err == nil {
+		if t := parseIngestTime(req.CrawledAt); !t.IsZero() {
 			crawledAt = t
 		}
 	}
 
 	var publishedAt time.Time
 	if req.PublishedAt != "" {
-		publishedAt, _ = time.Parse(time.RFC3339, req.PublishedAt)
+		publishedAt = parseIngestTime(req.PublishedAt)
 	}
 
 	page := &storage.Page{
@@ -927,10 +954,10 @@ func (h *Handlers) IngestPage(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("extension page ingested", "url", normalized, "page_id", pageID, "outlinks_queued", outlinksQueued)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"indexed":          true,
-		"page_id":          pageID,
-		"url":              normalized,
-		"outlinks_queued":  outlinksQueued,
+		"indexed":         true,
+		"page_id":         pageID,
+		"url":             normalized,
+		"outlinks_queued": outlinksQueued,
 	})
 }
 
@@ -988,14 +1015,14 @@ func (h *Handlers) IngestBatch(w http.ResponseWriter, r *http.Request) {
 
 		crawledAt := time.Now().UTC()
 		if p.CrawledAt != "" {
-			if t, err := time.Parse(time.RFC3339, p.CrawledAt); err == nil {
+			if t := parseIngestTime(p.CrawledAt); !t.IsZero() {
 				crawledAt = t
 			}
 		}
 
 		var publishedAt time.Time
 		if p.PublishedAt != "" {
-			publishedAt, _ = time.Parse(time.RFC3339, p.PublishedAt)
+			publishedAt = parseIngestTime(p.PublishedAt)
 		}
 
 		page := &storage.Page{
