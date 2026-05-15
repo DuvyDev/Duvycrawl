@@ -718,15 +718,15 @@ func (s *SQLiteStorage) UpsertDomain(ctx context.Context, domain *Domain) error 
 // GetDomain retrieves a domain by its name.
 func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Domain, error) {
 	var d Domain
-	var robotsFetched, lastCrawled, createdAt sql.NullTime
+	var robotsFetched, lastCrawled, createdAt, lastHomepageRecrawl sql.NullTime
 
 	err := s.crawlerDB.QueryRowContext(ctx, `
-		SELECT id, domain, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at
+		SELECT id, domain, robots_txt, robots_fetched, last_crawled, pages_count, avg_response_ms, created_at, last_homepage_recrawl
 		FROM domains WHERE domain = ?
 	`, domainName).Scan(
 		&d.ID, &d.Domain, &d.RobotsTxt,
 		&robotsFetched, &lastCrawled, &d.PagesCount,
-		&d.AvgResponseMs, &createdAt,
+		&d.AvgResponseMs, &createdAt, &lastHomepageRecrawl,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -740,6 +740,9 @@ func (s *SQLiteStorage) GetDomain(ctx context.Context, domainName string) (*Doma
 	}
 	if lastCrawled.Valid {
 		d.LastCrawled = lastCrawled.Time
+	}
+	if lastHomepageRecrawl.Valid {
+		d.LastHomepageRecrawl = lastHomepageRecrawl.Time
 	}
 	if createdAt.Valid {
 		d.CreatedAt = createdAt.Time
@@ -843,6 +846,63 @@ func (s *SQLiteStorage) UpdateSeedURLLastEnqueued(ctx context.Context, url strin
 	`, t, url)
 	if err != nil {
 		return fmt.Errorf("updating last_enqueued for seed url %q: %w", url, err)
+	}
+	return nil
+}
+
+// --------------------------------------------------------------------------
+// Domain Homepage Re-Crawl
+// --------------------------------------------------------------------------
+
+// GetStaleDomainsForRecrawl returns domains with at least minPages indexed
+// whose homepage has not been re-crawled within the given interval.
+// Domains that already have seed URLs configured are excluded.
+func (s *SQLiteStorage) GetStaleDomainsForRecrawl(ctx context.Context, minPages int, interval time.Duration, limit int) ([]Domain, error) {
+	intervalSeconds := int(interval.Seconds())
+
+	rows, err := s.crawlerDB.QueryContext(ctx, `
+		SELECT d.id, d.domain, d.pages_count, d.last_crawled, d.last_homepage_recrawl, d.created_at
+		FROM domains d
+		LEFT JOIN seed_urls s ON d.domain = s.domain
+		WHERE d.pages_count >= ?
+		  AND s.id IS NULL
+		  AND COALESCE(d.last_homepage_recrawl, '1970-01-01') < datetime('now', '-' || ? || ' seconds')
+		ORDER BY d.pages_count DESC, COALESCE(d.last_homepage_recrawl, '1970-01-01') ASC
+		LIMIT ?
+	`, minPages, intervalSeconds, limit)
+	if err != nil {
+		return nil, fmt.Errorf("querying stale domains for recrawl: %w", err)
+	}
+	defer rows.Close()
+
+	var domains []Domain
+	for rows.Next() {
+		var d Domain
+		var lastCrawled, lastHomepageRecrawl, createdAt sql.NullTime
+		if err := rows.Scan(&d.ID, &d.Domain, &d.PagesCount, &lastCrawled, &lastHomepageRecrawl, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning stale domain: %w", err)
+		}
+		if lastCrawled.Valid {
+			d.LastCrawled = lastCrawled.Time
+		}
+		if lastHomepageRecrawl.Valid {
+			d.LastHomepageRecrawl = lastHomepageRecrawl.Time
+		}
+		if createdAt.Valid {
+			d.CreatedAt = createdAt.Time
+		}
+		domains = append(domains, d)
+	}
+	return domains, rows.Err()
+}
+
+// UpdateDomainHomepageRecrawl updates the last_homepage_recrawl timestamp for a domain.
+func (s *SQLiteStorage) UpdateDomainHomepageRecrawl(ctx context.Context, domain string, t time.Time) error {
+	_, err := s.crawlerDB.ExecContext(ctx, `
+		UPDATE domains SET last_homepage_recrawl = ? WHERE domain = ?
+	`, t, domain)
+	if err != nil {
+		return fmt.Errorf("updating last_homepage_recrawl for domain %q: %w", domain, err)
 	}
 	return nil
 }

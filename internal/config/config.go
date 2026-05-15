@@ -153,6 +153,15 @@ type SchedulerConfig struct {
 	// SeedRecrawlInterval is the default re-crawl interval for seed URLs
 	// that do not specify their own.
 	SeedRecrawlInterval time.Duration `yaml:"seed_recrawl_interval"`
+	// DomainRecrawlInterval is how often known domain homepages are re-crawled
+	// to discover new content. Set to 0 to disable domain recrawl.
+	DomainRecrawlInterval time.Duration `yaml:"domain_recrawl_interval"`
+	// DomainRecrawlMinPages is the minimum number of indexed pages a domain
+	// must have before it qualifies for automatic homepage re-crawl.
+	DomainRecrawlMinPages int `yaml:"domain_recrawl_min_pages"`
+	// DomainRecrawlBatchLimit is the maximum number of domain homepages
+	// to re-enqueue per scheduler tick.
+	DomainRecrawlBatchLimit int `yaml:"domain_recrawl_batch_limit"`
 }
 
 // InterestConfig represents a manually declared interest term with its weight.
@@ -270,8 +279,11 @@ func DefaultConfig() *Config {
 			},
 			MaxPagesPerFingerprint: 10000,
 			Scheduler: SchedulerConfig{
-				TickInterval:        10 * time.Minute,
-				SeedRecrawlInterval: 24 * time.Hour,
+				TickInterval:            10 * time.Minute,
+				SeedRecrawlInterval:     24 * time.Hour,
+				DomainRecrawlInterval:   72 * time.Hour,
+				DomainRecrawlMinPages:   10,
+				DomainRecrawlBatchLimit: 50,
 			},
 		},
 		Rendering: RenderingConfig{
@@ -501,6 +513,18 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.Scheduler.SeedRecrawlInterval < 1*time.Minute {
 		return fmt.Errorf("crawler.scheduler.seed_recrawl_interval must be >= 1m, got %s", c.Crawler.Scheduler.SeedRecrawlInterval)
+	}
+	if c.Crawler.Scheduler.DomainRecrawlInterval < 0 {
+		return fmt.Errorf("crawler.scheduler.domain_recrawl_interval must be >= 0, got %s", c.Crawler.Scheduler.DomainRecrawlInterval)
+	}
+	if c.Crawler.Scheduler.DomainRecrawlInterval > 0 && c.Crawler.Scheduler.DomainRecrawlInterval < 1*time.Hour {
+		return fmt.Errorf("crawler.scheduler.domain_recrawl_interval must be >= 1h when enabled, got %s", c.Crawler.Scheduler.DomainRecrawlInterval)
+	}
+	if c.Crawler.Scheduler.DomainRecrawlMinPages < 0 {
+		return fmt.Errorf("crawler.scheduler.domain_recrawl_min_pages must be >= 0, got %d", c.Crawler.Scheduler.DomainRecrawlMinPages)
+	}
+	if c.Crawler.Scheduler.DomainRecrawlBatchLimit < 0 {
+		return fmt.Errorf("crawler.scheduler.domain_recrawl_batch_limit must be >= 0, got %d", c.Crawler.Scheduler.DomainRecrawlBatchLimit)
 	}
 	if c.Crawler.MaxPagesPerFingerprint < 0 {
 		return fmt.Errorf("crawler.max_pages_per_fingerprint must be >= 0, got %d", c.Crawler.MaxPagesPerFingerprint)

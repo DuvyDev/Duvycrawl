@@ -103,10 +103,17 @@ crawler:
       - term: "destiny"
         weight: 5.0
 
-  # Scheduler controls how often seed URLs are re-crawled.
+  # Scheduler controls how often seed URLs and domain homepages are re-crawled.
   scheduler:
     tick_interval: 10m
     seed_recrawl_interval: 24h
+    # How often known domain homepages are re-crawled to discover new content.
+    # Set to 0 to disable. Domains already covered by seeds are excluded.
+    domain_recrawl_interval: 72h
+    # Minimum indexed pages a domain must have to qualify for homepage re-crawl.
+    domain_recrawl_min_pages: 10
+    # Max domain homepages to re-enqueue per scheduler tick (every 10m).
+    domain_recrawl_batch_limit: 50
 
 # Optional JavaScript rendering fallback.
 # Keep disabled by default: regular HTTP crawling is much cheaper and remains

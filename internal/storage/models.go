@@ -70,14 +70,15 @@ const (
 
 // Domain represents a known domain with crawl metadata and statistics.
 type Domain struct {
-	ID            int64     `json:"id"`
-	Domain        string    `json:"domain"`
-	RobotsTxt     string    `json:"-"` // Raw robots.txt content, excluded from JSON
-	RobotsFetched time.Time `json:"robots_fetched,omitempty"`
-	LastCrawled   time.Time `json:"last_crawled,omitempty"`
-	PagesCount    int       `json:"pages_count"`
-	AvgResponseMs int       `json:"avg_response_ms"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID                   int64     `json:"id"`
+	Domain               string    `json:"domain"`
+	RobotsTxt            string    `json:"-"` // Raw robots.txt content, excluded from JSON
+	RobotsFetched        time.Time `json:"robots_fetched,omitempty"`
+	LastCrawled          time.Time `json:"last_crawled,omitempty"`
+	LastHomepageRecrawl  time.Time `json:"last_homepage_recrawl,omitempty"`
+	PagesCount           int       `json:"pages_count"`
+	AvgResponseMs        int       `json:"avg_response_ms"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 // SeedURL represents a seed URL with its own re-crawl schedule.

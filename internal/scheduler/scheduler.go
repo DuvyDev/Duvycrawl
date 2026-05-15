@@ -39,6 +39,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.logger.Info("scheduler started",
 		"tick_interval", s.cfg.TickInterval,
 		"default_seed_interval", s.cfg.SeedRecrawlInterval,
+		"domain_recrawl_interval", s.cfg.DomainRecrawlInterval,
+		"domain_recrawl_min_pages", s.cfg.DomainRecrawlMinPages,
+		"domain_recrawl_batch_limit", s.cfg.DomainRecrawlBatchLimit,
 	)
 
 	// Run immediately on start, then periodically.
@@ -76,6 +79,8 @@ func (s *Scheduler) Stop() {
 // 2. Re-enqueue them into the frontier.
 // 3. Update their last_enqueued timestamp.
 // 4. Reset any stalled (orphaned) jobs.
+// 5. Re-enqueue stale domain homepages.
+// 6. Fetch manually enqueued jobs.
 func (s *Scheduler) tick(ctx context.Context) {
 	s.logger.Debug("scheduler tick starting")
 
@@ -112,6 +117,49 @@ func (s *Scheduler) tick(ctx context.Context) {
 	// Reset stalled jobs regardless of seed re-crawl result.
 	if _, err := s.store.ResetStalledJobs(ctx, 30*time.Minute); err != nil {
 		s.logger.Warn("failed to reset stalled jobs", "error", err)
+	}
+
+	// Domain homepage re-crawl: revisit homepages of known domains to
+	// discover new content without re-crawling every individual page.
+	if s.cfg.DomainRecrawlInterval > 0 {
+		minPages := s.cfg.DomainRecrawlMinPages
+		if minPages <= 0 {
+			minPages = 10
+		}
+		batchLimit := s.cfg.DomainRecrawlBatchLimit
+		if batchLimit <= 0 {
+			batchLimit = 50
+		}
+
+		staleDomains, err := s.store.GetStaleDomainsForRecrawl(
+			ctx, minPages, s.cfg.DomainRecrawlInterval, batchLimit,
+		)
+		if err != nil {
+			s.logger.Error("failed to get stale domains for recrawl", "error", err)
+		} else if len(staleDomains) > 0 {
+			homepageURLs := make([]string, len(staleDomains))
+			for i, d := range staleDomains {
+				homepageURLs[i] = "https://" + d.Domain + "/"
+			}
+
+			if _, err := s.frontier.AddBatchDirect(ctx, homepageURLs, 0, storage.PriorityRecrawl); err != nil {
+				s.logger.Error("failed to re-enqueue domain homepages",
+					"error", err,
+					"count", len(homepageURLs),
+				)
+			} else {
+				now := time.Now().UTC()
+				for _, d := range staleDomains {
+					if err := s.store.UpdateDomainHomepageRecrawl(ctx, d.Domain, now); err != nil {
+						s.logger.Warn("failed to update domain last_homepage_recrawl",
+							"domain", d.Domain, "error", err)
+					}
+				}
+				s.logger.Info("re-enqueued stale domain homepages for re-crawl",
+					"count", len(staleDomains),
+				)
+			}
+		}
 	}
 
 	// Fetch manually enqueued jobs (e.g. from the Search API)

@@ -131,6 +131,16 @@ type Storage interface {
 	// UpdateSeedURLLastEnqueued updates the last_enqueued timestamp for a seed URL.
 	UpdateSeedURLLastEnqueued(ctx context.Context, url string, t time.Time) error
 
+	// --- Domain Homepage Re-Crawl ---
+
+	// GetStaleDomainsForRecrawl returns domains with enough indexed pages whose
+	// homepage has not been re-crawled within the given interval. Domains that
+	// already have seed URLs are excluded to avoid duplication.
+	GetStaleDomainsForRecrawl(ctx context.Context, minPages int, interval time.Duration, limit int) ([]Domain, error)
+
+	// UpdateDomainHomepageRecrawl updates the last_homepage_recrawl timestamp for a domain.
+	UpdateDomainHomepageRecrawl(ctx context.Context, domain string, t time.Time) error
+
 	// --- Discovered Resources ---
 
 	// UpsertDiscoveredResource inserts or updates a non-HTML discovery asset.

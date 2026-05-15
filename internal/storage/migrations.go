@@ -228,6 +228,9 @@ var crawlerMigrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_seed_urls_domain ON seed_urls(domain)`,
 	`CREATE INDEX IF NOT EXISTS idx_seed_urls_last_enqueued ON seed_urls(last_enqueued)`,
+
+	// --- Domain homepage re-crawl ---
+	`ALTER TABLE domains ADD COLUMN last_homepage_recrawl DATETIME`,
 }
 
 var graphMigrations = []string{
