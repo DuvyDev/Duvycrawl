@@ -665,8 +665,8 @@ func (e *Engine) processRenderBacklogItem(ctx context.Context, logger *slog.Logg
 			logger.Debug("browser renderer busy, keeping URL in render backlog", "attempts", item.attempts, "delay", delay)
 			return
 		}
-		logger.Warn("browser renderer remained busy, dropping render backlog item", "attempts", item.attempts)
-		e.pagesErrored.Add(1)
+		logger.Warn("browser renderer remained busy, re-queuing to main frontier", "attempts", item.attempts)
+		e.retryOrFail(job, logger, "browser renderer capacity saturated", err)
 		return
 	}
 	if err != nil {
