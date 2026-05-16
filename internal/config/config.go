@@ -162,6 +162,10 @@ type SchedulerConfig struct {
 	// DomainRecrawlBatchLimit is the maximum number of domain homepages
 	// to re-enqueue per scheduler tick.
 	DomainRecrawlBatchLimit int `yaml:"domain_recrawl_batch_limit"`
+	// DomainRecrawlDepth is the starting depth for re-enqueued domain homepages.
+	// Higher values limit the crawl cascade. With MaxDepth=3 and depth=2,
+	// only the homepage's direct links are crawled (1 level of follow).
+	DomainRecrawlDepth int `yaml:"domain_recrawl_depth"`
 }
 
 // InterestConfig represents a manually declared interest term with its weight.
@@ -284,6 +288,7 @@ func DefaultConfig() *Config {
 				DomainRecrawlInterval:   72 * time.Hour,
 				DomainRecrawlMinPages:   10,
 				DomainRecrawlBatchLimit: 50,
+				DomainRecrawlDepth:      2,
 			},
 		},
 		Rendering: RenderingConfig{
@@ -525,6 +530,9 @@ func (c *Config) validate() error {
 	}
 	if c.Crawler.Scheduler.DomainRecrawlBatchLimit < 0 {
 		return fmt.Errorf("crawler.scheduler.domain_recrawl_batch_limit must be >= 0, got %d", c.Crawler.Scheduler.DomainRecrawlBatchLimit)
+	}
+	if c.Crawler.Scheduler.DomainRecrawlDepth < 0 {
+		return fmt.Errorf("crawler.scheduler.domain_recrawl_depth must be >= 0, got %d", c.Crawler.Scheduler.DomainRecrawlDepth)
 	}
 	if c.Crawler.MaxPagesPerFingerprint < 0 {
 		return fmt.Errorf("crawler.max_pages_per_fingerprint must be >= 0, got %d", c.Crawler.MaxPagesPerFingerprint)

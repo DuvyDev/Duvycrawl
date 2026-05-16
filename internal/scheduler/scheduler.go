@@ -142,7 +142,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 				homepageURLs[i] = "https://" + d.Domain + "/"
 			}
 
-			if _, err := s.frontier.AddBatchDirect(ctx, homepageURLs, 0, storage.PriorityRecrawl); err != nil {
+			if _, err := s.frontier.AddBatchDirect(ctx, homepageURLs, s.cfg.DomainRecrawlDepth, storage.PriorityRecrawl); err != nil {
 				s.logger.Error("failed to re-enqueue domain homepages",
 					"error", err,
 					"count", len(homepageURLs),

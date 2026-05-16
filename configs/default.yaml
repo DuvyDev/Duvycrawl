@@ -114,6 +114,10 @@ crawler:
     domain_recrawl_min_pages: 10
     # Max domain homepages to re-enqueue per scheduler tick (every 10m).
     domain_recrawl_batch_limit: 50
+    # Starting depth for domain homepages. With max_depth=3 and depth=2,
+    # only the homepage's direct links are crawled (1 level of follow).
+    # Lower values = deeper cascade = more URLs discovered per domain.
+    domain_recrawl_depth: 2
 
 # Optional JavaScript rendering fallback.
 # Keep disabled by default: regular HTTP crawling is much cheaper and remains
