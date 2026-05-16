@@ -21,7 +21,7 @@ import (
 
 // bloomCapacity is the expected number of unique URLs the Bloom filter
 // should handle before the false-positive rate starts to degrade.
-const bloomCapacity uint = 10_000_000
+const bloomCapacity uint = 20_000_000
 
 // bloomFPP is the target false-positive probability. 0.001 = 0.1%.
 // In practice this means ~1 in 1,000 truly new URLs may be incorrectly
