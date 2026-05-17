@@ -99,6 +99,11 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	// --- Phase 0: Domain-aware intent enrichment ---
+	// Detects queries like "elpais uruguay" or "el pais uruguay" where tokens
+	// (or adjacent stopword+token concatenations) match a known indexed domain.
+	s.enrichQueryWithDomainLookup(searchCtx, &q)
+
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
 
 	// --- Phase 1: Retrieval ---
@@ -159,7 +164,7 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		mode     searchMode
 		ftsQuery string
 	}{
-		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.tokens)},
+		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQueryFromNormalized(q.normalized)},
 		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.tokens)},
 		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q)},
 		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q)},
@@ -2477,7 +2482,11 @@ func weightedTokenFrequency(queryTokens []string, idfMap map[string]float64, fie
 // FTS query builders (simplified to 4 plans)
 // ---------------------------------------------------------------------------
 
-func buildFTSPhraseQuery(tokens []string) string {
+func buildFTSPhraseQueryFromNormalized(normalized string) string {
+	if normalized == "" {
+		return ""
+	}
+	tokens := strings.Fields(normalized)
 	if len(tokens) == 0 {
 		return ""
 	}
@@ -2583,13 +2592,12 @@ func sortTokensByRelevance(tokens []string, idfMap map[string]float64) []string 
 }
 
 // splitCompoundTokens splits compound words like "tiendainglesa" into "tienda" + "inglesa"
-// by validating splits against the FTS5 vocabulary. Only applies to tokens ≥ 12 chars
-// to avoid splitting normal words like "inglesa" or "montevideo".
+// by validating splits against the FTS5 vocabulary.
 func (s *SQLiteStorage) splitCompoundTokens(tokens []string) []string {
 	// Collect tokens that are long enough to be compound words
 	candidates := make([]string, 0)
 	for _, tok := range tokens {
-		if len([]rune(tok)) >= 12 {
+		if len([]rune(tok)) >= 7 { // Lowered from 12 to 7 to handle e.g. "elpais" -> "el" + "pais"
 			candidates = append(candidates, tok)
 		}
 	}
@@ -2819,4 +2827,57 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	}
 
 	return results, total, nil
+}
+
+// enrichQueryWithDomainLookup checks if tokens or adjacent combinations form a known domain
+// to recover navigational intent that standard heuristics missed (e.g. "el pais uruguay" -> elpais.com.uy).
+func (s *SQLiteStorage) enrichQueryWithDomainLookup(ctx context.Context, q *searchQuery) {
+	if q.intent == intentNavigational {
+		return // Already classified
+	}
+	if len(q.tokens) == 0 {
+		return
+	}
+
+	// 1. Try raw tokens that are long enough to be domain roots
+	candidates := make(map[string]struct{})
+	for _, tok := range q.tokens {
+		if len([]rune(tok)) >= 4 {
+			candidates[tok] = struct{}{}
+		}
+	}
+
+	// 2. Try adjacent combinations (especially with stopwords which were stripped from q.tokens but are in q.normalized)
+	normTokens := strings.Fields(q.normalized)
+	for i := 0; i < len(normTokens)-1; i++ {
+		concat := normTokens[i] + normTokens[i+1]
+		if len([]rune(concat)) >= 4 {
+			candidates[concat] = struct{}{}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Build WHERE clause to check if any of these candidates exactly match a domain's root label
+	var args []any
+	var conditions []string
+	for c := range candidates {
+		// e.g. "elpais.com.uy", "elpais.uy", "www.elpais.com"
+		conditions = append(conditions, "domain = ? OR domain LIKE ? OR domain LIKE ? OR domain LIKE ?")
+		args = append(args, c, c+".%", "www."+c+".%", "%.%."+c+".%")
+	}
+
+	query := fmt.Sprintf(`SELECT domain FROM pages WHERE %s LIMIT 1`, strings.Join(conditions, " OR "))
+	
+	var matchedDomain string
+	err := s.searchContentDB.QueryRowContext(ctx, query, args...).Scan(&matchedDomain)
+	if err == nil && matchedDomain != "" {
+		// Found a match! Upgrade to navigational intent
+		info := classifySearchDomain(matchedDomain)
+		q.intent = intentNavigational
+		q.domainLike = matchedDomain
+		q.navTerm = info.rootLabel
+	}
 }
