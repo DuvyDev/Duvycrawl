@@ -1421,7 +1421,7 @@ func (s *SQLiteStorage) scoreSearchCandidate(candidate searchCandidate, query se
 			if strings.Contains(schemaLower, "product") || strings.Contains(schemaLower, "offer") {
 				totalScore -= 8000.0
 			}
-			totalScore += freshnessScore * 40.0
+			totalScore += freshnessScore * 80.0
 			totalScore += scoreNewsRecency(candidate.publishedAtTime, query.explicitDateIntent)
 		} else if isDocs {
 			if strings.Contains(schemaLower, "techarticle") || strings.Contains(schemaLower, "apireference") || strings.Contains(schemaLower, "howto") || strings.Contains(schemaLower, "softwaresourcecode") {
@@ -1859,31 +1859,38 @@ func scoreNewsRecency(publishedAt time.Time, explicitDateIntent bool) float64 {
 		return 0
 	}
 	if publishedAt.IsZero() {
-		return -2500.0
+		return -5000.0
 	}
 
 	days := time.Since(publishedAt).Hours() / 24
 	if days < 0 {
-		return 6000.0
+		return 20000.0
 	}
 
+	// Aggressive tiers: gaps between tiers (3000-5000) exceed the max variance
+	// from content/BM25 signals (~1500), ensuring fresher articles always rank
+	// above older ones within news-intent queries.
 	switch {
 	case days <= 1:
-		return 9000.0
+		return 20000.0
+	case days <= 3:
+		return 16000.0
 	case days <= 7:
+		return 12000.0
+	case days <= 14:
 		return 7000.0
 	case days <= 30:
-		return 4500.0
+		return 3000.0
 	case days <= 90:
-		return 2000.0
+		return -2000.0
 	case days <= 180:
-		return -2500.0
+		return -8000.0
 	case days <= 365:
-		return -7000.0
+		return -15000.0
 	case days <= 730:
-		return -12000.0
+		return -22000.0
 	default:
-		return -18000.0
+		return -30000.0
 	}
 }
 
