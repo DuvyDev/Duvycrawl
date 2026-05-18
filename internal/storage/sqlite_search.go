@@ -46,6 +46,7 @@ type searchQuery struct {
 	normalized         string
 	tokens             []string // significant tokens (stopwords removed)
 	ftsTokens          []string // stopword-filtered tokens for FTS queries
+	phraseTokens       []string // for FTS phrase query: stopwords kept, siteType/platform removed
 	navTerm            string
 	domainLike         string
 	intent             queryIntent
@@ -98,6 +99,9 @@ func (s *SQLiteStorage) SearchPages(ctx context.Context, query string, limit, of
 
 	searchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+
+	// --- Phase 0: Domain-aware intent enrichment ---
+	s.enrichQueryWithDomainLookup(searchCtx, &q)
 
 	q.idfMap, _ = s.getSearchIDFMap(searchCtx, q.tokens)
 
@@ -159,7 +163,7 @@ func (s *SQLiteStorage) retrieveSearchCandidates(searchCtx context.Context, q se
 		mode     searchMode
 		ftsQuery string
 	}{
-		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.tokens)},
+		{mode: searchModeFTSPhrase, ftsQuery: buildFTSPhraseQuery(q.phraseTokens)},
 		{mode: searchModeFTSExact, ftsQuery: buildFTSExactQuery(q.tokens)},
 		{mode: searchModeFTSCore, ftsQuery: buildFTSCoreQuery(q)},
 		{mode: searchModeFTSRelaxed, ftsQuery: buildFTSRelaxedQuery(q)},
@@ -424,6 +428,23 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		searchTokens = allTokensFiltered
 	}
 
+	// Phrase tokens: same filter as searchTokens but preserving stopwords.
+	// "el pais uruguay" → ["el", "pais", "uruguay"] (keeps "el")
+	// "noticias uruguay" → ["uruguay"] (removes siteType "noticias")
+	phraseTokens := make([]string, 0, len(allTokens))
+	for _, tok := range allTokens {
+		if tok == platformIntent {
+			continue
+		}
+		if tok == siteTypeIntent {
+			continue
+		}
+		phraseTokens = append(phraseTokens, tok)
+	}
+	if len(phraseTokens) == 0 {
+		phraseTokens = allTokens
+	}
+
 	// Compound word splitting: "tiendainglesa" → "tienda" + "inglesa"
 	// For tokens ≥ 7 chars, try all 2-way splits and validate against FTS vocab.
 	searchTokens = s.splitCompoundTokens(searchTokens)
@@ -447,6 +468,7 @@ func (s *SQLiteStorage) newSearchQuery(query string) searchQuery {
 		normalized:         normalized,
 		tokens:             searchTokens,
 		ftsTokens:          searchTokens,
+		phraseTokens:       phraseTokens,
 		navTerm:            navTerm,
 		domainLike:         domainLike,
 		intent:             intent,
@@ -1854,31 +1876,36 @@ func scoreNewsRecency(publishedAt time.Time, explicitDateIntent bool) float64 {
 		return 0
 	}
 	if publishedAt.IsZero() {
-		return -2500.0
+		return -4000.0
 	}
 
 	days := time.Since(publishedAt).Hours() / 24
 	if days < 0 {
-		return 6000.0
+		return 12000.0
 	}
 
+	// Tiers with enough gap (~3000) to dominate over BM25/content variance (~1500)
 	switch {
 	case days <= 1:
-		return 9000.0
+		return 12000.0
+	case days <= 3:
+		return 10000.0
 	case days <= 7:
-		return 7000.0
+		return 8000.0
+	case days <= 14:
+		return 5000.0
 	case days <= 30:
-		return 4500.0
-	case days <= 90:
 		return 2000.0
+	case days <= 90:
+		return -1000.0
 	case days <= 180:
-		return -2500.0
+		return -5000.0
 	case days <= 365:
-		return -7000.0
+		return -10000.0
 	case days <= 730:
-		return -12000.0
+		return -16000.0
 	default:
-		return -18000.0
+		return -22000.0
 	}
 }
 
@@ -2583,13 +2610,12 @@ func sortTokensByRelevance(tokens []string, idfMap map[string]float64) []string 
 }
 
 // splitCompoundTokens splits compound words like "tiendainglesa" into "tienda" + "inglesa"
-// by validating splits against the FTS5 vocabulary. Only applies to tokens ≥ 12 chars
-// to avoid splitting normal words like "inglesa" or "montevideo".
+// by validating splits against the FTS5 vocabulary.
 func (s *SQLiteStorage) splitCompoundTokens(tokens []string) []string {
 	// Collect tokens that are long enough to be compound words
 	candidates := make([]string, 0)
 	for _, tok := range tokens {
-		if len([]rune(tok)) >= 12 {
+		if len([]rune(tok)) >= 7 {
 			candidates = append(candidates, tok)
 		}
 	}
@@ -2819,4 +2845,97 @@ func (s *SQLiteStorage) SearchImages(ctx context.Context, query string, limit, o
 	}
 
 	return results, total, nil
+}
+
+// enrichQueryWithDomainLookup checks if tokens or adjacent combinations form a known domain
+// to recover navigational intent that standard heuristics missed (e.g. "el pais uruguay" -> elpais.com.uy).
+// Guards: skips if freshnessIntent or siteTypeIntent already set (those are stronger signals),
+// and filters out tokens that are common words in the FTS index to avoid false matches.
+func (s *SQLiteStorage) enrichQueryWithDomainLookup(ctx context.Context, q *searchQuery) {
+	if q.intent == intentNavigational {
+		return // Already classified
+	}
+	// Don't override intent when the query has clear informational signals
+	// (e.g. "noticias uruguay" should stay informational, not flip to navigational
+	// because "uruguay" happens to match a domain).
+	if q.freshnessIntent || q.siteTypeIntent != "" {
+		return
+	}
+	if len(q.tokens) == 0 {
+		return
+	}
+
+	// 1. Try raw tokens that are NOT common words in the FTS index.
+	//    "elpais" won't be in FTS vocab (compound, not a real word) → good candidate.
+	//    "uruguay" or "noticias" WILL be in FTS vocab → skip them.
+	candidates := make(map[string]struct{})
+	for _, tok := range q.tokens {
+		if len([]rune(tok)) >= 4 && !s.isKnownFTSWord(ctx, tok) {
+			candidates[tok] = struct{}{}
+		}
+	}
+
+	// 2. Try adjacent combinations (especially stopword + token → brand name).
+	//    e.g. "el" + "pais" → "elpais". Only add if NOT a known FTS word.
+	normTokens := strings.Fields(q.normalized)
+	for i := 0; i < len(normTokens)-1; i++ {
+		concat := normTokens[i] + normTokens[i+1]
+		if len([]rune(concat)) >= 4 && !s.isKnownFTSWord(ctx, concat) {
+			candidates[concat] = struct{}{}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Build WHERE clause to check if any of these candidates exactly match a domain's root label
+	var args []any
+	var conditions []string
+	for c := range candidates {
+		// e.g. "elpais.com.uy", "elpais.uy", "www.elpais.com"
+		conditions = append(conditions, "domain = ? OR domain LIKE ? OR domain LIKE ? OR domain LIKE ?")
+		args = append(args, c, c+".%", "www."+c+".%", "%.%."+c+".%")
+	}
+
+	query := fmt.Sprintf(`SELECT domain FROM pages WHERE %s LIMIT 1`, strings.Join(conditions, " OR "))
+
+	var matchedDomain string
+	err := s.searchContentDB.QueryRowContext(ctx, query, args...).Scan(&matchedDomain)
+	if err == nil && matchedDomain != "" {
+		// Found a match! Upgrade to navigational intent
+		info := classifySearchDomain(matchedDomain)
+		q.intent = intentNavigational
+		q.domainLike = matchedDomain
+		q.navTerm = info.rootLabel
+	}
+}
+
+// isKnownFTSWord checks if a token exists in the FTS5 vocabulary.
+// Common words like "uruguay", "noticias" will return true.
+// Compound/brand tokens like "elpais" will return false.
+func (s *SQLiteStorage) isKnownFTSWord(ctx context.Context, token string) bool {
+	if token == "" {
+		return false
+	}
+
+	// Check cache first
+	if s.cache != nil {
+		cacheKey := "ftsword:" + token
+		if cached, ok := s.cache.Get(cacheKey); ok {
+			return cached.(bool)
+		}
+	}
+
+	var count int
+	err := s.searchContentDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pages_fts_vocab WHERE term = ?`, token).Scan(&count)
+
+	known := err == nil && count > 0
+
+	if s.cache != nil {
+		s.cache.SetWithTTL("ftsword:"+token, known, 1, 24*time.Hour)
+	}
+
+	return known
 }
